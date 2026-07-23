@@ -1,0 +1,9 @@
+# offgrid-trader backend dependencies (all free / local)
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.29,<1.0
+yfinance>=0.2.40
+tradingview-ta>=3.3.0
+requests>=2.31
+httpx>=0.27
+python-dotenv>=1.0
+pydantic>=2.6,<3.0
