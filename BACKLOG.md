@@ -4,9 +4,24 @@ Future ideas and planned improvements. No priority order within each item.
 
 ---
 
-## 0. Architecture diagrams
+## 0. Data visualizer + beginner documentation
 
-Create diagrams to make the system easier to understand at a glance.
+Add charts and plain-English explanations so people new to technical analysis can understand what the system is seeing and why it fires a signal.
+
+- **Price & volume chart** — candlestick or OHLC chart with volume bars for the scanned ticker
+- **Indicator overlays** — plot EMA20/50/200, Bollinger Bands, support/resistance levels on the price chart
+- **RSI panel** — show RSI across 1H / 4H / 1D with oversold/overbought bands highlighted
+- **MACD panel** — histogram + signal line, crossover markers
+- **Signal annotation** — mark exactly where on the chart the system detected an opportunity and why
+- **Beginner tooltips / glossary** — on hover or as a collapsible section, explain each indicator in plain English ("RSI above 70 means the stock may be overbought — it has risen quickly and could pull back")
+- **"Why this signal?" walkthrough** — step-by-step breakdown: here is the data → here is what the indicator says → here is what the AI concluded → here is the opportunity detected
+- Rendering options: Recharts or Chart.js in the existing React UI, or a separate lightweight page
+
+---
+
+## 0b. Architecture diagrams
+
+Create diagrams to make the system easier to understand at a glance for developers.
 
 - **Pipeline diagram** — ticker → data fetch → Ollama analysis → opportunity detection → save → alert
 - **Infrastructure diagram** — Docker Compose services, ports, shared `ai-shared` network, volumes
