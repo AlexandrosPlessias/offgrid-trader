@@ -61,6 +61,17 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# offgrid-trader local database
+*.db
+offgrid_trader.db
+
+# offgrid-trader Docker data (SQLite DB bind mount)
+/data/
+
+# Frontend
+node_modules/
+frontend/dist/
+
 # Flask stuff:
 instance/
 .webassets-cache

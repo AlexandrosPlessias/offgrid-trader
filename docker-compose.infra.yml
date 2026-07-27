@@ -1,0 +1,79 @@
+name: ai-shared
+
+# Shared infrastructure — Ollama (LLM runtime) + Portainer.
+#
+# CPU-safe by default. GPU is enabled via the override:
+#   ./start-infra.sh          ← recommended (auto-detects GPU)
+#   docker compose -f docker-compose.infra.yml up -d                     (CPU)
+#   docker compose -f docker-compose.infra.yml \
+#                  -f docker-compose.override.gpu.yml up -d              (GPU)
+#
+# The project name is fixed to "ai-shared" so this file is idempotent
+# from any directory — whichever project runs it first wins, subsequent
+# calls detect running containers and exit cleanly.
+
+services:
+
+  # ── Ollama (shared LLM runtime) ──────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:0.9.0
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+    networks:
+      - ai-shared
+
+  # ── Model pull (one-shot; pulls all models needed by all projects) ────────────
+  ollama-pull:
+    image: ollama/ollama:0.9.0
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Waiting for Ollama..."
+        until ollama list >/dev/null 2>&1; do sleep 2; done
+        echo "Pulling offgrid-trader model (qwen2.5:14b ~9 GB)..."
+        ollama pull qwen2.5:14b
+        echo "Pulling insurance-poc models..."
+        ollama pull qwen2.5:7b
+        ollama pull qwen2.5:3b
+        ollama pull nomic-embed-text
+        echo "All models ready."
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - ai-shared
+
+  # ── Portainer CE (shared container management UI) ────────────────────────────
+  portainer:
+    image: portainer/portainer-ce:2.27.4
+    container_name: portainer
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+      - ai-shared
+
+networks:
+  ai-shared:
+    name: ai-shared
+    driver: bridge
+
+volumes:
+  ollama_models:
+    name: ollama_models
+  portainer_data:
+    name: portainer_data

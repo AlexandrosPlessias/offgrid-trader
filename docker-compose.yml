@@ -1,0 +1,76 @@
+# offgrid-trader — local, zero-cost AI stock monitor.
+#
+# Ollama and Portainer are provided by the shared infra stack.
+# Start it first (safe to re-run — idempotent):
+#
+#   docker compose -f docker-compose.infra.yml up -d
+#
+# Then start this project:
+#
+#   docker compose up --build                                        (GPU)
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.override.cpu.yml up --build    (CPU-only)
+
+services:
+
+  # ── Backend API (FastAPI) ────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: qwen2.5:14b
+      DATABASE_PATH: /app/data/offgrid_trader.db
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://aspire:18889
+    ports:
+      - "8010:8000"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - offgrid-net
+      - ai-shared
+
+  # ── Aspire dashboard (OpenTelemetry traces + logs UI) ───────────────────────
+  aspire:
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:9.0
+    container_name: aspire-offgrid
+    restart: unless-stopped
+    ports:
+      - "18889:18888"
+      - "4319:18889"
+      - "4320:18890"
+    environment:
+      DOTNET_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS: "true"
+    networks:
+      - offgrid-net
+
+  # ── Frontend UI (React / Vite → nginx) ──────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "5174:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - offgrid-net
+
+networks:
+  offgrid-net:
+    driver: bridge
+  ai-shared:
+    external: true
+    name: ai-shared
