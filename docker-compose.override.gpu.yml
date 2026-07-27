@@ -1,0 +1,16 @@
+# GPU override — adds NVIDIA device reservation to the shared Ollama service.
+# Applied automatically by start-infra.sh when an NVIDIA GPU is detected.
+# Apply manually: docker compose -f docker-compose.infra.yml \
+#                                -f docker-compose.override.gpu.yml up -d
+
+name: ai-shared
+
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
