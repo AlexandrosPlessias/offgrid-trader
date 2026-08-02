@@ -3,7 +3,9 @@
 First-time setup for **offgrid-trader**. After this, see
 [USAGE.md](USAGE.md) for day-to-day operation.
 
-The entire stack runs in Docker — no Python venv and no native Ollama required.
+The entire stack runs in Docker — no Python venv required.
+On **macOS**, native Ollama is used so inference runs on Apple Metal GPU (Docker containers
+cannot access it). On Windows/Linux, Ollama runs inside Docker.
 It is fully **local and zero-cost**: market data comes from free sources
 (yfinance, tradingview-ta) and the AI runs on a local Ollama `qwen2.5:14b`
 model. No paid or cloud APIs are used.
@@ -37,8 +39,8 @@ to verify the result.
 |---|---|
 | **Docker Desktop** | Enable WSL2 integration: Settings → Resources → WSL Integration → turn on your Ubuntu distro |
 | **WSL2 + Ubuntu** | 22.04 or 24.04 (`wsl --install -d Ubuntu` from PowerShell) |
-| **RAM** | 16 GB minimum (`qwen2.5:14b` ≈ 9 GB resident) |
-| **Disk** | ~15 GB free (model weights + images) |
+| **RAM** | 8 GB minimum (`qwen2.5:7b` ≈ 5 GB resident; 16 GB recommended for `qwen2.5:14b` on Windows/Linux) |
+| **Disk** | ~6 GB free (macOS: `qwen2.5:7b` in `~/.ollama`; Windows/Linux: model weights + images in Docker volume) |
 | **NVIDIA GPU** *(recommended)* | With the NVIDIA Container Toolkit for fast inference. CPU-only works too — see [section 5](#5-first-run) |
 | **git** | To clone the repo |
 
@@ -116,7 +118,7 @@ table below highlights the values you'll most likely change:
 | `WATCHLIST` | No | Comma-separated tickers to monitor (default: `AAPL,MSFT,NVDA,TSLA,AMD,SPY`) |
 | `SCAN_INTERVAL_MINUTES` | No | How often to scan while the market is open (default: `15`) |
 | `CONFIDENCE_FLOOR` | No | Minimum confidence (0–100) to store/alert on a signal (default: `65`) |
-| `OLLAMA_MODEL` | No | Local model tag (default: `qwen2.5:14b`) |
+| `OLLAMA_MODEL` | No | Local model tag (default: `qwen2.5:7b`; use `qwen2.5:14b` on 16+ GB RAM) |
 | `EMAIL_ENABLED` | No | `true` to send Gmail alerts (needs the SMTP vars below) |
 | `SMTP_USERNAME` / `SMTP_APP_PASSWORD` | If email on | Gmail address + **App Password** (not your account password) |
 | `EMAIL_TO` | If email on | Recipient address |
@@ -197,10 +199,14 @@ immediately without touching anything.
 You can also run it manually if needed:
 
 ```bash
-# CPU-only (macOS, no GPU)
+# macOS (proxies to native Ollama for Metal GPU)
+docker compose -f docker-compose.infra.yml \
+               -f docker-compose.override.mac.yml up -d
+
+# CPU-only (Windows/Linux, no GPU)
 docker compose -f docker-compose.infra.yml up -d
 
-# GPU explicit
+# GPU explicit (Windows/Linux with NVIDIA)
 docker compose -f docker-compose.infra.yml \
                -f docker-compose.override.gpu.yml up -d
 ```
