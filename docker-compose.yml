@@ -23,7 +23,6 @@ services:
       - .env
     environment:
       OLLAMA_HOST: http://ollama:11434
-      OLLAMA_MODEL: qwen2.5:14b
       DATABASE_PATH: /app/data/offgrid_trader.db
       OTEL_EXPORTER_OTLP_ENDPOINT: http://aspire:18889
     ports:

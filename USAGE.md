@@ -19,7 +19,10 @@ bash scripts/setup_macos.sh   # macOS
 **Subsequent runs** (model already downloaded, image already built):
 
 ```bash
-./start-infra.sh      # start shared Ollama + Portainer (idempotent)
+# macOS only: ensure native Ollama is running (uses Metal GPU)
+ollama serve &   # skip if already running
+
+./start-infra.sh      # start shared Ollama proxy + Portainer (idempotent)
 docker compose up     # start offgrid-trader
 ```
 

@@ -1,0 +1,34 @@
+# macOS override — replaces the Docker Ollama container with a TCP proxy to
+# native Ollama on the host, enabling Apple Metal GPU inference.
+#
+# Prerequisites:
+#   brew install ollama   (or download from ollama.com)
+#   ollama serve &        (start before bringing up the infra stack)
+#
+# Usage:
+#   docker compose -f docker-compose.infra.yml \
+#                  -f docker-compose.override.mac.yml up -d
+
+services:
+  ollama:
+    image: nginx:alpine
+    # Proxy to native Ollama and rewrite Host to localhost (Ollama rejects unknown Host headers).
+    volumes: []
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        printf 'events{}\nhttp{\n  resolver 127.0.0.11 ipv6=off;\n  server{\n    listen 11434;\n    location / {\n      proxy_pass http://host.docker.internal:11434;\n      proxy_set_header Host localhost;\n    }\n  }\n}\n' > /tmp/nginx.conf
+        nginx -c /tmp/nginx.conf -g "daemon off;"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 5s
+      timeout: 2s
+      retries: 2
+      start_period: 2s
+
+  # Models are managed natively on macOS (~/.ollama) — no pull needed.
+  ollama-pull:
+    entrypoint: ["true"]
+    command: []

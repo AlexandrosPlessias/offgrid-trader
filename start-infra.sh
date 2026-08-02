@@ -13,6 +13,10 @@ set -euo pipefail
 
 INFRA=docker-compose.infra.yml
 GPU_OVERRIDE=docker-compose.override.gpu.yml
+MAC_OVERRIDE=docker-compose.override.mac.yml
+
+# ── macOS detection ──────────────────────────────────────────────────────────
+is_mac() { [[ "$(uname -s)" == "Darwin" ]]; }
 
 # ── GPU detection ─────────────────────────────────────────────────────────────
 detect_gpu() {
@@ -46,7 +50,17 @@ if [ -z "$USE_GPU" ]; then
 fi
 
 # ── Launch ────────────────────────────────────────────────────────────────────
-if [ "$USE_GPU" = "true" ]; then
+if is_mac; then
+  # On macOS, Docker containers can't access Apple Metal GPU.
+  # Proxy to native Ollama (which uses Metal) instead.
+  if ! pgrep -x ollama >/dev/null 2>&1; then
+    echo "[ai-shared] Starting native Ollama (required for Metal GPU on macOS)..."
+    OLLAMA_ORIGINS="*" ollama serve &>/dev/null &
+    sleep 2
+  fi
+  echo "[ai-shared] macOS — using native Ollama proxy (Metal GPU)"
+  docker compose -f "$INFRA" -f "$MAC_OVERRIDE" up -d
+elif [ "$USE_GPU" = "true" ]; then
   echo "[ai-shared] NVIDIA GPU detected — starting Ollama with GPU support"
   docker compose -f "$INFRA" -f "$GPU_OVERRIDE" up -d
 else
