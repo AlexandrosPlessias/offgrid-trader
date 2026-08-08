@@ -175,6 +175,31 @@ def get_recent_signals(
     return results
 
 
+def get_recent_analyses(
+    limit: int = 25,
+    db_path: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return recent analysis-log entries across all tickers, newest first."""
+
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM analysis_log ORDER BY id DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+
+    results: List[Dict[str, Any]] = []
+    for row in rows:
+        record = dict(row)
+        for json_key in ("analysis_json", "market_snapshot"):
+            if record.get(json_key):
+                try:
+                    record[json_key] = json.loads(record[json_key])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        results.append(record)
+    return results
+
+
 def get_analysis_history(
     ticker: str,
     limit: int = 20,

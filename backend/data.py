@@ -19,8 +19,11 @@ Run standalone::
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+_log = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # yfinance exchange code -> TradingView exchange name mapping.
@@ -74,6 +77,7 @@ def fetch_yfinance(ticker: str) -> Dict[str, Any]:
     import yfinance as yf
 
     result: Dict[str, Any] = {"price": {}, "fundamentals": {}, "exchange_hint": None}
+    _log.info("yfinance ▶ %s", ticker)
     try:
         yf_ticker = yf.Ticker(ticker)
 
@@ -149,6 +153,16 @@ def fetch_yfinance(ticker: str) -> Dict[str, Any]:
         result["exchange_hint"] = _YF_TO_TV_EXCHANGE.get(yf_exchange)
     except Exception as exc:  # pragma: no cover - network dependent
         result["error"] = f"yfinance error: {exc}"
+        _log.warning("yfinance ✗ %s: %s", ticker, exc)
+        return result
+    price = result.get("price", {})
+    _log.info(
+        "yfinance ◀ %s price=%s change_pct=%s vol_ratio=%s",
+        ticker,
+        price.get("current"),
+        price.get("change_pct"),
+        price.get("volume_ratio"),
+    )
     return result
 
 
@@ -221,6 +235,7 @@ def fetch_tradingview(
         last_error: Optional[str] = None
         # Once an exchange resolves, reuse it for the remaining timeframes.
         try_exchanges = [resolved_exchange] if resolved_exchange else candidates
+        _log.info("tradingview ▶ %s %s exchanges=%s", ticker, label, try_exchanges)
         for exchange in try_exchanges:
             try:
                 handler = TA_Handler(
@@ -238,6 +253,7 @@ def fetch_tradingview(
 
         if analysis is None:
             errors.append(f"tradingview {label} failed ({last_error})")
+            _log.warning("tradingview ✗ %s %s: %s", ticker, label, last_error)
             technicals[label] = None
             continue
 
@@ -247,6 +263,10 @@ def fetch_tradingview(
         except Exception:
             recommendation = None
         technicals[label] = _parse_tv_indicators(analysis.indicators or {}, recommendation)
+        _log.info(
+            "tradingview ◀ %s %s exchange=%s rec=%s",
+            ticker, label, resolved_exchange, recommendation,
+        )
 
     return {"technicals": technicals, "exchange": resolved_exchange, "errors": errors}
 
@@ -262,6 +282,7 @@ def get_market_data(ticker: str) -> Dict[str, Any]:
     """
 
     ticker = ticker.strip().upper()
+    _log.info("market_data ▶ %s", ticker)
     errors: List[str] = []
 
     yf_data = fetch_yfinance(ticker)
@@ -271,7 +292,7 @@ def get_market_data(ticker: str) -> Dict[str, Any]:
     tv_data = fetch_tradingview(ticker, exchange_hint=yf_data.get("exchange_hint"))
     errors.extend(tv_data.get("errors", []))
 
-    return {
+    result = {
         "ticker": ticker,
         "timestamp": _now_iso(),
         "price": yf_data.get("price", {}),
@@ -280,6 +301,8 @@ def get_market_data(ticker: str) -> Dict[str, Any]:
         "technicals": tv_data.get("technicals", {tf: None for tf in _TIMEFRAMES}),
         "errors": errors,
     }
+    _log.info("market_data ◀ %s errors=%d", ticker, len(errors))
+    return result
 
 
 if __name__ == "__main__":
