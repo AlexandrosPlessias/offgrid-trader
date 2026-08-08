@@ -76,9 +76,13 @@ except Exception as exc:  # pragma: no cover
 paths = {getattr(r, "path", None) for r in app.routes}
 expected = {
     "/analyze",
+    "/analyze/stream",
     "/webhook/tradingview",
     "/signals",
+    "/analysis",
     "/analysis/{ticker}",
+    "/market-data/{ticker}",
+    "/market-data/{ticker}/history",
     "/watchlist",
     "/health",
 }
@@ -119,6 +123,10 @@ check("get_recent_signals round-trip", len(recent) == 1 and recent[0]["ticker"] 
 database.save_analysis("TEST", {"trend": "bullish"}, {"ticker": "TEST"})
 hist = database.get_analysis_history("TEST")
 check("analysis_log round-trip", len(hist) == 1 and hist[0]["analysis_json"]["trend"] == "bullish")
+
+recent_all = database.get_recent_analyses(limit=10)
+check("get_recent_analyses returns saved entry",
+      len(recent_all) >= 1 and any(r["ticker"] == "TEST" for r in recent_all))
 
 
 # --------------------------------------------------------------------------- #

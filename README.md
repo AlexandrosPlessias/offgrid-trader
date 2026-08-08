@@ -1,4 +1,4 @@
-# offgrid-trader
+# MarketSage
 
 **Local, zero-cost AI stock monitor.** FastAPI + Ollama (`qwen2.5:14b`) + SQLite.
 Fetches live market data, runs a **local** LLM for technical analysis, detects
@@ -23,13 +23,17 @@ backend/
 ├── data.py           # yfinance + tradingview-ta -> unified market dict
 ├── analysis.py       # prompt -> local Ollama /api/chat -> parsed JSON
 ├── opportunities.py  # AI output + rule-based checks -> scored signals
-├── database.py       # SQLite: signals + analysis_log
+├── database.py       # SQLite: signals + analysis_log + app_settings
 ├── alerts.py         # Gmail SMTP + Slack webhook (confidence-gated)
 ├── scheduler.py      # async, market-hours-aware scan loop
-└── main.py           # FastAPI app (endpoints + CORS + lifespan)
+└── main.py           # FastAPI app (endpoints + CORS + lifespan + SSE streaming)
 ```
 
 Pipeline per ticker: **fetch data → AI analysis → detect opportunities → save → alert**.
+The **Analysis Explorer** UI page shows this pipeline live via Server-Sent Events, with
+per-step timing and charts for every indicator.
+
+See [docs/wiki/architecture.md](docs/wiki/architecture.md) for a full pipeline diagram and service map.
 
 ---
 
@@ -52,7 +56,7 @@ Then open the services:
 
 | URL | What |
 |---|---|
-| http://localhost:5174 | React UI |
+| http://localhost:5174 | React UI — Dashboard · Analysis Explorer · Learn |
 | http://localhost:5174/docs | FastAPI interactive docs (via nginx proxy) |
 | http://localhost:8010/docs | FastAPI interactive docs (direct) |
 | http://localhost:18889 | Aspire — traces, metrics, structured logs |
@@ -124,17 +128,23 @@ The background scheduler starts automatically and scans the watchlist every
 
 ### Endpoints
 
-| Method | Path                     | Description                                        |
-|--------|--------------------------|----------------------------------------------------|
-| POST   | `/analyze`               | On-demand analysis for any ticker.                 |
-| POST   | `/webhook/tradingview`   | Receive a TradingView Pro alert → background scan. |
-| GET    | `/signals`               | Recent stored signals (`?ticker=&limit=`).         |
-| GET    | `/analysis/{ticker}`     | Analysis-log history for a ticker.                 |
-| GET    | `/watchlist`             | Effective watchlist + scheduler + alerts status.   |
-| POST   | `/watchlist`             | Add a ticker (`{"ticker": "GOOGL"}`).              |
-| DELETE | `/watchlist/{ticker}`    | Remove a ticker (persisted in SQLite).             |
-| POST   | `/settings/alerts`       | Toggle alert dispatch (`{"enabled": true/false}`). |
-| GET    | `/health`                | Liveness + config summary.                         |
+| Method | Path                          | Description                                        |
+|--------|-------------------------------|----------------------------------------------------|
+| POST   | `/analyze`                    | On-demand analysis for any ticker.                 |
+| POST   | `/analyze/stream`             | Same pipeline, streamed via SSE (step events + result). |
+| GET    | `/market-data/{ticker}`       | Raw market-data dict (price, fundamentals, indicators). |
+| GET    | `/market-data/{ticker}/history` | OHLCV + volume history (`?period=3mo&interval=1d`). |
+| POST   | `/webhook/tradingview`        | Receive a TradingView Pro alert → background scan. |
+| GET    | `/signals`                    | Recent stored signals (`?ticker=&limit=`).         |
+| GET    | `/analysis`                   | Recent analysis-log entries across all tickers (`?limit=`). |
+| GET    | `/analysis/{ticker}`          | Analysis-log history for a single ticker.          |
+| GET    | `/watchlist`                  | Effective watchlist + scheduler + alerts status.   |
+| POST   | `/watchlist`                  | Add a ticker (`{"ticker": "GOOGL"}`).              |
+| DELETE | `/watchlist/{ticker}`         | Remove a ticker (persisted in SQLite).             |
+| POST   | `/settings/alerts`            | Toggle alert dispatch (`{"enabled": true/false}`). |
+| GET    | `/health`                     | Liveness + config summary.                         |
+
+Full API reference with request/response shapes and `curl` examples: [docs/wiki/api.md](docs/wiki/api.md).
 
 Example (Docker — use port 8010):
 
@@ -199,6 +209,9 @@ Only signals at or above the confidence floor are stored and alerted.
   (RSI, MACD, EMA20/50/200, Bollinger Bands, Stochastic across 1H/4H/1D)
 - **AI:** local [Ollama](https://ollama.com/) `qwen2.5:14b` via `/api/chat`
 - **DB:** SQLite (file at `DATABASE_PATH`)
+- **Charts:** [Recharts](https://recharts.org/) (RSI/MACD/EMA/price-history in the frontend)
+
+See [docs/wiki/indicators.md](docs/wiki/indicators.md) for a full indicator reference and [docs/wiki/glossary.md](docs/wiki/glossary.md) for trading terminology.
 
 ---
 
