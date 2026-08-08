@@ -3,6 +3,8 @@
 Endpoints
 ---------
 * ``POST /analyze``               — on-demand analysis for any ticker.
+* ``POST /analyze/stream``        — same pipeline, streamed via SSE (step events + result).
+* ``GET  /market-data/{ticker}``  — raw market data dict (price, fundamentals, indicators).
 * ``POST /webhook/tradingview``   — receive a TradingView Pro alert and kick
                                     off a background analysis.
 * ``GET  /signals``               — recent stored signals (optional ticker).
@@ -20,26 +22,36 @@ Run::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Any, AsyncGenerator, Dict, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import __version__
+from .alerts import send_alert as _send_alert
+from .analysis import analyze as _analyze
 from .config import get_settings
+from .data import get_market_data as _get_market_data
 from .database import (
     get_analysis_history,
     get_effective_watchlist,
+    get_recent_analyses,
     get_recent_signals,
     get_setting,
     init_db,
+    save_analysis as _save_analysis,
+    save_signal as _save_signal,
     set_setting,
 )
+from .opportunities import detect_opportunities, filter_by_confidence
 from .scheduler import scan_ticker_async, scheduler
 
 
@@ -289,6 +301,201 @@ async def analyze_ticker(request: AnalyzeRequest) -> Dict[str, Any]:
     }
 
 
+@app.post("/analyze/stream")
+async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
+    """On-demand analysis streamed as Server-Sent Events.
+
+    Yields ``data: <json>`` lines for each pipeline step, then a final
+    ``type:"result"`` event with the full analysis + market data.
+    Results are persisted to the database (analysis_log + signals tables).
+    """
+    ticker = request.ticker.strip().upper()
+    if not ticker:
+        raise HTTPException(status_code=400, detail="ticker is required")
+
+    settings = get_settings()
+    # Capture before entering generator (request not in scope inside async gen)
+    send_alerts = request.send_alerts
+
+    async def _event(payload: Dict[str, Any]) -> str:
+        return f"data: {json.dumps(payload)}\n\n"
+
+    async def _stream() -> AsyncGenerator[str, None]:
+        errors: list = []
+
+        # ── Step 1: fetch market data ──────────────────────────────────────
+        yield await _event(
+            {"type": "step", "step": "fetch", "status": "running",
+             "msg": f"Fetching market data for {ticker}…"}
+        )
+        t0 = time.monotonic()
+        try:
+            market_data = await asyncio.to_thread(_get_market_data, ticker)
+            errors.extend(market_data.get("errors", []))
+        except Exception as exc:
+            yield await _event(
+                {"type": "step", "step": "fetch", "status": "error",
+                 "msg": str(exc)}
+            )
+            return
+        elapsed_fetch = round(time.monotonic() - t0, 1)
+        yield await _event(
+            {"type": "step", "step": "fetch", "status": "done",
+             "elapsed": elapsed_fetch}
+        )
+
+        # ── Step 2: AI analysis ────────────────────────────────────────────
+        yield await _event(
+            {"type": "step", "step": "analyze", "status": "running",
+             "msg": f"Running AI analysis ({settings.ollama.model})…"}
+        )
+        t0 = time.monotonic()
+        try:
+            analysis = await asyncio.to_thread(_analyze, market_data)
+        except Exception as exc:
+            yield await _event(
+                {"type": "step", "step": "analyze", "status": "error",
+                 "msg": str(exc)}
+            )
+            return
+        if analysis.get("error"):
+            errors.append(analysis["error"])
+            yield await _event(
+                {"type": "step", "step": "analyze", "status": "error",
+                 "msg": analysis["error"]}
+            )
+            return
+        elapsed_analyze = round(time.monotonic() - t0, 1)
+        yield await _event(
+            {"type": "step", "step": "analyze", "status": "done",
+             "elapsed": elapsed_analyze}
+        )
+
+        # ── Step 3: detect opportunities ───────────────────────────────────
+        yield await _event(
+            {"type": "step", "step": "detect", "status": "running",
+             "msg": "Detecting opportunities…"}
+        )
+        t0 = time.monotonic()
+        try:
+            opportunities = await asyncio.to_thread(
+                detect_opportunities, market_data, analysis
+            )
+            actionable = filter_by_confidence(opportunities)
+        except Exception as exc:
+            yield await _event(
+                {"type": "step", "step": "detect", "status": "error",
+                 "msg": str(exc)}
+            )
+            return
+        elapsed_detect = round(time.monotonic() - t0, 1)
+        yield await _event(
+            {"type": "step", "step": "detect", "status": "done",
+             "elapsed": elapsed_detect}
+        )
+
+        # ── Persist to database ────────────────────────────────────────────
+        try:
+            await asyncio.to_thread(_save_analysis, ticker, analysis, market_data)
+        except Exception as exc:
+            errors.append(f"save_analysis failed: {exc}")
+
+        saved_ids: list = []
+        alerts_sent: list = []
+        for opp in actionable:
+            try:
+                saved_ids.append(await asyncio.to_thread(_save_signal, opp))
+            except Exception as exc:
+                errors.append(f"save_signal failed: {exc}")
+            if send_alerts:
+                try:
+                    alerts_sent.append(await asyncio.to_thread(_send_alert, opp))
+                except Exception as exc:
+                    errors.append(f"send_alert failed: {exc}")
+
+        # ── Final result ───────────────────────────────────────────────────
+        yield await _event(
+            {
+                "type": "result",
+                "ticker": ticker,
+                "analysis": analysis,
+                "market_data": market_data,
+                "opportunities": opportunities,
+                "actionable": actionable,
+                "saved_signal_ids": saved_ids,
+                "alerts": alerts_sent,
+                "errors": errors,
+            }
+        )
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable nginx buffering if missed in conf
+        },
+    )
+
+
+@app.get("/market-data/{ticker}")
+async def market_data(ticker: str) -> Dict[str, Any]:
+    """Return the raw market data dict for *ticker* (price, fundamentals, indicators)."""
+    ticker = ticker.strip().upper()
+    if not ticker:
+        raise HTTPException(status_code=400, detail="ticker is required")
+    data = await asyncio.to_thread(_get_market_data, ticker)
+    return data
+
+
+@app.get("/market-data/{ticker}/history")
+async def market_data_history(
+    ticker: str,
+    period: str = Query("3mo", description="yfinance period, e.g. 1mo 3mo 6mo 1y"),
+    interval: str = Query("1d", description="yfinance interval, e.g. 1d 1wk"),
+) -> Dict[str, Any]:
+    """Return OHLCV history for *ticker* from yfinance.
+
+    Each entry: ``{date, open, high, low, close, volume}``.
+    Used by the price history chart in the Analysis Explorer.
+    """
+    ticker = ticker.strip().upper()
+    if not ticker:
+        raise HTTPException(status_code=400, detail="ticker is required")
+
+    def _fetch() -> list:
+        import yfinance as yf  # local import — not needed at startup
+
+        yf_ticker = yf.Ticker(ticker)
+        hist = yf_ticker.history(period=period, interval=interval)
+        if hist.empty:
+            return []
+        rows = []
+        prev_close = None
+        for ts, row in hist.iterrows():
+            close = float(row["Close"]) if row["Close"] == row["Close"] else None
+            rows.append(
+                {
+                    "date": ts.strftime("%Y-%m-%d"),
+                    "open": float(row["Open"]) if row["Open"] == row["Open"] else None,
+                    "high": float(row["High"]) if row["High"] == row["High"] else None,
+                    "low": float(row["Low"]) if row["Low"] == row["Low"] else None,
+                    "close": close,
+                    "volume": int(row["Volume"]) if row["Volume"] == row["Volume"] else None,
+                    "up": close is not None and prev_close is not None and close >= prev_close,
+                }
+            )
+            prev_close = close
+        return rows
+
+    try:
+        rows = await asyncio.to_thread(_fetch)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"yfinance error: {exc}") from exc
+
+    return {"ticker": ticker, "period": period, "interval": interval, "candles": rows}
+
+
 @app.post("/webhook/tradingview")
 async def tradingview_webhook(
     payload: TradingViewWebhook,
@@ -318,6 +525,15 @@ def signals(
     """Return recent stored signals, optionally filtered by ticker."""
     rows = get_recent_signals(limit=limit, ticker=ticker)
     return {"count": len(rows), "signals": rows}
+
+
+@app.get("/analysis")
+def all_analysis_history(
+    limit: int = Query(25, ge=1, le=100),
+) -> Dict[str, Any]:
+    """Return recent analysis-log entries across all tickers, newest first."""
+    rows = get_recent_analyses(limit=limit)
+    return {"count": len(rows), "history": rows}
 
 
 @app.get("/analysis/{ticker}")
