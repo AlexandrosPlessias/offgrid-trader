@@ -200,6 +200,22 @@ def get_recent_analyses(
     return results
 
 
+def delete_signal(signal_id: int, db_path: Optional[str] = None) -> bool:
+    """Delete a signal by id. Returns True if a row was deleted."""
+    with _connect(db_path) as conn:
+        cur = conn.execute("DELETE FROM signals WHERE id = ?", (int(signal_id),))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def delete_analysis(entry_id: int, db_path: Optional[str] = None) -> bool:
+    """Delete an analysis_log entry by id. Returns True if a row was deleted."""
+    with _connect(db_path) as conn:
+        cur = conn.execute("DELETE FROM analysis_log WHERE id = ?", (int(entry_id),))
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def get_analysis_history(
     ticker: str,
     limit: int = 20,

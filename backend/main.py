@@ -41,6 +41,8 @@ from .analysis import analyze as _analyze
 from .config import get_settings
 from .data import get_market_data as _get_market_data
 from .database import (
+    delete_analysis as _delete_analysis,
+    delete_signal as _delete_signal_row,
     get_analysis_history,
     get_effective_watchlist,
     get_recent_analyses,
@@ -527,6 +529,17 @@ def signals(
     return {"count": len(rows), "signals": rows}
 
 
+@app.delete("/signals/{signal_id}")
+def delete_signal(signal_id: int) -> Dict[str, Any]:
+    """Delete a stored signal by id."""
+    deleted = _delete_signal_row(signal_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=404, detail=f"signal {signal_id} not found"
+        )
+    return {"deleted": True, "id": signal_id}
+
+
 @app.get("/analysis")
 def all_analysis_history(
     limit: int = Query(25, ge=1, le=100),
@@ -534,6 +547,17 @@ def all_analysis_history(
     """Return recent analysis-log entries across all tickers, newest first."""
     rows = get_recent_analyses(limit=limit)
     return {"count": len(rows), "history": rows}
+
+
+@app.delete("/analysis/{entry_id}")
+def delete_analysis_entry(entry_id: int) -> Dict[str, Any]:
+    """Delete an analysis-log entry by id."""
+    deleted = _delete_analysis(entry_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=404, detail=f"analysis entry {entry_id} not found"
+        )
+    return {"deleted": True, "id": entry_id}
 
 
 @app.get("/analysis/{ticker}")

@@ -846,6 +846,14 @@ function SignalsTable({ signals, reload }) {
 
   const rows = signals.signals ?? []
 
+  const handleDelete = async (id, e) => {
+    e.stopPropagation()
+    if (!confirm('Delete this signal?')) return
+    await fetch(`${API}/signals/${id}`, { method: 'DELETE' }).catch(() => {})
+    if (selected?.id === id) setSelected(null)
+    reload()
+  }
+
   return (
     <section className="card">
       <div className="card-title">
@@ -862,7 +870,7 @@ function SignalsTable({ signals, reload }) {
             <thead>
               <tr>
                 <th>Time</th><th>Ticker</th><th>Type</th><th>Conf</th>
-                <th>Price</th><th>Entry</th><th>Stop</th><th>Target</th><th>Source</th>
+                <th>Price</th><th>Entry</th><th>Stop</th><th>Target</th><th>Source</th><th></th>
               </tr>
             </thead>
             <tbody>
@@ -881,6 +889,7 @@ function SignalsTable({ signals, reload }) {
                   <td>{fmtN(r.stop)}</td>
                   <td>{fmtN(r.target)}</td>
                   <td className="text-dim source-cell">{r.source ?? '—'}</td>
+                  <td><button className="btn-delete" onClick={(e) => handleDelete(r.id, e)} title="Delete">×</button></td>
                 </tr>
               ))}
             </tbody>
@@ -895,7 +904,7 @@ function SignalsTable({ signals, reload }) {
 
 // ─── Analysis Explorer page ───────────────────────────────────────────────────
 
-function ExplorerPage({ initialResult, onBack, modelName }) {
+function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
   const [ticker, setTicker] = useState(initialResult?.ticker ?? '')
   const { streaming, steps, result: streamResult, error, run } = useAnalyzeStream()
 
@@ -936,6 +945,9 @@ function ExplorerPage({ initialResult, onBack, modelName }) {
         </div>
       </div>
 
+      {/* Analysis History panel — collapsible, lives in Explorer */}
+      <AnalysisHistoryPanel onOpenInExplorer={onOpenInExplorer} />
+
       {/* Empty state */}
       {result?._from_history && (
         <div className="history-banner">
@@ -947,7 +959,7 @@ function ExplorerPage({ initialResult, onBack, modelName }) {
       {!result && !streaming && !error && (
         <div className="explorer-empty">
           Enter a ticker above and click <strong>Run Analysis</strong> to begin the walkthrough.<br />
-          <span style={{ fontSize: 12 }}>Or open a saved analysis from the History panel on the Dashboard.</span>
+          <span style={{ fontSize: 12 }}>Or expand the Analysis History panel below to open a saved run.</span>
         </div>
       )}
 
@@ -1126,6 +1138,7 @@ function EduSection({ title, badge, children, defaultOpen = false }) {
       <summary className="edu-summary">
         {badge && <span className="section-badge">{badge}</span>}
         <span className="edu-summary-title">{title}</span>
+        <span className="edu-chevron">›</span>
       </summary>
       <div className="edu-section-body">{children}</div>
     </details>
@@ -1141,6 +1154,7 @@ function EducationPage() {
           A plain-English guide to the system: what data it fetches, what each indicator
           measures, how it detects opportunities, and what the trading terms mean.
         </p>
+        <p className="edu-expand-hint">Click any section header to expand or collapse it.</p>
       </div>
 
       {/* Section 1 — Pipeline */}
@@ -1454,8 +1468,9 @@ function EducationPage() {
 // ─── Analysis history panel ──────────────────────────────────────────────────
 
 function AnalysisHistoryPanel({ onOpenInExplorer }) {
+  const [expanded, setExpanded] = useState(false)
   const [history, setHistory] = useState(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [err, setErr] = useState(null)
 
   const load = useCallback(() => {
@@ -1466,9 +1481,10 @@ function AnalysisHistoryPanel({ onOpenInExplorer }) {
       .catch(e  => { setErr(e.message); setLoading(false) })
   }, [])
 
-  useEffect(() => { load() }, [load])
+  // Load data the first time the panel is opened
+  useEffect(() => { if (expanded && history === null) load() }, [expanded, history, load])
 
-  const open = (row) => {
+  const openRow = (row) => {
     onOpenInExplorer({
       ticker:       row.ticker,
       analysis:     row.analysis_json,
@@ -1481,51 +1497,76 @@ function AnalysisHistoryPanel({ onOpenInExplorer }) {
     })
   }
 
+  const handleDelete = async (id) => {
+    if (!confirm('Delete this analysis entry?')) return
+    await fetch(`${API}/analysis/${id}`, { method: 'DELETE' }).catch(() => {})
+    load()
+  }
+
   return (
-    <section className="card">
-      <div className="card-title">
+    <section className="card history-panel">
+      <div className="card-title history-panel-header" onClick={() => setExpanded(o => !o)}>
+        <span className={`history-panel-chevron${expanded ? ' open' : ''}`}>›</span>
         Analysis History
-        <button className="btn-ghost" onClick={load} style={{ fontSize: 11, padding: '1px 8px' }}>↺ Refresh</button>
+        {history != null && !expanded && (
+          <span className="card-sub">{history.length} saved</span>
+        )}
+        {expanded && (
+          <button
+            className="btn-ghost"
+            style={{ fontSize: 11, padding: '1px 8px' }}
+            onClick={e => { e.stopPropagation(); load() }}
+          >↺ Refresh</button>
+        )}
       </div>
-      {loading && <div className="empty">Loading…</div>}
-      {err    && <div className="error-msg">Could not load history: {err}</div>}
-      {history && history.length === 0 && (
-        <div className="empty">No analyses yet — run your first analysis above.</div>
-      )}
-      {history && history.length > 0 && (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ticker</th>
-                <th>Trend</th>
-                <th>Confidence</th>
-                <th>Run at</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {history.map(row => {
-                const aj   = row.analysis_json ?? {}
-                const trend = aj.trend ?? '—'
-                const conf  = aj.confidence
-                return (
-                  <tr key={row.id}>
-                    <td><span className="badge-ticker">{row.ticker}</span></td>
-                    <td><span className={`rbadge trend-${trend}`}>{trend}</span></td>
-                    <td>{conf != null ? `${conf}%` : '—'}</td>
-                    <td className="ts">{fmtTime(row.created_at)}</td>
-                    <td>
-                      <button className="btn-open-history" onClick={() => open(row)}>
-                        Open in Explorer →
-                      </button>
-                    </td>
+
+      {expanded && (
+        <>
+          {loading && <div className="empty">Loading…</div>}
+          {err    && <div className="error-msg">Could not load history: {err}</div>}
+          {history && history.length === 0 && (
+            <div className="empty">No analyses saved yet — run an analysis in the Explorer above.</div>
+          )}
+          {history && history.length > 0 && (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Ticker</th>
+                    <th>Trend</th>
+                    <th>Confidence</th>
+                    <th>Run at</th>
+                    <th></th>
+                    <th></th>
                   </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
+                </thead>
+                <tbody>
+                  {history.map(row => {
+                    const aj    = row.analysis_json ?? {}
+                    const trend = aj.trend ?? '—'
+                    const conf  = aj.confidence
+                    return (
+                      <tr key={row.id}>
+                        <td><span className="badge-ticker">{row.ticker}</span></td>
+                        <td><span className={`rbadge trend-${trend}`}>{trend}</span></td>
+                        <td>{conf != null ? `${conf}%` : '—'}</td>
+                        <td className="ts">{fmtTime(row.created_at)}</td>
+                        <td>
+                          <button className="btn-open-history" onClick={() => openRow(row)}>
+                            Open in Explorer →
+                          </button>
+                        </td>
+                        <td>
+                          <button className="btn-delete" onClick={() => handleDelete(row.id)} title="Delete">×</button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
     </section>
   )
@@ -1555,13 +1596,10 @@ export default function App() {
       <Header health={health} activeView={activeView} onViewChange={setActiveView} />
       <main className="main">
         {/* All three views are always mounted — switching tabs never destroys SSE state */}
-        <div style={{ display: activeView === 'dashboard' ? '' : 'none' }}>
-          <div className="top-grid">
-            <WatchlistCard wl={wl} onWatchlistChange={reloadWatchlist} />
-            <AnalyzePanel onExplore={openExplorer} />
-          </div>
+        <div style={{ display: activeView === 'dashboard' ? 'flex' : 'none',
+                      flexDirection: 'column', gap: 16 }}>
+          <WatchlistCard wl={wl} onWatchlistChange={reloadWatchlist} />
           <SignalsTable signals={signals} reload={reloadSignals} />
-          <AnalysisHistoryPanel onOpenInExplorer={openExplorer} />
         </div>
         <div style={{ display: activeView === 'explorer' ? '' : 'none' }}>
           <ExplorerPage
@@ -1569,6 +1607,7 @@ export default function App() {
             initialResult={explorerState}
             onBack={() => setActiveView('dashboard')}
             modelName={health?.ollama_model}
+            onOpenInExplorer={openExplorer}
           />
         </div>
         {activeView === 'education' && <EducationPage />}

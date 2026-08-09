@@ -115,7 +115,9 @@ docker compose ps
 | GET | `/market-data/{ticker}/history` | OHLCV + volume history (`?period=3mo&interval=1d`) |
 | POST | `/webhook/tradingview` | Receive a TradingView Pro alert → background scan |
 | GET | `/signals` | Recent stored signals (`?ticker=&limit=`) |
+| DELETE | `/signals/{id}` | Delete a stored signal by id |
 | GET | `/analysis` | Recent analysis-log entries across all tickers (`?limit=`) |
+| DELETE | `/analysis/{id}` | Delete an analysis-log entry by id |
 | GET | `/analysis/{ticker}` | Analysis-log history for a single ticker |
 | GET | `/watchlist` | Watchlist + scheduler status + alerts toggle |
 | POST | `/watchlist` | Add ticker (`{"ticker": "GOOGL"}`) — persisted in SQLite |
@@ -129,10 +131,11 @@ Full reference with request/response shapes: [docs/wiki/api.md](docs/wiki/api.md
 
 The React UI has three tabs:
 
-- **Dashboard** — watchlist, on-demand analysis panel (SSE stepper), recent signals table
-- **Analysis Explorer** — same ad-hoc analysis but shown as a full-page walkthrough:
-  live pipeline stepper, price snapshot, 3-month history chart (toggle switch),
-  RSI/MACD/EMA charts, AI reasoning, and the collapsible raw indicator table
+- **Dashboard** — watchlist management and recent signals table (with per-row delete)
+- **Explorer** — ad-hoc analysis as a full-page walkthrough: live pipeline stepper,
+  price snapshot, 3-month history chart (toggle switch), RSI/MACD/EMA charts, AI
+  reasoning, the collapsible raw indicator table, and a collapsible **Analysis History**
+  panel that lets you re-open any saved run (with per-row delete)
 - **Learn** — static in-app wiki: how the pipeline works, what each indicator measures,
   the four opportunity-detection rules, a trading glossary, and links to further reading
 

@@ -314,8 +314,8 @@ curl 'http://localhost:8010/signals?ticker=AAPL&limit=10'
 
 ### `GET /analysis`
 
-Recent analysis-log entries across **all tickers**, newest first. Shown in the Dashboard's
-**Analysis History** panel; clicking a row opens the saved analysis in the Explorer tab.
+Recent analysis-log entries across **all tickers**, newest first. Shown in the Explorer tab's
+collapsible **Analysis History** panel; clicking a row opens the saved analysis in the Explorer.
 
 **Query parameters:** `limit` (default 25, max 100)
 
@@ -337,6 +337,36 @@ curl 'http://localhost:8010/analysis?limit=10'
     }
   ]
 }
+```
+
+---
+
+### `DELETE /signals/{signal_id}`
+
+Delete a stored signal by id. Returns `404` if the signal does not exist.
+
+```bash
+curl -X DELETE http://localhost:8010/signals/42
+```
+
+**Response**
+```json
+{ "deleted": true, "id": 42 }
+```
+
+---
+
+### `DELETE /analysis/{entry_id}`
+
+Delete an analysis-log entry by id. Returns `404` if the entry does not exist.
+
+```bash
+curl -X DELETE http://localhost:8010/analysis/18
+```
+
+**Response**
+```json
+{ "deleted": true, "id": 18 }
 ```
 
 ---
