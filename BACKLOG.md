@@ -21,17 +21,6 @@ Future ideas and planned improvements. No priority order within each item.
 
 ---
 
-## 0b. Architecture diagrams
-
-Create diagrams to make the system easier to understand at a glance for developers.
-
-- **Pipeline diagram** — ticker → data fetch → Ollama analysis → opportunity detection → save → alert
-- **Infrastructure diagram** — Docker Compose services, ports, shared `ai-shared` network, volumes
-- **Data-flow diagram** — how market data maps to indicators, how AI JSON maps to opportunities
-- Tooling candidates: Mermaid (renders in GitHub), draw.io, or C4 model
-
----
-
 ## 1. Replace tradingview-ta with a free, open-source indicator stack
 
 `tradingview-ta` works by scraping TradingView's internal API, which is not an officially supported integration and requires users to accept TradingView's ToS. Replace it with a combination of free, properly licensed alternatives:
@@ -71,14 +60,66 @@ Alpha Vantage is an *external API service* with a **25 requests/day** free limit
 
 ### Notes / risks
 
-- `pandas-ta` indicator values may differ slightly from TradingView's (different lookback defaults). Thresholds in `opportunities.py` may need minor tuning after the switch — run the backtest item (#3) to validate.
+- `pandas-ta` indicator values may differ slightly from TradingView's (different lookback defaults). Thresholds in `opportunities.py` may need minor tuning after the switch — run the backtest item (#4) to validate.
 - `yfinance` does not officially support a `4h` interval on all tickers; use `2h` as a fallback or derive from `1h` bars.
 - Polygon.io free tier data is delayed (~15 min) and rate-limited — suitable only as a fallback or for end-of-day backtesting, not real-time scanning.
 - If Finnhub API key is absent, the system falls back to the current behaviour (no news); this is a zero-config backward-compatible change.
 
+### Architecture documentation (bundle with this item)
+
+While reworking the data layer, also add Mermaid diagrams to `docs/wiki/architecture.md`:
+
+- **Pipeline diagram** — ticker → yfinance → pandas-ta → Ollama → detect → DB → alert
+- **Infrastructure diagram** — Docker Compose services, ports, `ai-shared` network, volumes
+- **Data-flow diagram** — how OHLCV maps to indicators, how AI JSON maps to opportunities
+
+Mermaid renders natively in GitHub — no extra tooling needed.
+
 ---
 
-## 2. Agentic architecture — workers and skills
+## 2. Low-cost / zero-cost cloud LLM hosting
+
+Replace (or complement) local Ollama with a free or near-free cloud inference API so the app can run without a beefy local machine (no 16 GB RAM, no GPU required).
+
+**Core idea:** decouple AI inference from the local stack. The backend already calls Ollama over HTTP — pointing it at a cloud-compatible, OpenAI-style API endpoint is a small code change.
+
+### Candidate providers
+
+| Provider | Model(s) | Free tier | Notes |
+|---|---|---|---|
+| **Groq Cloud** | Qwen 2.5 32B, Llama 3.1 70B | ~30 req/min, no card | Fastest inference available; OpenAI-compatible; strong free tier |
+| **SambaNova Cloud** | Qwen 2.5 72B, Llama 3.1 405B | Generous free tier | Very fast; OpenAI-compatible |
+| **Together AI** | Qwen 2.5, many others | Pay-per-token (cheap) | Reliable; good for volume above free-tier limits |
+| **Replicate / RunPod** | Any model via vLLM | Pay-per-second GPU | More DevOps; skip unless others don't cut it |
+
+Groq or SambaNova are the preferred starting point — free, fast, no credit card required.
+
+### App hosting (if deploying publicly)
+
+| Layer | Option | Notes |
+|---|---|---|
+| Frontend | **Vercel** (free) | Vite SPA — ideal fit |
+| Backend + scheduler | **Fly.io** free tier | Never sleeps; supports persistent volumes for SQLite; better than Render (which sleeps after 15 min) |
+| SQLite persistence | Fly.io persistent volume | Mount at `/data`; survives redeploys |
+
+### What changes in the code
+
+- `backend/analysis.py` — replace `requests.post(ollama_chat_url)` with an OpenAI-SDK call (`openai.chat.completions.create`) pointed at the chosen provider's base URL
+- `backend/config.py` — add `LLM_PROVIDER` (`ollama` / `groq` / `sambanova`), `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`; make Ollama the default so existing local setups are unchanged
+- `.env.example` — document the new env vars
+- `docker-compose.yml` — make `ollama` service optional (skip if `LLM_PROVIDER != "ollama"`)
+- `SETUP.md` — add "Cloud AI" quick-start path alongside the existing local Ollama path
+
+### Open questions (revisit before implementing)
+
+- Rate limits on free tiers vs. scan frequency: `SCAN_INTERVAL_MINUTES × len(WATCHLIST)` calls/hour — verify each provider's limits before committing
+- Privacy: ticker data + market snapshots leave the machine. Document this trade-off clearly.
+- SSE streaming: cloud providers return streamed chunks via the OpenAI streaming API — wire that through to the existing SSE endpoint for consistent UX
+- Backlog item 1 (pandas-ta) should ideally land first — fewer external dependencies before adding a new one
+
+---
+
+## 3. Agentic architecture — workers and skills
 
 Replace the monolithic scan loop with a proper agent framework.
 
@@ -91,50 +132,64 @@ Replace the monolithic scan loop with a proper agent framework.
 
 ---
 
-## 3. Backtesting / simulation evaluation
+## 4. Backtesting + virtual wallet simulation
 
-Evaluate how good the model's decisions actually are against historical data.
+Evaluate how good the system's signals actually are by replaying them against historical data and tracking a simulated portfolio.
 
-- **Scenario**: pick a past month (e.g. June 2026), replay tick-by-tick or day-by-day as if it were live
+### Backtesting engine
+
+- **Scenario**: pick a date range (e.g. the last 3 months), replay day-by-day as if it were live
 - Feed historical OHLCV + indicator data through the same pipeline that runs today
-- Record every signal the system would have generated
-- Compare against actual subsequent price movements: did the entry/stop/target play out?
-- **Metrics**: win rate, average R-multiple, Sharpe ratio of simulated trades, false-positive rate
-- **Output**: a report card per ticker and overall — useful for tuning `CONFIDENCE_FLOOR` and prompt
+- Record every signal the system would have generated on each day
+- Compare against actual subsequent price movements: did the entry/stop/target play out before the opposite level was hit?
+- **Metrics**: win rate, average R-multiple, Sharpe ratio, max drawdown, false-positive rate
+- **Output**: a report card per ticker and overall — useful for tuning `CONFIDENCE_FLOOR` and prompt wording
 
-Implementation notes:
-- `yfinance` supports historical data; backfill `tradingview-ta` or compute indicators manually
-- Add a `--backtest` mode to `backend/scheduler.py` that replays a date range instead of scanning live
-- Store backtest runs in a separate SQLite table so results don't pollute live `signals`
+### Virtual wallet
 
----
+- Start each backtest run with a configurable virtual balance (e.g. `$10,000`)
+- Each actionable signal opens a paper position: buy `N` shares at `entry`, set stop and target
+- Close positions when price hits `target` (profit) or `stop` (loss); time-out after N days if neither hit
+- Track running portfolio value day-by-day — visualise as an equity curve in the Explorer or a new Backtest tab
+- Compare against a simple buy-and-hold benchmark for the same period
+- **Goal**: answer "if I had followed every signal for the last month, would I have made or lost money?"
 
-## 4. Alert integrations — setup and end-to-end testing
+### Implementation notes
 
-The alert channels (email, Slack, Telegram) are coded but need real end-to-end validation.
-
-- **Email (Gmail SMTP)**: configure App Password, test with a real address, verify formatting
-- **Slack**: set up an Incoming Webhook in a test workspace, confirm message arrives with correct layout
-- **Telegram**: complete BotFather setup, verify group-chat delivery (chat IDs differ for groups vs DMs)
-- Add a `/api/alerts/test` endpoint that fires a dummy alert through all configured channels — useful for verifying credentials without waiting for a real signal
-- Add an alert history table to the DB so the UI can show "last alert sent: 2h ago via Telegram"
-- Consider rate-limiting: don't flood channels with repeated alerts for the same ticker/direction within a cooldown window
+- `yfinance` historical download covers the replay period; indicators computed with `pandas-ta` (item 1)
+- Add a `POST /backtest` endpoint (or a CLI flag `--backtest`) that accepts `{ tickers, start_date, end_date, initial_balance }`
+- Store backtest runs in a separate `backtest_runs` + `backtest_trades` SQLite table — never pollutes live `signals`
+- Item 1 (pandas-ta) must land first — needed to recompute indicators historically without TradingView dependency
 
 ---
 
-## 5. TradingView integration
+## 5. Validate and clean up alert channels (Email + Telegram)
 
-Wire up TradingView Pro alerts to trigger analysis automatically.
+Slim the alert layer down to the two channels worth supporting, then validate them end-to-end.
 
-- **Webhook endpoint** (`POST /webhook/tradingview`) is already implemented — needs real-world testing with a Pro/Essential account
-- **Alert setup guide**: document the exact JSON payload format to use in TradingView's alert message body:
-  ```json
-  { "ticker": "{{ticker}}", "action": "{{strategy.order.action}}", "price": {{close}} }
-  ```
-- **ngrok / Cloudflare Tunnel**: the webhook needs a public URL; add setup instructions for exposing the local backend during development
-- **Condition mapping**: map TradingView's `buy`/`sell` action strings to `long`/`short` in the webhook handler
-- **Two-way flow**: optionally push signals back to TradingView via `strategy.alert()` calls for visual confirmation on the chart
-- Document required TradingView account tier (Essential or above for webhook alerts)
+### Step 1 — Remove Slack
+
+- Delete `backend/alerts.py` Slack code path and `send_slack_alert()`
+- Remove `SLACK_ENABLED` / `SLACK_WEBHOOK_URL` from `config.py`, `.env.example`, and all docs
+- Update smoke test to no longer reference Slack
+
+### Step 2 — Email (Gmail SMTP)
+
+- Configure App Password on a test Gmail account
+- Verify the formatted message (subject, body, entry/stop/target layout) arrives correctly
+- Test both enabled and disabled states via `.env`
+
+### Step 3 — Telegram
+
+- Complete BotFather setup; document the two-step process (create bot → get chat ID)
+- Verify delivery to a personal chat and a group chat (group chat IDs are negative numbers)
+- Confirm the message format is readable on mobile
+
+### Step 4 — Test endpoint + history
+
+- Add `POST /alerts/test` endpoint that fires a dummy signal through all enabled channels — no need to wait for a real signal to verify credentials
+- Add an `alert_log` table to the DB (channel, ticker, sent\_at, status) so the UI can show "last alert: Telegram · 2h ago"
+- Add rate-limiting: skip re-alerting the same ticker + direction within a configurable cooldown window (default: 1h)
 
 ---
 
