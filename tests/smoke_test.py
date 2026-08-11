@@ -76,9 +76,15 @@ except Exception as exc:  # pragma: no cover
 paths = {getattr(r, "path", None) for r in app.routes}
 expected = {
     "/analyze",
+    "/analyze/stream",
     "/webhook/tradingview",
     "/signals",
+    "/signals/{signal_id}",
+    "/analysis",
+    "/analysis/{entry_id}",
     "/analysis/{ticker}",
+    "/market-data/{ticker}",
+    "/market-data/{ticker}/history",
     "/watchlist",
     "/health",
 }
@@ -119,6 +125,21 @@ check("get_recent_signals round-trip", len(recent) == 1 and recent[0]["ticker"] 
 database.save_analysis("TEST", {"trend": "bullish"}, {"ticker": "TEST"})
 hist = database.get_analysis_history("TEST")
 check("analysis_log round-trip", len(hist) == 1 and hist[0]["analysis_json"]["trend"] == "bullish")
+
+recent_all = database.get_recent_analyses(limit=10)
+check("get_recent_analyses returns saved entry",
+      len(recent_all) >= 1 and any(r["ticker"] == "TEST" for r in recent_all))
+
+deleted_sig = database.delete_signal(sig_id)
+check("delete_signal returns True", deleted_sig is True)
+after_del = database.get_recent_signals(limit=5, ticker="TEST")
+check("signal gone after delete", len(after_del) == 0)
+
+analysis_id = hist[0]["id"]
+deleted_an = database.delete_analysis(analysis_id)
+check("delete_analysis returns True", deleted_an is True)
+after_del_an = database.get_analysis_history("TEST")
+check("analysis gone after delete", len(after_del_an) == 0)
 
 
 # --------------------------------------------------------------------------- #
