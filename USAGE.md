@@ -1,6 +1,6 @@
 # Usage Guide
 
-Day-to-day operation of **offgrid-trader**. First-time install is in
+Day-to-day operation of **MarketSage**. First-time install is in
 [SETUP.md](SETUP.md).
 
 > ⚠️ **Not financial advice.** For educational/research use only.
@@ -23,7 +23,7 @@ bash scripts/setup_macos.sh   # macOS
 ollama serve &   # skip if already running
 
 ./start-infra.sh      # start shared Ollama proxy + Portainer (idempotent)
-docker compose up     # start offgrid-trader
+docker compose up     # start MarketSage
 ```
 
 **Other common commands:**
@@ -31,7 +31,7 @@ docker compose up     # start offgrid-trader
 ```bash
 docker compose up -d          # run detached (background)
 docker compose up --build     # rebuild images after a code change
-docker compose down           # stop offgrid-trader (Ollama/Portainer keep running)
+docker compose down           # stop MarketSage (Ollama/Portainer keep running)
 ```
 
 Subsequent runs skip the ~9 GB model download because the weights persist in
@@ -43,10 +43,10 @@ the `ollama_models` named volume, so the stack is ready in under a minute.
 
 | URL | Service | Purpose |
 |---|---|---|
-| http://localhost:5174 | React UI | Monitoring dashboard + on-demand analysis |
-| http://localhost:8010/docs | Backend API | OpenAPI docs — run `/analyze` interactively |
+| http://localhost:5174 | React UI | Dashboard · Analysis Explorer · Learn (glossary + education) |
+| http://localhost:8010/docs | Backend API | OpenAPI docs — try all endpoints interactively |
 | http://localhost:8010/health | Backend API | Liveness + scheduler status |
-| http://localhost:18889 | Aspire | Traces, metrics, structured logs (offgrid-trader only) |
+| http://localhost:18889 | Aspire | Traces, metrics, structured logs (MarketSage only) |
 | http://localhost:9000 | Portainer | Container management UI — logs, stats, console |
 
 The `ollama` container is internal-only (not published to the host); the backend
@@ -59,7 +59,7 @@ reaches it at `http://ollama:11434` on the `ai-shared` network.
 ### Stopping the stack
 
 ```bash
-# Stop offgrid-trader only (Ollama and Portainer keep running):
+# Stop MarketSage only (Ollama and Portainer keep running):
 docker compose down
 
 # Stop the shared infra (Ollama + Portainer + ai-shared network):
@@ -69,7 +69,7 @@ docker compose -f docker-compose.infra.yml down
 docker stop $(docker ps -q)
 ```
 
-> `docker compose down` removes the offgrid-trader containers but **not** the
+> `docker compose down` removes the MarketSage containers but **not** the
 > `ollama_models` volume — model weights are preserved.
 
 ### Restarting
@@ -110,11 +110,34 @@ docker compose ps
 | Method | Path | Description |
 |---|---|---|
 | POST | `/analyze` | On-demand analysis for any ticker |
+| POST | `/analyze/stream` | Same pipeline, streamed via SSE (step events + final result) |
+| GET | `/market-data/{ticker}` | Raw market-data dict (price, fundamentals, indicators) |
+| GET | `/market-data/{ticker}/history` | OHLCV + volume history (`?period=3mo&interval=1d`) |
 | POST | `/webhook/tradingview` | Receive a TradingView Pro alert → background scan |
 | GET | `/signals` | Recent stored signals (`?ticker=&limit=`) |
-| GET | `/analysis/{ticker}` | Analysis-log history for a ticker |
-| GET | `/watchlist` | Watchlist + scheduler status |
+| DELETE | `/signals/{id}` | Delete a stored signal by id |
+| GET | `/analysis` | Recent analysis-log entries across all tickers (`?limit=`) |
+| DELETE | `/analysis/{id}` | Delete an analysis-log entry by id |
+| GET | `/analysis/{ticker}` | Analysis-log history for a single ticker |
+| GET | `/watchlist` | Watchlist + scheduler status + alerts toggle |
+| POST | `/watchlist` | Add ticker (`{"ticker": "GOOGL"}`) — persisted in SQLite |
+| DELETE | `/watchlist/{ticker}` | Remove ticker — persisted in SQLite |
+| POST | `/settings/alerts` | Toggle alert dispatch (`{"enabled": true/false}`) |
 | GET | `/health` | Liveness + config summary |
+
+Full reference with request/response shapes: [docs/wiki/api.md](docs/wiki/api.md).
+
+### Analysis Explorer & Learn page
+
+The React UI has three tabs:
+
+- **Dashboard** — watchlist management and recent signals table (with per-row delete)
+- **Explorer** — ad-hoc analysis as a full-page walkthrough: live pipeline stepper,
+  price snapshot, 3-month history chart (toggle switch), RSI/MACD/EMA charts, AI
+  reasoning, the collapsible raw indicator table, and a collapsible **Analysis History**
+  panel that lets you re-open any saved run (with per-row delete)
+- **Learn** — static in-app wiki: how the pipeline works, what each indicator measures,
+  the four opportunity-detection rules, a trading glossary, and links to further reading
 
 ### Examples
 
@@ -279,13 +302,25 @@ docker volume rm ollama_models
 
 ---
 
-## 11. Adjusting log verbosity
+## 11. Logs and telemetry
 
 The backend logs to stdout. Follow them with:
 
 ```bash
 docker compose logs -f backend
 ```
+
+Structured log lines are emitted for every stage of the pipeline:
+
+| Logger | What it logs |
+|---|---|
+| `backend.data` | `yfinance ▶/◀` fetch (price, change%, vol ratio) and `tradingview ▶/◀` per timeframe (exchange, recommendation) |
+| `backend.analysis` | `ollama ▶/◀` prompt text, response text, and latency |
+| `backend.scheduler` | Scan loop events (start, market open/closed, scan results) |
+
+When `OTEL_EXPORTER_OTLP_ENDPOINT` is set (set automatically in Docker), all log lines are
+forwarded to **Aspire** at http://localhost:18889. Filter by logger name to trace the full
+data-fetch pipeline for any ticker.
 
 To reduce Ollama request timeouts on slow CPU inference, raise `OLLAMA_TIMEOUT`
 in `.env`, then `docker compose restart backend`.

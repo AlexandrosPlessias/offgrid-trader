@@ -1,6 +1,6 @@
 # Setup Guide
 
-First-time setup for **offgrid-trader**. After this, see
+First-time setup for **MarketSage**. After this, see
 [USAGE.md](USAGE.md) for day-to-day operation.
 
 The entire stack runs in Docker — no Python venv required.
@@ -85,8 +85,8 @@ If you're on `9p`/`drvfs`, re-clone into your WSL home:
 
 ```bash
 cd ~
-git clone <your-remote-url> offgrid-trader
-cd offgrid-trader
+git clone <your-remote-url> marketsage
+cd marketsage
 ```
 
 ---
@@ -94,8 +94,8 @@ cd offgrid-trader
 ## 3. Clone the repo
 
 ```bash
-git clone <your-remote-url> offgrid-trader
-cd offgrid-trader
+git clone <your-remote-url> marketsage
+cd marketsage
 ```
 
 ---
@@ -215,7 +215,7 @@ docker compose -f docker-compose.infra.yml \
 > (~9 GB) plus the insurance-poc models. This takes 15–30 minutes on first run.
 > Weights persist in a named Docker volume and are never re-downloaded.
 
-### Step 2 — Start offgrid-trader
+### Step 2 — Start MarketSage
 
 ```bash
 # GPU
