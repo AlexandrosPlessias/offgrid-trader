@@ -1169,9 +1169,10 @@ function EducationPage() {
             (name, sector, P/E, market cap) and 20-day averages. Free, no API key.
           </li>
           <li>
-            <strong>tradingview-ta</strong> — fetches RSI, MACD, EMA 20/50/200, Bollinger
-            Bands and Stochastic across three timeframes (1H, 4H, 1D) in one call. Free,
-            no account needed.
+            <strong>yfinance + ta library</strong> — OHLCV history is downloaded for three
+            timeframes (1H, 4H, 1D) and all indicators (RSI, MACD, EMA 20/50/200, Bollinger
+            Bands, Stochastic) are computed locally using the open-source{' '}
+            <code>ta</code> library. No account or API key needed; fully offline.
           </li>
           <li>
             <strong>Local Ollama AI</strong> — all indicator data is assembled into a

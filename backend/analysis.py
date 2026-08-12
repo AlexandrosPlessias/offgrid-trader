@@ -72,11 +72,16 @@ def _fmt(value: Any) -> str:
 
 
 def build_prompt(market_data: Dict[str, Any]) -> str:
-    """Render *market_data* into a compact, readable prompt for the model."""
+    """Render *market_data* into a compact, readable prompt for the model.
+
+    Optional ``news`` key in *market_data* (a list of headline strings from
+    Finnhub) is injected before the risk-factor section when non-empty.
+    """
 
     price = market_data.get("price", {}) or {}
     fundamentals = market_data.get("fundamentals", {}) or {}
     technicals = market_data.get("technicals", {}) or {}
+    news: List[str] = market_data.get("news") or []
 
     lines: List[str] = []
     lines.append(f"Ticker: {market_data.get('ticker')}")
@@ -130,6 +135,12 @@ def build_prompt(market_data: Dict[str, Any]) -> str:
     if market_data.get("errors"):
         lines.append("")
         lines.append("DATA WARNINGS: " + "; ".join(market_data["errors"]))
+
+    if news:
+        lines.append("")
+        lines.append("RECENT NEWS HEADLINES")
+        for headline in news:
+            lines.append(f"  - {headline}")
 
     lines.append("")
     lines.append(
