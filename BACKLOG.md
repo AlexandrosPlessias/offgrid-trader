@@ -21,7 +21,8 @@ Future ideas and planned improvements. No priority order within each item.
 
 ---
 
-## 1. Replace tradingview-ta with a free, open-source indicator stack
+## ✅ 1. Replace tradingview-ta with a free, open-source indicator stack
+*Shipped on branch `feature/backlog-item-1-indicators`*
 
 `tradingview-ta` works by scraping TradingView's internal API, which is not an officially supported integration and requires users to accept TradingView's ToS. Replace it with a combination of free, properly licensed alternatives:
 
