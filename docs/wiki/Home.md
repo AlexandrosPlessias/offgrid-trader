@@ -15,15 +15,15 @@ For each ticker in your watchlist (or on demand) the system runs a five-step pip
 
 ```
 yfinance          → live price, volume, fundamentals
-tradingview-ta    → RSI / MACD / EMA / BB / Stoch across 1H · 4H · 1D
+yfinance + ta     → OHLCV history → RSI / MACD / EMA / BB / Stoch (1H · 4H · 1D)
 Prompt builder    → assembles the market dict into a structured prompt
 Local Ollama      → qwen2.5:14b reasons about the data → JSON output
 Rule engine       → 4 deterministic checks → scored, confidence-filtered signals
 SQLite            → signals + analysis log persisted locally
-Alerts            → optional Gmail SMTP / Slack / Telegram
+Alerts            → optional Gmail SMTP · Telegram bot
 ```
 
-Results are visible in the React UI (Dashboard · Analysis Explorer · Learn) and via the REST API.
+Results are visible in the React UI (Dashboard · Explorer · Learn) and via the REST API.
 
 ---
 
@@ -33,7 +33,7 @@ Results are visible in the React UI (Dashboard · Analysis Explorer · Learn) an
 |---|---|
 | [Home](Home.md) | This page |
 | [Architecture](architecture.md) | Pipeline diagram, Docker service map, SSE streaming design, data persistence |
-| [API Reference](api.md) | All 12 endpoints with full request/response shapes and `curl` examples |
+| [API Reference](api.md) | All endpoints with full request/response shapes and `curl` examples |
 | [Indicators](indicators.md) | RSI, MACD, EMA, Bollinger Bands, Stochastic, Volume ratio — definitions, scales, what the system checks |
 | [Glossary](glossary.md) | Alphabetical trading terminology (bullish/bearish, support/resistance, R-multiple, etc.) |
 
@@ -55,11 +55,11 @@ Results are visible in the React UI (Dashboard · Analysis Explorer · Learn) an
 ```
 backend/
 ├── config.py         — env-driven settings, thresholds, secrets
-├── data.py           — yfinance + tradingview-ta → unified market dict
+├── data.py           — yfinance OHLCV + ta library → indicators + market dict
 ├── analysis.py       — prompt → Ollama /api/chat → parsed JSON
 ├── opportunities.py  — AI output + 4 rule checks → scored signals
 ├── database.py       — SQLite: signals, analysis_log, app_settings
-├── alerts.py         — Gmail SMTP + Slack webhook (confidence-gated)
+├── alerts.py         — Gmail SMTP · Telegram bot (confidence-gated)
 ├── scheduler.py      — async, market-hours-aware scan loop
 └── main.py           — FastAPI: endpoints, SSE streaming, lifespan
 

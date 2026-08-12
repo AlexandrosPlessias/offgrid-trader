@@ -19,19 +19,25 @@ bash scripts/setup_macos.sh   # macOS
 **Subsequent runs** (model already downloaded, image already built):
 
 ```bash
-# macOS only: ensure native Ollama is running (uses Metal GPU)
+# ── Step 1: start Docker (not auto-started on either platform) ──────────────
+# WSL2:   sudo service docker start
+# macOS:  open -a Docker   (wait for the menu-bar icon to stop animating)
+
+# ── Step 2: start shared infra + MarketSage ─────────────────────────────────
+# macOS only: ensure native Ollama is running first (Metal GPU)
 ollama serve &   # skip if already running
 
-./start-infra.sh      # start shared Ollama proxy + Portainer (idempotent)
-docker compose up     # start MarketSage
+./start-infra.sh           # start shared Ollama proxy + Portainer (idempotent)
+docker compose up -d       # start MarketSage in the background
 ```
 
 **Other common commands:**
 
 ```bash
-docker compose up -d          # run detached (background)
-docker compose up --build     # rebuild images after a code change
-docker compose down           # stop MarketSage (Ollama/Portainer keep running)
+docker compose up          # start in foreground — see live logs (Ctrl+C stops)
+docker compose up -d       # start detached — runs in background, prompt returns
+docker compose up --build  # rebuild images after a code change, then start
+docker compose down        # stop MarketSage (Ollama/Portainer keep running)
 ```
 
 Subsequent runs skip the ~9 GB model download because the weights persist in
@@ -314,7 +320,7 @@ Structured log lines are emitted for every stage of the pipeline:
 
 | Logger | What it logs |
 |---|---|
-| `backend.data` | `yfinance ▶/◀` fetch (price, change%, vol ratio) and `tradingview ▶/◀` per timeframe (exchange, recommendation) |
+| `backend.data` | `yfinance ▶/◀` fetch (price, change%, vol ratio) and `indicators ▶/◀` per timeframe (RSI, MACD, EMA, recommendation) |
 | `backend.analysis` | `ollama ▶/◀` prompt text, response text, and latency |
 | `backend.scheduler` | Scan loop events (start, market open/closed, scan results) |
 
@@ -339,4 +345,4 @@ in `.env`, then `docker compose restart backend`.
 | Port already in use (8010 / 5174 / 9000) | Stop the conflicting process (`ss -tlnp \| grep :<port>`) or change the host port in `docker-compose.yml` |
 | `could not select device driver "nvidia"` | Run `./start-infra.sh --cpu` then `docker compose up --build` |
 | Data changes not persisting | Ensure the `./data` bind mount exists and is writable (`chmod -R 777 data` on WSL2) |
-| yfinance / tradingview errors in logs | Transient upstream/network issues — the scan continues; problems are collected in each result's `errors` list |
+| yfinance / indicator errors in logs | Transient upstream/network issues — the scan continues; problems are collected in each result's `errors` list |

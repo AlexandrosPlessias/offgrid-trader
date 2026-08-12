@@ -20,7 +20,7 @@ a local Ollama model.
 ```
 backend/
 ├── config.py         # settings + thresholds + secrets from env (.env)
-├── data.py           # yfinance + tradingview-ta -> unified market dict
+├── data.py           # yfinance OHLCV + ta library -> indicators + market dict
 ├── analysis.py       # prompt -> local Ollama /api/chat -> parsed JSON
 ├── opportunities.py  # AI output + rule-based checks -> scored signals
 ├── database.py       # SQLite: signals + analysis_log + app_settings
@@ -136,7 +136,9 @@ The background scheduler starts automatically and scans the watchlist every
 | GET    | `/market-data/{ticker}/history` | OHLCV + volume history (`?period=3mo&interval=1d`). |
 | POST   | `/webhook/tradingview`        | Receive a TradingView Pro alert → background scan. |
 | GET    | `/signals`                    | Recent stored signals (`?ticker=&limit=`).         |
+| DELETE | `/signals/{id}`               | Delete a stored signal by id.                      |
 | GET    | `/analysis`                   | Recent analysis-log entries across all tickers (`?limit=`). |
+| DELETE | `/analysis/{id}`              | Delete an analysis-log entry by id.                |
 | GET    | `/analysis/{ticker}`          | Analysis-log history for a single ticker.          |
 | GET    | `/watchlist`                  | Effective watchlist + scheduler + alerts status.   |
 | POST   | `/watchlist`                  | Add a ticker (`{"ticker": "GOOGL"}`).              |
@@ -204,9 +206,9 @@ Only signals at or above the confidence floor are stored and alerted.
 
 ## Data & tooling
 
-- **Market data:** [yfinance](https://github.com/ranaroussi/yfinance)
-- **Indicators:** [tradingview-ta](https://github.com/AnErrupTion/python-tradingview-ta)
-  (RSI, MACD, EMA20/50/200, Bollinger Bands, Stochastic across 1H/4H/1D)
+- **Market data & indicators:** [yfinance](https://github.com/ranaroussi/yfinance)
+  (price, fundamentals, OHLCV) + [ta](https://github.com/bukosabino/ta)
+  (RSI, MACD, EMA20/50/200, Bollinger Bands, Stochastic — computed locally, no API key)
 - **AI:** local [Ollama](https://ollama.com/) `qwen2.5:14b` via `/api/chat`
 - **DB:** SQLite (file at `DATABASE_PATH`)
 - **Charts:** [Recharts](https://recharts.org/) (RSI/MACD/EMA/price-history in the frontend)

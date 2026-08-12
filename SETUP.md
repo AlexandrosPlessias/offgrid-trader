@@ -7,8 +7,8 @@ The entire stack runs in Docker — no Python venv required.
 On **macOS**, native Ollama is used so inference runs on Apple Metal GPU (Docker containers
 cannot access it). On Windows/Linux, Ollama runs inside Docker.
 It is fully **local and zero-cost**: market data comes from free sources
-(yfinance, tradingview-ta) and the AI runs on a local Ollama `qwen2.5:14b`
-model. No paid or cloud APIs are used.
+(yfinance + ta library for indicators) and the AI runs on a local Ollama
+`qwen2.5:14b` model. No paid or cloud APIs are required.
 
 > ⚠️ **Not financial advice.** For educational/research use only.
 
@@ -35,14 +35,31 @@ to verify the result.
 
 ## 1. Prerequisites
 
+### Windows / WSL2
+
 | Requirement | Notes |
 |---|---|
 | **Docker Desktop** | Enable WSL2 integration: Settings → Resources → WSL Integration → turn on your Ubuntu distro |
 | **WSL2 + Ubuntu** | 22.04 or 24.04 (`wsl --install -d Ubuntu` from PowerShell) |
-| **RAM** | 8 GB minimum (`qwen2.5:7b` ≈ 5 GB resident; 16 GB recommended for `qwen2.5:14b` on Windows/Linux) |
-| **Disk** | ~6 GB free (macOS: `qwen2.5:7b` in `~/.ollama`; Windows/Linux: model weights + images in Docker volume) |
-| **NVIDIA GPU** *(recommended)* | With the NVIDIA Container Toolkit for fast inference. CPU-only works too — see [section 5](#5-first-run) |
-| **git** | To clone the repo |
+| **RAM** | 8 GB minimum; 16 GB recommended for `qwen2.5:14b` |
+| **Disk** | ~12 GB free (model weights + Docker images in named volume) |
+| **NVIDIA GPU** *(recommended)* | NVIDIA Container Toolkit for fast inference — see GPU section below |
+| **git** | To clone the repo (run inside WSL, not PowerShell) |
+
+### macOS
+
+| Requirement | Notes |
+|---|---|
+| **Docker Desktop for Mac** | Intel or Apple Silicon; allocate ≥12 GB RAM in Settings → Resources |
+| **Ollama (native)** | Install from https://ollama.com/download — must be running before `./start-infra.sh`. The infra script proxies Docker to the native Ollama so inference runs on Apple Metal GPU |
+| **RAM** | 8 GB minimum; 16 GB recommended for `qwen2.5:14b` |
+| **Disk** | ~6 GB free (`qwen2.5:7b` weights stored in `~/.ollama` by native Ollama) |
+| **git** | Xcode Command Line Tools (`xcode-select --install`) or Homebrew git |
+
+> **Why native Ollama on macOS?** Docker containers cannot access Apple Metal GPU, so
+> inference would run on CPU inside Docker (very slow). Running Ollama natively gives
+> full Metal acceleration; the infra stack's `ollama-proxy` routes the backend's
+> requests transparently to `http://host.docker.internal:11434`.
 
 ### GPU support in WSL2 (recommended)
 
@@ -182,6 +199,37 @@ Trigger a test alert via the React UI or `curl` to confirm delivery.
 
 ## 5. First run
 
+### Step 0 — Make sure Docker is running
+
+Docker is **not started automatically** on either platform. You must bring it
+up before running any `docker compose` command.
+
+**WSL2 (Windows):**
+```bash
+sudo service docker start
+```
+Run this once per WSL session. You can verify Docker is up with `docker ps`.
+
+**macOS:**
+Open **Docker Desktop** from Spotlight or Applications, or from the terminal:
+```bash
+open -a Docker
+```
+Wait until the Docker icon in the menu bar stops animating (usually ~10 s).
+
+> **Disable auto-start (save resources when idle):**
+>
+> *WSL2:* Run once to prevent Docker from starting on every WSL boot:
+> ```bash
+> sudo systemctl disable docker.service docker.socket
+> ```
+> Re-enable any time with `sudo systemctl enable docker.service docker.socket`.
+>
+> *macOS:* Docker Desktop → Settings → General → uncheck
+> **"Start Docker Desktop when you log in"**, then quit Docker Desktop.
+
+---
+
 ### Step 1 — Start shared infrastructure (Ollama + Portainer)
 
 Ollama and Portainer live in a shared stack so they can be reused by other
@@ -268,11 +316,23 @@ curl -X POST http://localhost:8010/analyze \
 
 ## 7. Smoke test (optional)
 
-Verify the backend logic is wired correctly without touching live APIs:
+Verify the backend logic is wired correctly without touching live APIs.
+
+> **Note:** `tests/` is not copied into the Docker image (only `backend/` is).
+> `docker compose exec backend python tests/smoke_test.py` will fail with a
+> module-not-found error. Use the `-v` mount approach below instead.
 
 ```bash
-# Inside the running backend container (no extra installs needed):
-docker compose exec backend python tests/smoke_test.py
+# Mount the repo into the already-built backend image and run offline:
+docker run --rm \
+  -v "$(pwd)":/workspace \
+  -w /workspace \
+  -e PYTHONPATH=/workspace \
+  -e DATABASE_PATH=/tmp/smoke.db \
+  -e EMAIL_ENABLED=false \
+  -e SLACK_ENABLED=false \
+  offgrid-trader-backend \
+  python3 tests/smoke_test.py
 ```
 
 All checks should print `PASS`. The final line will read:
@@ -281,7 +341,7 @@ All checks should print `PASS`. The final line will read:
 SMOKE TEST PASSED — all checks green
 ```
 
-To run locally instead (requires dev deps):
+To run locally instead (requires dev deps installed in the host environment):
 
 ```bash
 pip install -r requirements/dev.txt
