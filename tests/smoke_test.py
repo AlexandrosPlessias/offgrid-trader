@@ -6,7 +6,7 @@ Verifies that:
 * the DB schema initialises and round-trips a signal,
 * opportunity detection works on a synthetic market-data dict,
 * AI / market-data / alert code paths behave when their network deps are
-  mocked out (no live yfinance, tradingview-ta, Ollama or SMTP calls).
+  mocked out (no live yfinance, ta, Ollama or SMTP calls).
 
 HOW TO RUN
 ----------
@@ -171,7 +171,53 @@ check(
 
 
 # --------------------------------------------------------------------------- #
-# 6. AI analysis with mocked Ollama
+# 6. compute_indicators with mocked yfinance (no network)
+# --------------------------------------------------------------------------- #
+import numpy as np  # noqa: E402
+
+_n = 300  # enough bars for EMA200
+_idx = list(range(_n))
+_price = [100.0 + i * 0.01 for i in _idx]
+_fake_ohlcv = {
+    "Open":   _price,
+    "High":   [p + 0.5 for p in _price],
+    "Low":    [p - 0.5 for p in _price],
+    "Close":  _price,
+    "Volume": [1_000_000] * _n,
+}
+
+try:
+    import pandas as pd  # noqa: E402
+    _fake_df = pd.DataFrame(_fake_ohlcv)
+    _fake_df.index = pd.date_range("2024-01-01", periods=_n, freq="1h")
+
+    with mock.patch("yfinance.download", return_value=_fake_df):
+        from backend.data import compute_indicators, fetch_finnhub_news
+        ind = compute_indicators("TEST")
+
+    check(
+        "compute_indicators returns all three timeframes",
+        set(ind.get("technicals", {}).keys()) >= {"1H", "4H", "1D"},
+        detail=str(list(ind.get("technicals", {}).keys())),
+    )
+    tf_1h = (ind.get("technicals") or {}).get("1H") or {}
+    check(
+        "compute_indicators 1H has RSI and recommendation",
+        tf_1h.get("RSI") is not None and tf_1h.get("recommendation") is not None,
+        detail=str(tf_1h),
+    )
+    check(
+        "fetch_finnhub_news returns [] when no key set",
+        fetch_finnhub_news("TEST", "") == [],
+    )
+except Exception as exc:  # pragma: no cover
+    check("compute_indicators smoke", False, repr(exc))
+    check("compute_indicators 1H has RSI and recommendation", False)
+    check("fetch_finnhub_news returns [] when no key set", False)
+
+
+# --------------------------------------------------------------------------- #
+# 7. AI analysis with mocked Ollama
 # --------------------------------------------------------------------------- #
 fake_response = mock.Mock()
 fake_response.status_code = 200
@@ -201,7 +247,7 @@ check("analyze() handles Ollama offline", "error" in err and err["opportunity"] 
 
 
 # --------------------------------------------------------------------------- #
-# 7. Alerts formatting + confidence gating (no real sends)
+# 8. Alerts formatting + confidence gating (no real sends)
 # --------------------------------------------------------------------------- #
 msg = alerts.format_alert(opps[0])
 check("format_alert builds subject/text", "subject" in msg and "text" in msg)
@@ -211,7 +257,7 @@ check("send_alert skips below floor", low_conf["skipped"] is True and low_conf["
 
 
 # --------------------------------------------------------------------------- #
-# 8. Market-hours logic
+# 9. Market-hours logic
 # --------------------------------------------------------------------------- #
 from datetime import datetime  # noqa: E402
 from zoneinfo import ZoneInfo  # noqa: E402
@@ -225,7 +271,7 @@ check("market closed on weekend", scheduler.is_market_open(closed_dt) is False)
 
 
 # --------------------------------------------------------------------------- #
-# 9. TestClient hits /health without touching the network
+# 10. TestClient hits /health without touching the network
 # --------------------------------------------------------------------------- #
 try:
     from fastapi.testclient import TestClient

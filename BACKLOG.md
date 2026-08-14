@@ -21,7 +21,8 @@ Future ideas and planned improvements. No priority order within each item.
 
 ---
 
-## 1. Replace tradingview-ta with a free, open-source indicator stack
+## ✅ 1. Replace tradingview-ta with a free, open-source indicator stack
+*Shipped on branch `feature/backlog-item-1-indicators`*
 
 `tradingview-ta` works by scraping TradingView's internal API, which is not an officially supported integration and requires users to accept TradingView's ToS. Replace it with a combination of free, properly licensed alternatives:
 
@@ -77,7 +78,122 @@ Mermaid renders natively in GitHub — no extra tooling needed.
 
 ---
 
-## 2. Low-cost / zero-cost cloud LLM hosting
+## 2. Richer data layer — news display, fundamentals, balance sheet, macro, LLM telemetry
+
+Five additions to the data pipeline and UI:
+
+---
+
+### 2a. News headlines in the UI
+
+**Current state:** Finnhub headlines are already fetched (gated by `FINNHUB_API_KEY`) and injected into the Ollama prompt — but they are **not rendered in the Explorer UI**. Users cannot see which headlines the AI saw.
+
+**What to add:**
+- Show the `news` array (returned in `/market-data` and the SSE stream result) as a card in the Explorer page's "Price Snapshot" or a dedicated "News" section
+- Each headline as a bullet with the source domain and date if available from the Finnhub response
+- Empty state: "No recent headlines (set `FINNHUB_API_KEY` to enable)" so users know why it's blank
+
+**Backend change:** expose `headline`, `source`, `datetime`, and `url` from the Finnhub response (currently only `headline` is kept — `fetch_finnhub_news` in `data.py` returns `List[str]`). Change return type to `List[Dict]` with at minimum `{"headline": str, "source": str, "url": str, "datetime": int}`.
+
+---
+
+### 2b. P/E ratio and fundamentals card
+
+**Current state:** P/E ratio, market cap, sector, and industry are **fetched** from yfinance `.info` (keys `pe_ratio`, `market_cap`, `sector`, `industry`, `name`) and sent to the AI prompt — but the Explorer UI only shows the company name. None of the fundamentals are rendered for the user.
+
+**What to add:**
+- A small "Fundamentals" row/card in the Explorer price snapshot:
+  `Market cap · P/E ratio · Sector / Industry`
+- Format market cap as human-readable (`$2.9T`, `$480B`, `$3.2M`)
+- Dim / hide fields that are `None` (ETFs have no P/E)
+
+---
+
+### 2c. Balance sheet summary
+
+**Current state:** not fetched.
+
+**What to add:**
+- Pull key balance sheet items from `yfinance.Ticker(ticker).balance_sheet` (pandas DataFrame, annual columns):
+  - Total assets, total liabilities, stockholders equity
+  - Cash and equivalents
+  - Total debt
+  - Debt-to-equity ratio (derived)
+- Add a `fetch_balance_sheet(ticker)` function in `data.py`; include in `get_market_data()` as `"balance_sheet": {...}`
+- Inject key ratios into the Ollama prompt (debt/equity, cash level)
+- Show a compact table in the Explorer UI under a collapsible "Balance Sheet" section
+
+**Notes:** `yfinance` balance sheet data is updated quarterly (not real-time); cache it per ticker per day using a simple `lru_cache` or SQLite timestamp check to avoid redundant network calls during a scan.
+
+---
+
+### 2d. US macro-economic context + Shiller P/E (CAPE)
+
+**Current state:** not fetched. The AI has no view of macro conditions (Fed rate, inflation, market regime, or broad market valuation).
+
+**What to add:**
+
+*Standard macro indicators* — fetch from the **FRED API** (St. Louis Fed — free, no API key needed for CSV endpoints):
+
+| FRED series | Metric | Update cadence |
+|---|---|---|
+| `FEDFUNDS` | Effective Fed funds rate | Monthly |
+| `CPIAUCSL` | CPI (compute YoY %) | Monthly |
+| `UNRATE` | Unemployment rate | Monthly |
+| `T10Y2Y` | 10y-2y yield spread (inversion = recession signal) | Daily |
+
+*Shiller P/E (CAPE — Cyclically Adjusted Price-to-Earnings):*
+
+The Shiller P/E divides the S&P 500 price by the **10-year inflation-adjusted average earnings**. It is a long-run market-valuation gauge — historically above ~30 signals overvaluation, below ~15 signals undervaluation. Unlike the trailing P/E it is not distorted by a single boom/bust earnings year.
+
+- **Source:** Robert Shiller publishes the raw dataset at Yale (`http://www.econ.yale.edu/~shiller/data.htm`). The simplest reliable fetch is **FRED series `CAPE`** (updated monthly, no key required):
+  ```python
+  requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=CAPE")
+  ```
+- Parse the CSV, take the last non-null value and its date.
+- Add to the macro prompt block alongside standard indicators:
+  ```
+  MACRO CONTEXT (US)
+    Fed Funds Rate: 5.25%  |  CPI YoY: 3.1%  |  Unemployment: 3.9%
+    Yield curve (10y-2y): -0.42% (inverted — recession signal)
+    Shiller P/E (CAPE): 34.2  [hist. avg ~17; >30 = expensive market]
+  ```
+- The AI can use CAPE to modulate confidence: a BUY signal in a CAPE-35 environment warrants a lower confidence than the same technical setup at CAPE-18.
+
+**Implementation:**
+- Add `fetch_macro()` in `data.py`; wrap each series fetch in a `try/except` so a FRED outage never kills a scan
+- Cache the result in SQLite `app_settings` with a `macro_cached_at` timestamp; only re-fetch if older than 6 hours (macro data is slow-moving)
+- Include in `get_market_data()` as `"macro": {"fed_rate": ..., "cpi_yoy": ..., "unemployment": ..., "yield_spread": ..., "cape": ..., "cape_date": ...}`
+- Show a compact "Macro" panel in the Explorer UI (below the Fundamentals card)
+
+**Notes:** FRED rate limits are generous (120 req/min). All series listed are public and require no registration. CAPE lags ~1 month — document this in the UI tooltip.
+
+---
+
+### 2e. LLM prompt and response in Aspire telemetry
+
+**Current state:** `analysis.py` logs `ollama ▶` (prompt text) and `ollama ◀` (response text) via Python `logging.INFO` — these reach **stdout** but are **not structured** into OTEL spans, so Aspire shows them only as raw log lines with no timing tree, no attributes, and no way to diff prompt vs response.
+
+**What to add:**
+- Wrap the `call_ollama()` function in an **OTEL span** using `opentelemetry.trace`:
+  ```python
+  with tracer.start_as_current_span("ollama.chat") as span:
+      span.set_attribute("gen_ai.system", "ollama")
+      span.set_attribute("gen_ai.request.model", _model)
+      span.set_attribute("gen_ai.request.max_tokens", 0)
+      span.set_attribute("llm.prompt_chars", len(user_prompt))
+      span.set_attribute("llm.ticker", ticker or "")
+      # ... after response:
+      span.set_attribute("llm.response_chars", len(content))
+      span.set_attribute("llm.latency_s", latency)
+  ```
+- Add an **OTEL log event** on the span for the full prompt text and response text (use `span.add_event("prompt", {"content": user_prompt})` and `span.add_event("response", {"content": content})`)
+- In Aspire, this surfaces the full LLM call as a **traced span** inside the `/analyze` request waterfall, showing prompt → model → response with exact latency
+- `opentelemetry-sdk` is already installed (OTEL is wired up in `backend/main.py`); this is additive — no new packages needed
+
+---
+
+## 3. Low-cost / zero-cost cloud LLM hosting
 
 Replace (or complement) local Ollama with a free or near-free cloud inference API so the app can run without a beefy local machine (no 16 GB RAM, no GPU required).
 

@@ -144,6 +144,14 @@ class AlertsSettingRequest(BaseModel):
     enabled: bool = Field(..., description="Enable or disable alert dispatch")
 
 
+class OllamaSettingRequest(BaseModel):
+    model: Optional[str] = Field(None, description="Ollama model tag, e.g. qwen2.5:7b")
+    timeout: Optional[int] = Field(
+        None, ge=10, le=3600,
+        description="Request timeout in seconds (10–3600)"
+    )
+
+
 class TradingViewWebhook(BaseModel):
     """Loose schema for TradingView Pro alert payloads.
 
@@ -210,10 +218,11 @@ def _background_analyze(ticker: str, send_alerts: bool = True) -> None:
 @app.get("/health")
 def health() -> Dict[str, Any]:
     settings = get_settings()
+    db_model = get_setting("ollama_model", "")
     return {
         "status": "ok",
         "version": __version__,
-        "ollama_model": settings.ollama.model,
+        "ollama_model": db_model or settings.ollama.model,
         "ollama_host": settings.ollama.host,
         "watchlist_size": len(settings.watchlist),
         "scheduler": scheduler.status(),
@@ -282,6 +291,54 @@ def remove_ticker(ticker: str) -> Dict[str, Any]:
 def set_alerts(request: AlertsSettingRequest) -> Dict[str, Any]:
     set_setting("alerts_enabled", "true" if request.enabled else "false")
     return {"alerts_enabled": request.enabled}
+
+
+@app.get("/settings")
+def get_all_settings() -> Dict[str, Any]:
+    """Return current effective settings (env defaults overridden by DB values)."""
+    cfg = get_settings()
+    db_model   = get_setting("ollama_model",   "")
+    db_timeout = get_setting("ollama_timeout", "")
+    return {
+        "ollama_model":   db_model   or cfg.ollama.model,
+        "ollama_timeout": int(db_timeout) if db_timeout else cfg.ollama.timeout,
+        "alerts_enabled": _alerts_enabled(),
+        "env_model":      cfg.ollama.model,
+        "env_timeout":    cfg.ollama.timeout,
+    }
+
+
+@app.post("/settings/ollama")
+def set_ollama_settings(request: OllamaSettingRequest) -> Dict[str, Any]:
+    """Persist Ollama model and/or timeout to the DB (no restart required)."""
+    cfg = get_settings()
+    if request.model is not None:
+        set_setting("ollama_model", request.model)
+    if request.timeout is not None:
+        set_setting("ollama_timeout", str(request.timeout))
+    db_model   = get_setting("ollama_model",   "")
+    db_timeout = get_setting("ollama_timeout", "")
+    return {
+        "ollama_model":   db_model   or cfg.ollama.model,
+        "ollama_timeout": int(db_timeout) if db_timeout else cfg.ollama.timeout,
+    }
+
+
+@app.get("/settings/models")
+def list_ollama_models() -> Dict[str, Any]:
+    """Return models currently pulled in the local Ollama instance."""
+    import requests as _req
+    cfg = get_settings()
+    try:
+        resp = _req.get(
+            f"{cfg.ollama.host}/api/tags", timeout=5
+        )
+        resp.raise_for_status()
+        models = [m["name"] for m in resp.json().get("models", [])]
+    except Exception as exc:
+        models = []
+        _log.warning("ollama /api/tags failed: %s", exc)
+    return {"models": models}
 
 
 @app.post("/analyze")

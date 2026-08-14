@@ -182,6 +182,12 @@ class Settings:
         ]
     )
 
+    # Optional Finnhub API key — enables recent news headlines in AI prompt.
+    # Get a free key at https://finnhub.io/  (60 req/min on the free tier).
+    finnhub_api_key: str = field(
+        default_factory=lambda: _env_str("FINNHUB_API_KEY", "")
+    )
+
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     market_hours: MarketHours = field(default_factory=MarketHours)
     thresholds: Thresholds = field(default_factory=Thresholds)

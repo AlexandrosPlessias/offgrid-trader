@@ -1,12 +1,13 @@
 """Market-data acquisition layer.
 
-Combines two free/local data sources into a single dictionary that is ready
-to be handed to the AI prompt builder:
+Combines free/local data sources into a single dictionary ready for the AI
+prompt builder:
 
 * **yfinance** — spot price, daily change, volume, moving averages (MA5/MA20),
   52-week high/low and a few fundamentals.
-* **tradingview-ta** — RSI, MACD, EMA20/50/200, Bollinger Bands and Stochastic
-  across the 1H, 4H and 1D timeframes.
+* **yfinance + ta** — RSI, MACD, EMA20/50/200, Bollinger Bands and Stochastic
+  across the 1H, 4H and 1D timeframes, computed locally from OHLCV history.
+* **Finnhub** (optional) — recent news headlines, gated by ``FINNHUB_API_KEY``.
 
 Everything is wrapped in defensive error handling so a failure in one source
 (or one timeframe) never takes down the whole scan; partial results are
@@ -20,28 +21,23 @@ Run standalone::
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 _log = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------------- #
-# yfinance exchange code -> TradingView exchange name mapping.
-# --------------------------------------------------------------------------- #
-_YF_TO_TV_EXCHANGE: Dict[str, str] = {
+# Exchange display mapping: yfinance exchange code → readable name.
+_YF_TO_EXCHANGE: Dict[str, str] = {
     "NMS": "NASDAQ",
     "NGM": "NASDAQ",
     "NCM": "NASDAQ",
     "NAS": "NASDAQ",
     "NYQ": "NYSE",
     "NYE": "NYSE",
-    "PCX": "AMEX",  # NYSE Arca (ETFs such as SPY resolve to AMEX on TradingView)
+    "PCX": "AMEX",
     "ASE": "AMEX",
     "BATS": "AMEX",
 }
-
-# Fallback order when the exchange cannot be inferred from yfinance.
-_DEFAULT_TV_EXCHANGES: List[str] = ["NASDAQ", "NYSE", "AMEX"]
 
 _TIMEFRAMES = ("1H", "4H", "1D")
 
@@ -55,7 +51,6 @@ def _safe_float(value: Any) -> Optional[float]:
         if value is None:
             return None
         result = float(value)
-        # yfinance sometimes returns NaN.
         if result != result:  # noqa: PLR0124 - NaN check
             return None
         return result
@@ -64,32 +59,46 @@ def _safe_float(value: Any) -> Optional[float]:
 
 
 # --------------------------------------------------------------------------- #
-# yfinance
+# yfinance — price / fundamentals
 # --------------------------------------------------------------------------- #
 def fetch_yfinance(ticker: str) -> Dict[str, Any]:
     """Fetch price/volume/fundamentals for *ticker* from yfinance.
 
     Returns a dict with ``price``, ``fundamentals`` and an ``exchange_hint``
-    used to help TradingView resolve the correct exchange. Raises nothing:
-    failures are surfaced via the ``error`` key.
+    for display. Raises nothing: failures are surfaced via the ``error`` key.
     """
 
     import yfinance as yf
 
-    result: Dict[str, Any] = {"price": {}, "fundamentals": {}, "exchange_hint": None}
+    result: Dict[str, Any] = {
+        "price": {}, "fundamentals": {}, "exchange_hint": None,
+    }
     _log.info("yfinance ▶ %s", ticker)
     try:
         yf_ticker = yf.Ticker(ticker)
 
         # Historical window for moving averages and average volume.
         history = yf_ticker.history(period="3mo", interval="1d")
-        closes = [c for c in history["Close"].tolist() if c == c] if not history.empty else []
-        volumes = [v for v in history["Volume"].tolist() if v == v] if not history.empty else []
+        closes = (
+            [c for c in history["Close"].tolist() if c == c]
+            if not history.empty else []
+        )
+        volumes = (
+            [v for v in history["Volume"].tolist() if v == v]
+            if not history.empty else []
+        )
 
-        ma5 = round(sum(closes[-5:]) / len(closes[-5:]), 4) if len(closes) >= 5 else None
-        ma20 = round(sum(closes[-20:]) / len(closes[-20:]), 4) if len(closes) >= 20 else None
+        ma5 = (
+            round(sum(closes[-5:]) / len(closes[-5:]), 4)
+            if len(closes) >= 5 else None
+        )
+        ma20 = (
+            round(sum(closes[-20:]) / len(closes[-20:]), 4)
+            if len(closes) >= 20 else None
+        )
         avg_volume = (
-            round(sum(volumes[-20:]) / len(volumes[-20:]), 2) if len(volumes) >= 1 else None
+            round(sum(volumes[-20:]) / len(volumes[-20:]), 2)
+            if len(volumes) >= 1 else None
         )
 
         # Prefer the lightweight fast_info accessor, fall back to history.
@@ -104,14 +113,18 @@ def fetch_yfinance(ticker: str) -> Dict[str, Any]:
                 return _safe_float(getattr(fast, key, None))
 
         current = _fi("last_price") or (closes[-1] if closes else None)
-        previous_close = _fi("previous_close") or (closes[-2] if len(closes) >= 2 else None)
+        previous_close = (
+            _fi("previous_close") or (closes[-2] if len(closes) >= 2 else None)
+        )
         volume = _fi("last_volume") or (volumes[-1] if volumes else None)
 
         change = None
         change_pct = None
         if current is not None and previous_close:
             change = round(current - previous_close, 4)
-            change_pct = round((current - previous_close) / previous_close * 100, 4)
+            change_pct = round(
+                (current - previous_close) / previous_close * 100, 4
+            )
 
         volume_ratio = None
         if volume and avg_volume:
@@ -148,13 +161,17 @@ def fetch_yfinance(ticker: str) -> Dict[str, Any]:
             "pe_ratio": _safe_float(info.get("trailingPE")),
         }
 
-        # Resolve the exchange hint for TradingView.
-        yf_exchange = (info.get("exchange") or getattr(fast, "exchange", None) or "").upper()
-        result["exchange_hint"] = _YF_TO_TV_EXCHANGE.get(yf_exchange)
+        # Resolve a human-readable exchange name for display.
+        yf_exchange = (
+            info.get("exchange") or getattr(fast, "exchange", None) or ""
+        ).upper()
+        result["exchange_hint"] = _YF_TO_EXCHANGE.get(yf_exchange)
+
     except Exception as exc:  # pragma: no cover - network dependent
         result["error"] = f"yfinance error: {exc}"
         _log.warning("yfinance ✗ %s: %s", ticker, exc)
         return result
+
     price = result.get("price", {})
     _log.info(
         "yfinance ◀ %s price=%s change_pct=%s vol_ratio=%s",
@@ -167,108 +184,230 @@ def fetch_yfinance(ticker: str) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# tradingview-ta
+# yfinance + ta — technical indicators
 # --------------------------------------------------------------------------- #
-def _tv_intervals() -> Dict[str, Any]:
-    from tradingview_ta import Interval
+def _fetch_ohlcv(ticker: str, period: str, interval: str):
+    """Download OHLCV via yfinance; returns empty DataFrame on any failure."""
+    import pandas as pd
+    import yfinance as yf
 
-    return {
-        "1H": Interval.INTERVAL_1_HOUR,
-        "4H": Interval.INTERVAL_4_HOURS,
-        "1D": Interval.INTERVAL_1_DAY,
-    }
-
-
-def _parse_tv_indicators(indicators: Dict[str, Any], recommendation: Optional[str]) -> Dict[str, Any]:
-    """Normalise the raw tradingview-ta indicator dict into our schema."""
-
-    macd = _safe_float(indicators.get("MACD.macd"))
-    macd_signal = _safe_float(indicators.get("MACD.signal"))
-    histogram = round(macd - macd_signal, 5) if macd is not None and macd_signal is not None else None
-
-    return {
-        "close": _safe_float(indicators.get("close")),
-        "RSI": _safe_float(indicators.get("RSI")),
-        "MACD": {"macd": macd, "signal": macd_signal, "histogram": histogram},
-        "EMA20": _safe_float(indicators.get("EMA20")),
-        "EMA50": _safe_float(indicators.get("EMA50")),
-        "EMA200": _safe_float(indicators.get("EMA200")),
-        "BollingerBands": {
-            "upper": _safe_float(indicators.get("BB.upper")),
-            "middle": _safe_float(indicators.get("SMA20")),
-            "lower": _safe_float(indicators.get("BB.lower")),
-        },
-        "Stochastic": {
-            "k": _safe_float(indicators.get("Stoch.K")),
-            "d": _safe_float(indicators.get("Stoch.D")),
-        },
-        "recommendation": recommendation,
-    }
+    try:
+        df = yf.download(ticker, period=period, interval=interval,
+                         auto_adjust=True, progress=False)
+        if df.empty:
+            return pd.DataFrame()
+        # yfinance may return MultiIndex columns — flatten to simple names.
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+        return df
+    except Exception as exc:
+        _log.warning("ohlcv ✗ %s %s/%s: %s", ticker, period, interval, exc)
+        return pd.DataFrame()
 
 
-def fetch_tradingview(
-    ticker: str,
-    exchange_hint: Optional[str] = None,
-    screener: str = "america",
-) -> Dict[str, Any]:
-    """Fetch multi-timeframe technicals for *ticker* from tradingview-ta.
+def _safe_last(series) -> Optional[float]:
+    """Return the last finite float from a pandas Series, or None."""
+    try:
+        val = series.dropna().iloc[-1]
+        return float(val)
+    except (IndexError, TypeError, ValueError):
+        return None
 
-    Returns ``{"technicals": {"1H": {...}, "4H": {...}, "1D": {...}},
-    "errors": [...]}``. Each timeframe is fetched independently; the exchange
-    is auto-detected by trying the hinted exchange first, then a fallback list.
+
+def _recommendation(rsi, macd_hist, ema20, ema50, close) -> str:
+    """BUY / SELL / NEUTRAL from a symmetric 4-signal vote.
+
+    Each signal contributes +1 (bullish), -1 (bearish) or 0 (unavailable).
+    Score ≥ 2 → BUY, ≤ -2 → SELL, else NEUTRAL.
     """
+    score = 0
+    if rsi is not None:
+        if rsi > 60:
+            score += 1
+        elif rsi < 40:
+            score -= 1
+    if macd_hist is not None:
+        score += 1 if macd_hist > 0 else -1
+    if close is not None and ema20 is not None:
+        score += 1 if close > ema20 else -1
+    if close is not None and ema50 is not None:
+        score += 1 if close > ema50 else -1
+    if score >= 2:
+        return "BUY"
+    if score <= -2:
+        return "SELL"
+    return "NEUTRAL"
 
-    from tradingview_ta import TA_Handler
 
-    intervals = _tv_intervals()
-    candidates: List[str] = []
-    if exchange_hint:
-        candidates.append(exchange_hint)
-    candidates.extend(e for e in _DEFAULT_TV_EXCHANGES if e not in candidates)
+def _indicators_from_df(df) -> Dict[str, Any]:
+    """Compute RSI, MACD, EMA, Bollinger Bands and Stochastic from OHLCV.
 
-    technicals: Dict[str, Any] = {}
-    errors: List[str] = []
-    resolved_exchange: Optional[str] = None
+    Returns a per-timeframe dict. All values are None when df is too short.
+    """
+    _empty: Dict[str, Any] = {
+        "close": None,
+        "RSI": None,
+        "MACD": {"macd": None, "signal": None, "histogram": None},
+        "EMA20": None, "EMA50": None, "EMA200": None,
+        "BollingerBands": {"upper": None, "middle": None, "lower": None},
+        "Stochastic": {"k": None, "d": None},
+        "recommendation": None,
+    }
 
-    for label, interval in intervals.items():
-        analysis = None
-        last_error: Optional[str] = None
-        # Once an exchange resolves, reuse it for the remaining timeframes.
-        try_exchanges = [resolved_exchange] if resolved_exchange else candidates
-        _log.info("tradingview ▶ %s %s exchanges=%s", ticker, label, try_exchanges)
-        for exchange in try_exchanges:
-            try:
-                handler = TA_Handler(
-                    symbol=ticker,
-                    screener=screener,
-                    exchange=exchange,
-                    interval=interval,
-                )
-                analysis = handler.get_analysis()
-                resolved_exchange = exchange
-                break
-            except Exception as exc:  # try the next candidate exchange
-                last_error = f"{exchange}: {exc}"
-                continue
+    if df is None or df.empty or len(df) < 14:
+        return _empty
 
-        if analysis is None:
-            errors.append(f"tradingview {label} failed ({last_error})")
-            _log.warning("tradingview ✗ %s %s: %s", ticker, label, last_error)
-            technicals[label] = None
-            continue
+    import ta as ta_lib
 
-        recommendation = None
-        try:
-            recommendation = analysis.summary.get("RECOMMENDATION")
-        except Exception:
-            recommendation = None
-        technicals[label] = _parse_tv_indicators(analysis.indicators or {}, recommendation)
-        _log.info(
-            "tradingview ◀ %s %s exchange=%s rec=%s",
-            ticker, label, resolved_exchange, recommendation,
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
+    n = len(df)
+
+    rsi = _safe_last(ta_lib.momentum.RSIIndicator(close, window=14).rsi())
+
+    macd_ind = ta_lib.trend.MACD(
+        close, window_slow=26, window_fast=12, window_sign=9
+    )
+    macd_val = _safe_last(macd_ind.macd())
+    macd_sig = _safe_last(macd_ind.macd_signal())
+    macd_hist = _safe_last(macd_ind.macd_diff())
+
+    def _ema(w: int):
+        if n < w:
+            return None
+        return _safe_last(
+            ta_lib.trend.EMAIndicator(close, window=w).ema_indicator()
         )
 
-    return {"technicals": technicals, "exchange": resolved_exchange, "errors": errors}
+    ema20 = _ema(20)
+    ema50 = _ema(50)
+    ema200 = _ema(200)
+
+    if n >= 20:
+        bb = ta_lib.volatility.BollingerBands(close, window=20)
+        bb_upper = _safe_last(bb.bollinger_hband())
+        bb_mid = _safe_last(bb.bollinger_mavg())
+        bb_lower = _safe_last(bb.bollinger_lband())
+    else:
+        bb_upper = bb_mid = bb_lower = None
+
+    stoch = ta_lib.momentum.StochasticOscillator(high, low, close, window=14)
+    stoch_k = _safe_last(stoch.stoch())
+    stoch_d = _safe_last(stoch.stoch_signal())
+
+    close_last = _safe_last(close)
+    rec = _recommendation(rsi, macd_hist, ema20, ema50, close_last)
+
+    return {
+        "close": close_last,
+        "RSI": rsi,
+        "MACD": {"macd": macd_val, "signal": macd_sig, "histogram": macd_hist},
+        "EMA20": ema20,
+        "EMA50": ema50,
+        "EMA200": ema200,
+        "BollingerBands": {
+            "upper": bb_upper, "middle": bb_mid, "lower": bb_lower,
+        },
+        "Stochastic": {"k": stoch_k, "d": stoch_d},
+        "recommendation": rec,
+    }
+
+
+def compute_indicators(ticker: str) -> Dict[str, Any]:
+    """Compute multi-timeframe technicals using yfinance OHLCV + ta library.
+
+    Drop-in replacement for the removed fetch_tradingview(). Returns the same
+    shape: ``{"technicals": {"1H": {...}, "4H": {...}, "1D": {...}},
+    "exchange": None, "errors": [...]}``.
+
+    Download strategy
+    -----------------
+    * 1H and 4H share one yfinance call — ``period="1y", interval="1h"``:
+      ~1 638 1H bars → ~410 4H bars after resampling. Both fully cover EMA200.
+    * 1D — ``period="2y", interval="1d"`` → ~504 bars (covers EMA200 on 1D).
+    """
+    errors: List[str] = []
+    technicals: Dict[str, Any] = {}
+
+    _log.info("indicators ▶ %s", ticker)
+
+    # ---- 1H + 4H (single download, resample for 4H) ------------------------
+    df_1h = _fetch_ohlcv(ticker, period="1y", interval="1h")
+
+    if df_1h.empty:
+        technicals["1H"] = None
+        technicals["4H"] = None
+        errors.append(f"indicators 1H/4H: no hourly OHLCV data for {ticker}")
+    else:
+        technicals["1H"] = _indicators_from_df(df_1h)
+        _log.info(
+            "indicators ◀ 1H %s rsi=%s rec=%s",
+            ticker,
+            technicals["1H"].get("RSI"),
+            technicals["1H"].get("recommendation"),
+        )
+
+        try:
+            df_4h = df_1h.resample("4h").agg(
+                Open=("Open", "first"),
+                High=("High", "max"),
+                Low=("Low", "min"),
+                Close=("Close", "last"),
+                Volume=("Volume", "sum"),
+            ).dropna(subset=["Close"])
+            technicals["4H"] = _indicators_from_df(df_4h)
+            _log.info(
+                "indicators ◀ 4H %s bars=%d rsi=%s rec=%s",
+                ticker, len(df_4h),
+                technicals["4H"].get("RSI"),
+                technicals["4H"].get("recommendation"),
+            )
+        except Exception as exc:
+            technicals["4H"] = None
+            errors.append(f"indicators 4H resample failed: {exc}")
+
+    # ---- 1D ----------------------------------------------------------------
+    df_1d = _fetch_ohlcv(ticker, period="2y", interval="1d")
+
+    if df_1d.empty:
+        technicals["1D"] = None
+        errors.append(f"indicators 1D: no daily OHLCV data for {ticker}")
+    else:
+        technicals["1D"] = _indicators_from_df(df_1d)
+        _log.info(
+            "indicators ◀ 1D %s rsi=%s rec=%s",
+            ticker,
+            technicals["1D"].get("RSI"),
+            technicals["1D"].get("recommendation"),
+        )
+
+    _log.info("indicators done %s errors=%d", ticker, len(errors))
+    return {"technicals": technicals, "exchange": None, "errors": errors}
+
+
+# --------------------------------------------------------------------------- #
+# Finnhub — optional news headlines
+# --------------------------------------------------------------------------- #
+def fetch_finnhub_news(ticker: str, api_key: str, n: int = 5) -> List[str]:
+    """Return up to *n* recent headline strings via the Finnhub API.
+
+    Returns an empty list when no API key is configured or on any error.
+    """
+    if not api_key:
+        return []
+    try:
+        import finnhub
+        today = date.today().isoformat()
+        week_ago = (date.today() - timedelta(days=7)).isoformat()
+        client = finnhub.Client(api_key=api_key)
+        articles = client.company_news(ticker, _from=week_ago, to=today)
+        return [a["headline"] for a in (articles or [])[:n] if "headline" in a]
+    except Exception as exc:
+        _log.warning("finnhub ✗ %s: %s", ticker, exc)
+        return []
 
 
 # --------------------------------------------------------------------------- #
@@ -280,6 +419,7 @@ def get_market_data(ticker: str) -> Dict[str, Any]:
     The shape is stable even when data sources fail; missing values are
     ``None`` and problems are collected in ``errors``.
     """
+    from .config import get_settings
 
     ticker = ticker.strip().upper()
     _log.info("market_data ▶ %s", ticker)
@@ -289,16 +429,23 @@ def get_market_data(ticker: str) -> Dict[str, Any]:
     if "error" in yf_data:
         errors.append(yf_data["error"])
 
-    tv_data = fetch_tradingview(ticker, exchange_hint=yf_data.get("exchange_hint"))
-    errors.extend(tv_data.get("errors", []))
+    ind_data = compute_indicators(ticker)
+    errors.extend(ind_data.get("errors", []))
+
+    # Optional news headlines for the AI prompt (empty when key not set).
+    settings = get_settings()
+    news = fetch_finnhub_news(ticker, settings.finnhub_api_key)
 
     result = {
         "ticker": ticker,
         "timestamp": _now_iso(),
         "price": yf_data.get("price", {}),
         "fundamentals": yf_data.get("fundamentals", {}),
-        "exchange": tv_data.get("exchange"),
-        "technicals": tv_data.get("technicals", {tf: None for tf in _TIMEFRAMES}),
+        "exchange": yf_data.get("exchange_hint"),
+        "technicals": ind_data.get(
+            "technicals", {tf: None for tf in _TIMEFRAMES}
+        ),
+        "news": news,
         "errors": errors,
     }
     _log.info("market_data ◀ %s errors=%d", ticker, len(errors))

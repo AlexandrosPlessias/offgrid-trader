@@ -11,14 +11,15 @@ Every analysis (scheduled or ad-hoc) flows through the same steps:
 ```mermaid
 flowchart LR
     A[Ticker symbol] --> B[yfinance\nprice · volume · fundamentals]
-    B --> C[tradingview-ta\nRSI · MACD · EMA\nBB · Stoch × 1H/4H/1D]
-    B & C --> D[Prompt builder\nassembles market dict]
-    D --> E[Local Ollama\nqwen2.5:14b]
-    E --> F[AI JSON\ntrend · signals · confidence\nentry · stop · target]
-    C & F --> G[Rule-based detection\n4 checks]
-    G --> H[Confidence scoring\nmerge + filter]
-    H --> I[SQLite\nanalysis_log · signals]
-    H --> J[Alert dispatch\nemail · Slack · Telegram]
+    A --> C[yfinance OHLCV\n1H · 4H · 1D]
+    C --> D[ta library\nRSI · MACD · EMA\nBB · Stoch]
+    B & D --> E[Prompt builder\nassembles market dict]
+    E --> F[Local Ollama\nqwen2.5:14b]
+    F --> G[AI JSON\ntrend · signals · confidence\nentry · stop · target]
+    D & G --> H[Rule-based detection\n4 checks]
+    H --> I[Confidence scoring\nmerge + filter]
+    I --> J[SQLite\nanalysis_log · signals]
+    I --> K[Alert dispatch\nemail · Telegram]
 ```
 
 ### Steps in detail
@@ -26,8 +27,8 @@ flowchart LR
 | Step | Module | What happens |
 |---|---|---|
 | 1. Fetch | `backend/data.py` — `fetch_yfinance()` | OHLCV, fundamentals, 20-day averages from yfinance |
-| 2. Indicators | `backend/data.py` — `fetch_tradingview()` | RSI, MACD, EMA, Bollinger Bands, Stochastic via tradingview-ta across 1H, 4H, 1D |
-| 3. Prompt | `backend/analysis.py` — `build_prompt()` | All indicator data assembled into a structured text prompt |
+| 2. Indicators | `backend/data.py` — `compute_indicators()` | Downloads OHLCV (1y@1h, 2y@1d), resamples to 4H, computes RSI/MACD/EMA/BB/Stoch locally via the `ta` library |
+| 3. Prompt | `backend/analysis.py` — `build_prompt()` | All indicator data (+ optional Finnhub headlines) assembled into a structured text prompt |
 | 4. AI | `backend/analysis.py` — `call_ollama()` | Prompt sent to local Ollama over `/api/chat`; response parsed from JSON |
 | 5. Detect | `backend/opportunities.py` — `detect_opportunities()` | 4 rule-based checks run on market data + AI output; candidates merged and scored |
 | 6. Persist | `backend/database.py` | `save_analysis()` stores the full analysis log; `save_signal()` stores each actionable signal |
@@ -151,6 +152,7 @@ All configuration is via `.env` (copied from `.env.example`). Key variables:
 | `CONFIDENCE_FLOOR` | `65` | Minimum 0–100 score to be actionable |
 | `OLLAMA_MODEL` | `qwen2.5:7b` | Model tag; `qwen2.5:14b` recommended on 16+ GB RAM |
 | `ALERTS_SEND_ENABLED` | `false` | Can also be toggled at runtime from the UI |
+| `FINNHUB_API_KEY` | *(unset)* | Optional — enables recent news headlines in AI prompts |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | (auto in Docker) | Set to `http://aspire-offgrid:18889` in Compose |
 
 See `.env.example` for the full list including SMTP, Slack, and Telegram credentials.
