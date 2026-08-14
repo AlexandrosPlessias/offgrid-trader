@@ -1,0 +1,50 @@
+name: Sync docs/wiki → GitHub Wiki
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/wiki/**"
+  workflow_dispatch:   # allow manual trigger from the Actions tab
+
+permissions:
+  contents: write     # needed to push to the wiki repo
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+
+      - name: Clone wiki repo
+        run: |
+          git clone \
+            https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git \
+            _wiki
+
+      - name: Transform links and stage into wiki repo
+        run: |
+          # Transform docs/wiki/ into _wiki_out/:
+          #   - inter-wiki links:  foo.md       → foo
+          #   - anchor links:      foo.md#bar   → foo#bar
+          #   - repo file links:   ../../FOO.md → full GitHub blob URL
+          python3 .github/scripts/transform_wiki_links.py docs/wiki _wiki_out \
+            --repo ${{ github.repository }}
+
+          # Sync transformed files into the wiki repo (delete removed pages)
+          rsync -av --delete --exclude=".git" _wiki_out/ _wiki/
+
+      - name: Commit and push (skip if nothing changed)
+        run: |
+          cd _wiki
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --staged --quiet; then
+            echo "Wiki already up to date — nothing to push."
+          else
+            git commit -m "docs: sync wiki from main @ ${{ github.sha }}"
+            git push
+          fi
