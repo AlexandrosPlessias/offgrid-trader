@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from .config import get_settings
+from .database import get_setting as _get_db_setting
 
 _log = logging.getLogger(__name__)
 
@@ -165,7 +166,13 @@ def call_ollama(
     """
 
     settings = get_settings()
-    _model = model or settings.ollama.model
+
+    # DB overrides let the UI change model/timeout without a container restart.
+    _db_model   = _get_db_setting("ollama_model", "")
+    _db_timeout = _get_db_setting("ollama_timeout", "")
+    _model   = model or _db_model or settings.ollama.model
+    _timeout = int(_db_timeout) if _db_timeout else settings.ollama.timeout
+
     payload = {
         "model": _model,
         "messages": [
@@ -190,17 +197,17 @@ def call_ollama(
         response = requests.post(
             settings.ollama.chat_url,
             json=payload,
-            timeout=settings.ollama.timeout,
+            timeout=_timeout,
         )
     except requests.exceptions.ConnectionError as exc:
         raise OllamaError(
             f"Cannot reach Ollama at {settings.ollama.host}. "
             "Is it running? Start it with `ollama serve` and "
-            f"`ollama pull {settings.ollama.model}`."
+            f"`ollama pull {_model}`."
         ) from exc
     except requests.exceptions.Timeout as exc:
         raise OllamaError(
-            f"Ollama request timed out after {settings.ollama.timeout}s."
+            f"Ollama request timed out after {_timeout}s."
         ) from exc
     except requests.exceptions.RequestException as exc:  # pragma: no cover
         raise OllamaError(f"Ollama request failed: {exc}") from exc

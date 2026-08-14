@@ -172,7 +172,7 @@ const AXIS_TICK = { fill: '#8b949e', fontSize: 10 }
 function RsiChart({ technicals }) {
   const TFS = ['1H', '4H', '1D']
   const data = TFS
-    .map(tf => ({ name: tf, rsi: technicals?.[tf]?.rsi ?? null }))
+    .map(tf => ({ name: tf, rsi: technicals?.[tf]?.RSI ?? null }))
     .filter(d => d.rsi != null)
 
   if (data.length === 0) return <div className="chart-empty">No RSI data</div>
@@ -201,7 +201,7 @@ function RsiChart({ technicals }) {
 function MacdChart({ technicals }) {
   const TFS = ['1H', '4H', '1D']
   const data = TFS
-    .map(tf => ({ name: tf, hist: technicals?.[tf]?.macd_hist ?? null }))
+    .map(tf => ({ name: tf, hist: technicals?.[tf]?.MACD?.histogram ?? null }))
     .filter(d => d.hist != null)
 
   if (data.length === 0) return <div className="chart-empty">No MACD data</div>
@@ -225,9 +225,9 @@ function MacdChart({ technicals }) {
 
 function EmaChart({ price, technicals }) {
   const tf = technicals?.['1D']
-  const ema20  = tf?.ema20  ?? null
-  const ema50  = tf?.ema50  ?? null
-  const ema200 = tf?.ema200 ?? null
+  const ema20  = tf?.EMA20  ?? null
+  const ema50  = tf?.EMA50  ?? null
+  const ema200 = tf?.EMA200 ?? null
 
   if (!price || (!ema20 && !ema50 && !ema200)) {
     return <div className="chart-empty">No EMA data</div>
@@ -414,18 +414,18 @@ function IndicatorTable({ marketData }) {
   const fmtN = v => (v != null ? Number(v).toFixed(2) : '—')
 
   const rows = [
-    { label: 'RSI',         key: 'rsi' },
-    { label: 'MACD',        key: 'macd' },
-    { label: 'MACD Signal', key: 'macd_signal' },
-    { label: 'MACD Hist',   key: 'macd_hist' },
-    { label: 'EMA 20',      key: 'ema20' },
-    { label: 'EMA 50',      key: 'ema50' },
-    { label: 'EMA 200',     key: 'ema200' },
-    { label: 'BB Upper',    key: 'bb_upper' },
-    { label: 'BB Lower',    key: 'bb_lower' },
-    { label: 'Stoch K',     key: 'stoch_k' },
-    { label: 'Stoch D',     key: 'stoch_d' },
-    { label: 'Signal',      key: 'recommendation' },
+    { label: 'RSI',         get: d => d?.RSI },
+    { label: 'MACD',        get: d => d?.MACD?.macd },
+    { label: 'MACD Signal', get: d => d?.MACD?.signal },
+    { label: 'MACD Hist',   get: d => d?.MACD?.histogram },
+    { label: 'EMA 20',      get: d => d?.EMA20 },
+    { label: 'EMA 50',      get: d => d?.EMA50 },
+    { label: 'EMA 200',     get: d => d?.EMA200 },
+    { label: 'BB Upper',    get: d => d?.BollingerBands?.upper },
+    { label: 'BB Lower',    get: d => d?.BollingerBands?.lower },
+    { label: 'Stoch K',     get: d => d?.Stochastic?.k },
+    { label: 'Stoch D',     get: d => d?.Stochastic?.d },
+    { label: 'Signal',      get: d => d?.recommendation, isRec: true },
   ]
 
   return (
@@ -440,19 +440,22 @@ function IndicatorTable({ marketData }) {
             </tr>
           </thead>
           <tbody>
-            {rows.map(({ label, key }) => (
-              <tr key={key}>
+            {rows.map(({ label, get, isRec }) => (
+              <tr key={label}>
                 <td className="text-dim">{label}</td>
-                {TFS.map(tf => (
-                  <td key={tf}>
-                    {key === 'recommendation'
-                      ? <span className={`ind-rec ${(technicals[tf]?.[key] ?? '').toLowerCase()}`}>
-                          {technicals[tf]?.[key] ?? '—'}
-                        </span>
-                      : fmtN(technicals[tf]?.[key])
-                    }
-                  </td>
-                ))}
+                {TFS.map(tf => {
+                  const val = get(technicals[tf])
+                  return (
+                    <td key={tf}>
+                      {isRec
+                        ? <span className={`ind-rec ${(val ?? '').toLowerCase()}`}>
+                            {val ?? '—'}
+                          </span>
+                        : fmtN(val)
+                      }
+                    </td>
+                  )
+                })}
               </tr>
             ))}
           </tbody>
@@ -490,6 +493,12 @@ function Header({ health, activeView, onViewChange }) {
             onClick={() => onViewChange('education')}
           >
             Learn
+          </button>
+          <button
+            className={`nav-tab ${activeView === 'settings' ? 'active' : ''}`}
+            onClick={() => onViewChange('settings')}
+          >
+            ⚙️ Settings
           </button>
         </nav>
       </div>
@@ -1573,6 +1582,157 @@ function AnalysisHistoryPanel({ onOpenInExplorer }) {
   )
 }
 
+// ─── Settings page ────────────────────────────────────────────────────────────
+
+function SettingsPage() {
+  const [models,   setModels]   = useState([])
+  const [model,    setModel]    = useState('')
+  const [timeout,  setTimeout_] = useState('')
+  const [status,   setStatus]   = useState(null)   // null | 'saving' | 'ok' | 'error'
+  const [errMsg,   setErrMsg]   = useState('')
+
+  // Load current settings + available models on mount
+  useEffect(() => {
+    Promise.all([
+      fetch(`${API}/settings`).then(r => r.json()),
+      fetch(`${API}/settings/models`).then(r => r.json()),
+    ]).then(([cfg, m]) => {
+      setModel(cfg.ollama_model   ?? '')
+      setTimeout_(String(cfg.ollama_timeout ?? 120))
+      setModels(m.models ?? [])
+    }).catch(() => {})
+  }, [])
+
+  const save = async () => {
+    setStatus('saving')
+    setErrMsg('')
+    try {
+      const body = {}
+      if (model)   body.model   = model
+      if (timeout) body.timeout = parseInt(timeout, 10)
+      const r = await fetch(`${API}/settings/ollama`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      setStatus('ok')
+      setTimeout(() => setStatus(null), 3000)
+    } catch (e) {
+      setStatus('error')
+      setErrMsg(e.message)
+    }
+  }
+
+  return (
+    <div className="card" style={{ maxWidth: 560 }}>
+      <div className="card-header">
+        <span className="card-title">⚙️ Settings</span>
+      </div>
+      <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+        {/* Model selector */}
+        <div>
+          <label style={{ display: 'block', marginBottom: 6, fontWeight: 600 }}>
+            Ollama model
+          </label>
+          <p className="text-dim" style={{ marginBottom: 8, fontSize: 13 }}>
+            Only models already pulled in Ollama are listed. Match the model
+            size to your GPU VRAM: 3b ≈ 3 GB, 7b ≈ 5 GB, 14b ≈ 10 GB.
+          </p>
+          {models.length > 0 ? (
+            <select
+              value={model}
+              onChange={e => setModel(e.target.value)}
+              style={{
+                width: '100%', padding: '8px 10px', borderRadius: 6,
+                border: '1px solid var(--border)', background: 'var(--bg-card)',
+                color: 'var(--text)', fontSize: 14,
+              }}
+            >
+              {models.map(m => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="text"
+              value={model}
+              onChange={e => setModel(e.target.value)}
+              placeholder="e.g. qwen2.5:7b"
+              style={{
+                width: '100%', padding: '8px 10px', borderRadius: 6,
+                border: '1px solid var(--border)', background: 'var(--bg-card)',
+                color: 'var(--text)', fontSize: 14, boxSizing: 'border-box',
+              }}
+            />
+          )}
+        </div>
+
+        {/* Timeout */}
+        <div>
+          <label style={{ display: 'block', marginBottom: 6, fontWeight: 600 }}>
+            Request timeout (seconds)
+          </label>
+          <p className="text-dim" style={{ marginBottom: 8, fontSize: 13 }}>
+            How long to wait for Ollama before failing. Increase if the model
+            is large or running partly on CPU (min 10, max 3600).
+          </p>
+          <input
+            type="number"
+            min={10}
+            max={3600}
+            value={timeout}
+            onChange={e => setTimeout_(e.target.value)}
+            style={{
+              width: 120, padding: '8px 10px', borderRadius: 6,
+              border: '1px solid var(--border)', background: 'var(--bg-card)',
+              color: 'var(--text)', fontSize: 14,
+            }}
+          />
+          <span className="text-dim" style={{ marginLeft: 10, fontSize: 13 }}>seconds</span>
+        </div>
+
+        {/* Save */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button
+            className="btn-primary"
+            onClick={save}
+            disabled={status === 'saving'}
+          >
+            {status === 'saving' ? 'Saving…' : 'Save settings'}
+          </button>
+          {status === 'ok' && (
+            <span style={{ color: 'var(--green)', fontSize: 14 }}>
+              ✓ Saved — takes effect on the next analysis
+            </span>
+          )}
+          {status === 'error' && (
+            <span style={{ color: 'var(--red)', fontSize: 14 }}>
+              ✗ {errMsg || 'Save failed'}
+            </span>
+          )}
+        </div>
+
+        {/* Info box */}
+        <div style={{
+          background: 'var(--bg-hover)', borderRadius: 6,
+          padding: '10px 14px', fontSize: 13, color: 'var(--text-dim)',
+          borderLeft: '3px solid var(--accent)',
+        }}>
+          Changes take effect on the <strong>next</strong> /analyze call — no
+          container restart needed. The new model must already be pulled in
+          Ollama; to pull a new model run{' '}
+          <code style={{ background: 'var(--bg)', padding: '1px 5px', borderRadius: 3 }}>
+            docker exec ollama ollama pull &lt;model&gt;
+          </code>{' '}
+          then reload this page.
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -1612,6 +1772,7 @@ export default function App() {
           />
         </div>
         {activeView === 'education' && <EducationPage />}
+        {activeView === 'settings' && <SettingsPage />}
       </main>
       <footer className="footer">
         <span className="footer-brand">MarketSage</span>
