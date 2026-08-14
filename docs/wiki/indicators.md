@@ -5,17 +5,19 @@ The same content is available in-app on the **Learn** tab.
 
 ---
 
-## How indicators are fetched
+## How indicators are computed
 
-Indicators come from **tradingview-ta** across three timeframes:
+OHLCV history is downloaded from **yfinance** and processed locally by the
+open-source **`ta`** library (no API key, no rate limits, MIT licence).
 
-| Timeframe | Candle period | Use |
-|---|---|---|
-| 1H | 1 hour | Short-term momentum, noise-sensitive |
-| 4H | 4 hours | Medium-term trend confirmation |
-| 1D | 1 day | Long-term context, most reliable for swing signals |
+| Timeframe | Download | Bars available | Use |
+|---|---|---|---|
+| 1H | `period="1y", interval="1h"` | ~1 638 bars | Short-term momentum, noise-sensitive |
+| 4H | Resampled from the 1H download | ~410 bars | Medium-term trend confirmation |
+| 1D | `period="2y", interval="1d"` | ~504 bars | Long-term context, most reliable for swing signals |
 
-Agreement across multiple timeframes is a much stronger signal than a single reading.
+All three timeframes cover enough history for EMA200 (needs 200 bars). Agreement
+across multiple timeframes is a much stronger signal than a single reading.
 
 ---
 
@@ -143,17 +145,19 @@ on the same scale.
 
 ---
 
-## TradingView recommendation signal
+## Recommendation signal
 
-Each timeframe also returns an overall `RECOMMENDATION` string from tradingview-ta:
+Each timeframe carries a locally-computed `recommendation` string derived from a
+4-signal symmetric vote:
 
-| Value | Meaning |
-|---|---|
-| `STRONG_BUY` | Most indicators are bullish |
-| `BUY` | More indicators bullish than bearish |
-| `NEUTRAL` | Mixed |
-| `SELL` | More indicators bearish than bullish |
-| `STRONG_SELL` | Most indicators are bearish |
+| Signal | Bullish (+1) | Bearish (−1) |
+|---|---|---|
+| RSI | > 60 | < 40 |
+| MACD histogram | positive | negative |
+| Close vs EMA 20 | close > EMA20 | close < EMA20 |
+| Close vs EMA 50 | close > EMA50 | close < EMA50 |
+
+Score ≥ 2 → `BUY` · Score ≤ −2 → `SELL` · Otherwise → `NEUTRAL`
 
 This is passed to the AI as additional context but not used directly in rule-based detection.
 

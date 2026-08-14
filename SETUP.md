@@ -7,8 +7,8 @@ The entire stack runs in Docker — no Python venv required.
 On **macOS**, native Ollama is used so inference runs on Apple Metal GPU (Docker containers
 cannot access it). On Windows/Linux, Ollama runs inside Docker.
 It is fully **local and zero-cost**: market data comes from free sources
-(yfinance, tradingview-ta) and the AI runs on a local Ollama `qwen2.5:14b`
-model. No paid or cloud APIs are used.
+(yfinance + ta library for indicators) and the AI runs on a local Ollama
+`qwen2.5:14b` model. No paid or cloud APIs are required.
 
 > ⚠️ **Not financial advice.** For educational/research use only.
 
@@ -35,14 +35,31 @@ to verify the result.
 
 ## 1. Prerequisites
 
+### Windows / WSL2
+
 | Requirement | Notes |
 |---|---|
 | **Docker Desktop** | Enable WSL2 integration: Settings → Resources → WSL Integration → turn on your Ubuntu distro |
 | **WSL2 + Ubuntu** | 22.04 or 24.04 (`wsl --install -d Ubuntu` from PowerShell) |
-| **RAM** | 8 GB minimum (`qwen2.5:7b` ≈ 5 GB resident; 16 GB recommended for `qwen2.5:14b` on Windows/Linux) |
-| **Disk** | ~6 GB free (macOS: `qwen2.5:7b` in `~/.ollama`; Windows/Linux: model weights + images in Docker volume) |
-| **NVIDIA GPU** *(recommended)* | With the NVIDIA Container Toolkit for fast inference. CPU-only works too — see [section 5](#5-first-run) |
-| **git** | To clone the repo |
+| **RAM** | 8 GB minimum; 16 GB recommended for `qwen2.5:14b` |
+| **Disk** | ~12 GB free (model weights + Docker images in named volume) |
+| **NVIDIA GPU** *(recommended)* | NVIDIA Container Toolkit for fast inference — see GPU section below |
+| **git** | To clone the repo (run inside WSL, not PowerShell) |
+
+### macOS
+
+| Requirement | Notes |
+|---|---|
+| **Docker Desktop for Mac** | Intel or Apple Silicon; allocate ≥12 GB RAM in Settings → Resources |
+| **Ollama (native)** | Install from https://ollama.com/download — must be running before `./start-infra.sh`. The infra script proxies Docker to the native Ollama so inference runs on Apple Metal GPU |
+| **RAM** | 8 GB minimum; 16 GB recommended for `qwen2.5:14b` |
+| **Disk** | ~6 GB free (`qwen2.5:7b` weights stored in `~/.ollama` by native Ollama) |
+| **git** | Xcode Command Line Tools (`xcode-select --install`) or Homebrew git |
+
+> **Why native Ollama on macOS?** Docker containers cannot access Apple Metal GPU, so
+> inference would run on CPU inside Docker (very slow). Running Ollama natively gives
+> full Metal acceleration; the infra stack's `ollama-proxy` routes the backend's
+> requests transparently to `http://host.docker.internal:11434`.
 
 ### GPU support in WSL2 (recommended)
 
@@ -60,9 +77,27 @@ Docker inside WSL2:
    sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
    sudo nvidia-ctk runtime configure --runtime=docker
    ```
-3. Verify: `docker run --rm --gpus all ubuntu nvidia-smi` should print your GPU.
+3. **Restart Docker so the `nvidia` runtime is registered** — this step is easy
+   to miss and is the usual cause of silent CPU fallback:
+   ```bash
+   sudo service docker restart
+   ```
+4. Verify the runtime is registered and the GPU is reachable:
+   ```bash
+   docker info | grep -i runtime          # should list 'nvidia'
+   docker run --rm --gpus all ubuntu nvidia-smi   # should print your GPU
+   ```
 
-**No GPU?** Skip this — use the CPU override in [section 5](#5-first-run).
+> ⚠️ **If you skip step 3**, containers still *start* (Compose requests a GPU
+> device), but the toolkit hook never injects it. Ollama then falls back to
+> **CPU**, where `qwen2.5:14b` is so slow that `/analyze` fails with
+> **`Ollama request timed out after 120s`**. Inside the container
+> `nvidia-smi` reports *"GPU access blocked by the operating system"*. See the
+> troubleshooting entry in [section 8](#8-troubleshooting-setup).
+
+**No GPU?** Skip this — use the CPU override in [section 5](#5-first-run), and
+set a smaller `OLLAMA_MODEL` (`qwen2.5:7b` or `qwen2.5:3b`) so CPU inference
+finishes within the timeout.
 
 ---
 
@@ -118,7 +153,7 @@ table below highlights the values you'll most likely change:
 | `WATCHLIST` | No | Comma-separated tickers to monitor (default: `AAPL,MSFT,NVDA,TSLA,AMD,SPY`) |
 | `SCAN_INTERVAL_MINUTES` | No | How often to scan while the market is open (default: `15`) |
 | `CONFIDENCE_FLOOR` | No | Minimum confidence (0–100) to store/alert on a signal (default: `65`) |
-| `OLLAMA_MODEL` | No | Local model tag (default: `qwen2.5:7b`; use `qwen2.5:14b` on 16+ GB RAM) |
+| `OLLAMA_MODEL` | No | Local model tag. Match it to your **GPU VRAM** for full-GPU speed: `qwen2.5:3b` (4 GB), `qwen2.5:7b` (~6 GB), `qwen2.5:14b` (≥12 GB). A model bigger than your VRAM still runs but spills to CPU and is much slower (default: `qwen2.5:7b`) |
 | `EMAIL_ENABLED` | No | `true` to send Gmail alerts (needs the SMTP vars below) |
 | `SMTP_USERNAME` / `SMTP_APP_PASSWORD` | If email on | Gmail address + **App Password** (not your account password) |
 | `EMAIL_TO` | If email on | Recipient address |
@@ -172,7 +207,8 @@ TELEGRAM_BOT_TOKEN=123456789:AAF...
 TELEGRAM_CHAT_ID=123456789
 ```
 
-Restart the backend: `docker compose restart backend`.
+Apply the change: `docker compose up -d backend` (recreates the container so the
+new `.env` values are read — a plain `restart` keeps the old environment).
 Trigger a test alert via the React UI or `curl` to confirm delivery.
 
 > `.env` is gitignored and `.dockerignore` prevents it from being baked into
@@ -181,6 +217,53 @@ Trigger a test alert via the React UI or `curl` to confirm delivery.
 ---
 
 ## 5. First run
+
+### Step 0 — Make sure Docker is running
+
+Docker is **not started automatically** on either platform. You must bring it
+up before running any `docker compose` command.
+
+**WSL2 (Windows):**
+```bash
+sudo service docker start
+```
+Run this once per WSL session. You can verify Docker is up with `docker ps`.
+
+**macOS:**
+Open **Docker Desktop** from Spotlight or Applications, or from the terminal:
+```bash
+open -a Docker
+```
+Wait until the Docker icon in the menu bar stops animating (usually ~10 s).
+
+> **Disable auto-start (save resources when idle):**
+>
+> *WSL2:* Run once to prevent Docker from starting on every WSL boot:
+> ```bash
+> sudo systemctl disable docker.service docker.socket
+> ```
+> Re-enable any time with `sudo systemctl enable docker.service docker.socket`.
+>
+> *macOS:* Docker Desktop → Settings → General → uncheck
+> **"Start Docker Desktop when you log in"**, then quit Docker Desktop.
+
+> **Stopping Docker when done (free up RAM and GPU):**
+>
+> *WSL2:*
+> ```bash
+> docker compose down                                    # stop MarketSage
+> docker compose -f docker-compose.infra.yml down       # stop Ollama + Portainer
+> sudo service docker stop                              # stop Docker daemon
+> ```
+>
+> *macOS:*
+> ```bash
+> docker compose down
+> docker compose -f docker-compose.infra.yml down
+> osascript -e 'quit app "Docker Desktop"'              # quit Docker Desktop
+> ```
+
+---
 
 ### Step 1 — Start shared infrastructure (Ollama + Portainer)
 
@@ -268,11 +351,23 @@ curl -X POST http://localhost:8010/analyze \
 
 ## 7. Smoke test (optional)
 
-Verify the backend logic is wired correctly without touching live APIs:
+Verify the backend logic is wired correctly without touching live APIs.
+
+> **Note:** `tests/` is not copied into the Docker image (only `backend/` is).
+> `docker compose exec backend python tests/smoke_test.py` will fail with a
+> module-not-found error. Use the `-v` mount approach below instead.
 
 ```bash
-# Inside the running backend container (no extra installs needed):
-docker compose exec backend python tests/smoke_test.py
+# Mount the repo into the already-built backend image and run offline:
+docker run --rm \
+  -v "$(pwd)":/workspace \
+  -w /workspace \
+  -e PYTHONPATH=/workspace \
+  -e DATABASE_PATH=/tmp/smoke.db \
+  -e EMAIL_ENABLED=false \
+  -e SLACK_ENABLED=false \
+  offgrid-trader-backend \
+  python3 tests/smoke_test.py
 ```
 
 All checks should print `PASS`. The final line will read:
@@ -281,7 +376,7 @@ All checks should print `PASS`. The final line will read:
 SMOKE TEST PASSED — all checks green
 ```
 
-To run locally instead (requires dev deps):
+To run locally instead (requires dev deps installed in the host environment):
 
 ```bash
 pip install -r requirements/dev.txt
@@ -294,6 +389,9 @@ python tests/smoke_test.py
 
 | Symptom | Fix |
 |---|---|
+| `Ollama request timed out after 120s` | Inference is running (partly) on **CPU**. Confirm GPU reachability with `docker exec ollama nvidia-smi` (a *"GPU access blocked by the operating system"* error = no GPU), and check the CPU/GPU split with `docker exec ollama ollama ps`. Fix GPU passthrough: `sudo nvidia-ctk runtime configure --runtime=docker && sudo service docker restart`, then check `docker info \| grep -i runtime` lists `nvidia`. If the model is simply too big for your VRAM (see next row), pick a smaller `OLLAMA_MODEL` or raise `OLLAMA_TIMEOUT` in `.env`, then `docker compose up -d backend` |
+| GPU present on host but container runs on CPU | The `nvidia` runtime isn't registered with the Docker daemon even though the toolkit is installed. `docker info \| grep -i runtime` won't list `nvidia`. Run `sudo nvidia-ctk runtime configure --runtime=docker && sudo service docker restart`, then `./start-infra.sh` again |
+| Model splits CPU/GPU or won't fit in VRAM | `docker exec ollama ollama ps` shows a `CPU/GPU` split (e.g. `70%/30%`) — the model is larger than your VRAM. Check VRAM with `docker exec ollama nvidia-smi --query-gpu=memory.total --format=csv,noheader`, then choose a model that fits: `qwen2.5:14b` (~10 GB) needs ≥12 GB; `qwen2.5:7b` (~4.7 GB) needs ~6 GB; `qwen2.5:3b` (~3 GB) fits **fully** in a 4 GB GPU. Set `OLLAMA_MODEL` in `.env`, `docker compose up -d backend`, then confirm `100% GPU` via `docker exec ollama ollama ps` |
 | `could not select device driver "nvidia"` | No GPU / toolkit. Run `./start-infra.sh --cpu` to start Ollama in CPU mode, then `docker compose up --build` normally |
 | `env file .env not found` | You skipped `cp .env.example .env`. Create it (section 4) |
 | `ollama-pull` stalls or errors | Download interrupted — `docker compose restart ollama-pull`. Already-downloaded weights are kept in the volume |

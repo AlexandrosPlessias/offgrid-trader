@@ -19,19 +19,47 @@ bash scripts/setup_macos.sh   # macOS
 **Subsequent runs** (model already downloaded, image already built):
 
 ```bash
-# macOS only: ensure native Ollama is running (uses Metal GPU)
-ollama serve &   # skip if already running
+# ── Step 1: start Docker ────────────────────────────────────────────────────
+# Docker is not auto-started. Run once per session before anything else.
+#
+# WSL2:
+sudo service docker start
+#
+# macOS:
+open -a Docker          # wait for the menu-bar icon to stop animating (~10 s)
 
-./start-infra.sh      # start shared Ollama proxy + Portainer (idempotent)
-docker compose up     # start MarketSage
+# ── Step 2: start shared infra + MarketSage ─────────────────────────────────
+# macOS only: ensure native Ollama is running first (Metal GPU)
+ollama serve &          # skip if already running
+
+./start-infra.sh        # start shared Ollama proxy + Portainer (idempotent)
+docker compose up -d    # start MarketSage in the background
+```
+
+**When you are done — free up resources:**
+
+```bash
+# Stop MarketSage only (Ollama and Portainer keep running):
+docker compose down
+
+# Stop everything (MarketSage + Ollama + Portainer):
+docker compose down
+docker compose -f docker-compose.infra.yml down
+
+# WSL2 — stop Docker entirely (frees RAM until next session):
+sudo service docker stop
+
+# macOS — quit Docker Desktop from the menu-bar icon (or):
+osascript -e 'quit app "Docker Desktop"'
 ```
 
 **Other common commands:**
 
 ```bash
-docker compose up -d          # run detached (background)
-docker compose up --build     # rebuild images after a code change
-docker compose down           # stop MarketSage (Ollama/Portainer keep running)
+docker compose up          # start in foreground — see live logs (Ctrl+C stops)
+docker compose up -d       # start detached — runs in background, prompt returns
+docker compose up --build  # rebuild images after a code change, then start
+docker compose down        # stop MarketSage (Ollama/Portainer keep running)
 ```
 
 Subsequent runs skip the ~9 GB model download because the weights persist in
@@ -90,7 +118,10 @@ docker compose logs -f
 docker compose logs -f backend
 docker compose logs -f ollama
 
-# Restart the backend (e.g. after editing .env):
+# Apply an .env change (recreates the container so new env is read):
+docker compose up -d backend
+
+# Restart the backend process without re-reading .env (e.g. to clear state):
 docker compose restart backend
 
 # Rebuild and restart the backend (after a code change):
@@ -100,8 +131,11 @@ docker compose up --build backend
 docker compose ps
 ```
 
-> Config in `.env` is read at container start. After editing `.env`, run
-> `docker compose restart backend` (or `docker compose up -d backend`) to apply.
+> ⚠️ **`.env` changes need `docker compose up -d backend`, not `restart`.**
+> Values from `env_file` are injected only when the container is **created**.
+> `docker compose restart` reuses the existing container, so it keeps the old
+> environment — your edit won't take effect until you recreate it with
+> `docker compose up -d backend`.
 
 ---
 
@@ -194,7 +228,8 @@ curl http://localhost:8010/watchlist
 ```
 
 To change the watchlist or cadence, edit `WATCHLIST` / `SCAN_INTERVAL_MINUTES`
-in `.env` and `docker compose restart backend`.
+in `.env` and `docker compose up -d backend` (recreates the container so the new
+env is read — `restart` alone won't pick it up).
 
 ---
 
@@ -314,7 +349,7 @@ Structured log lines are emitted for every stage of the pipeline:
 
 | Logger | What it logs |
 |---|---|
-| `backend.data` | `yfinance ▶/◀` fetch (price, change%, vol ratio) and `tradingview ▶/◀` per timeframe (exchange, recommendation) |
+| `backend.data` | `yfinance ▶/◀` fetch (price, change%, vol ratio) and `indicators ▶/◀` per timeframe (RSI, MACD, EMA, recommendation) |
 | `backend.analysis` | `ollama ▶/◀` prompt text, response text, and latency |
 | `backend.scheduler` | Scan loop events (start, market open/closed, scan results) |
 
@@ -323,7 +358,8 @@ forwarded to **Aspire** at http://localhost:18889. Filter by logger name to trac
 data-fetch pipeline for any ticker.
 
 To reduce Ollama request timeouts on slow CPU inference, raise `OLLAMA_TIMEOUT`
-in `.env`, then `docker compose restart backend`.
+in `.env`, then `docker compose up -d backend` (recreates the container so the
+new value is applied).
 
 ---
 
@@ -333,10 +369,12 @@ in `.env`, then `docker compose restart backend`.
 |---|---|
 | `backend` unhealthy / restarting | `docker compose logs backend`. Most often it's still waiting on `ollama-pull` to finish the model download |
 | `/analyze` returns an Ollama error | Model not ready yet, or Ollama container down. Check `docker compose exec ollama ollama list` and `docker compose ps` |
+| `Ollama request timed out after 120s` | The model is running (partly) on **CPU**. Two common causes: **(a)** GPU not reaching the container — verify with `docker exec ollama nvidia-smi` (*"GPU access blocked by the operating system"* = no GPU); register the runtime with `sudo nvidia-ctk runtime configure --runtime=docker && sudo service docker restart`, then check `docker info \| grep -i runtime` lists `nvidia`. **(b)** The model is too big for your VRAM — `docker exec ollama ollama ps` shows a `CPU/GPU` split (e.g. `70%/30%`); pick a model that fits (see next row). Then set `OLLAMA_MODEL` / `OLLAMA_TIMEOUT` in `.env` and `docker compose up -d backend`. See [SETUP.md §GPU support](SETUP.md#gpu-support-in-wsl2-recommended) |
+| Model splits across CPU/GPU (`ollama ps` shows e.g. `70%/30%`) | The model doesn't fit in your VRAM. Check total VRAM with `docker exec ollama nvidia-smi --query-gpu=memory.total --format=csv,noheader` and pick a model that fits: `qwen2.5:14b` (~10 GB) needs ≥12 GB; `qwen2.5:7b` (~4.7 GB) needs ~6 GB; `qwen2.5:3b` (~3 GB loaded) fits in 4 GB for **100% GPU**. Set `OLLAMA_MODEL` in `.env`, then `docker compose up -d backend`; confirm with `docker exec ollama ollama ps` (should read `100% GPU`) |
 | Analysis is very slow | On CPU the 14b model is slow — first call also pays a cold-start cost. Use a smaller `OLLAMA_MODEL` in `.env`, or run with a GPU |
 | No signals ever stored | Expected outside market hours, or when confidence is below `CONFIDENCE_FLOOR`. Lower the floor in `.env` to see more |
 | Alerts not sending | Confirm `EMAIL_ENABLED`/`SLACK_ENABLED=true` and credentials are set; only signals ≥ `CONFIDENCE_FLOOR` fire. Check `docker compose logs backend` for send errors |
 | Port already in use (8010 / 5174 / 9000) | Stop the conflicting process (`ss -tlnp \| grep :<port>`) or change the host port in `docker-compose.yml` |
 | `could not select device driver "nvidia"` | Run `./start-infra.sh --cpu` then `docker compose up --build` |
 | Data changes not persisting | Ensure the `./data` bind mount exists and is writable (`chmod -R 777 data` on WSL2) |
-| yfinance / tradingview errors in logs | Transient upstream/network issues — the scan continues; problems are collected in each result's `errors` list |
+| yfinance / indicator errors in logs | Transient upstream/network issues — the scan continues; problems are collected in each result's `errors` list |

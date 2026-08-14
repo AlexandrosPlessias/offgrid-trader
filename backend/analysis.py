@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from .config import get_settings
+from .database import get_setting as _get_db_setting
 
 _log = logging.getLogger(__name__)
 
@@ -72,11 +73,16 @@ def _fmt(value: Any) -> str:
 
 
 def build_prompt(market_data: Dict[str, Any]) -> str:
-    """Render *market_data* into a compact, readable prompt for the model."""
+    """Render *market_data* into a compact, readable prompt for the model.
+
+    Optional ``news`` key in *market_data* (a list of headline strings from
+    Finnhub) is injected before the risk-factor section when non-empty.
+    """
 
     price = market_data.get("price", {}) or {}
     fundamentals = market_data.get("fundamentals", {}) or {}
     technicals = market_data.get("technicals", {}) or {}
+    news: List[str] = market_data.get("news") or []
 
     lines: List[str] = []
     lines.append(f"Ticker: {market_data.get('ticker')}")
@@ -131,6 +137,12 @@ def build_prompt(market_data: Dict[str, Any]) -> str:
         lines.append("")
         lines.append("DATA WARNINGS: " + "; ".join(market_data["errors"]))
 
+    if news:
+        lines.append("")
+        lines.append("RECENT NEWS HEADLINES")
+        for headline in news:
+            lines.append(f"  - {headline}")
+
     lines.append("")
     lines.append(
         "Analyse the above and return the JSON object described in the system prompt."
@@ -154,7 +166,13 @@ def call_ollama(
     """
 
     settings = get_settings()
-    _model = model or settings.ollama.model
+
+    # DB overrides let the UI change model/timeout without a container restart.
+    _db_model   = _get_db_setting("ollama_model", "")
+    _db_timeout = _get_db_setting("ollama_timeout", "")
+    _model   = model or _db_model or settings.ollama.model
+    _timeout = int(_db_timeout) if _db_timeout else settings.ollama.timeout
+
     payload = {
         "model": _model,
         "messages": [
@@ -179,17 +197,17 @@ def call_ollama(
         response = requests.post(
             settings.ollama.chat_url,
             json=payload,
-            timeout=settings.ollama.timeout,
+            timeout=_timeout,
         )
     except requests.exceptions.ConnectionError as exc:
         raise OllamaError(
             f"Cannot reach Ollama at {settings.ollama.host}. "
             "Is it running? Start it with `ollama serve` and "
-            f"`ollama pull {settings.ollama.model}`."
+            f"`ollama pull {_model}`."
         ) from exc
     except requests.exceptions.Timeout as exc:
         raise OllamaError(
-            f"Ollama request timed out after {settings.ollama.timeout}s."
+            f"Ollama request timed out after {_timeout}s."
         ) from exc
     except requests.exceptions.RequestException as exc:  # pragma: no cover
         raise OllamaError(f"Ollama request failed: {exc}") from exc
