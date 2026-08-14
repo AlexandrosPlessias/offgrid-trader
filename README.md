@@ -45,11 +45,22 @@ runs in Docker. No Python venv or native Ollama required.
 ```bash
 cp .env.example .env          # edit watchlist / thresholds / optional alerts
 
-# NVIDIA GPU (recommended):
-docker compose up --build
+# WSL2 — start Docker first (not auto-started):
+sudo service docker start
 
-# CPU-only (no GPU):
-docker compose -f docker-compose.yml -f docker-compose.override.cpu.yml up --build
+# macOS — open Docker Desktop first:
+open -a Docker
+
+./start-infra.sh              # start shared Ollama + Portainer
+docker compose up --build     # build and start MarketSage
+```
+
+**When you are done — stop everything to free RAM/GPU:**
+
+```bash
+docker compose down
+docker compose -f docker-compose.infra.yml down
+sudo service docker stop      # WSL2 only
 ```
 
 Then open the services:
