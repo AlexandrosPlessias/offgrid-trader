@@ -1,11 +1,16 @@
-# Technical Indicators Reference
+# Technical Indicators & Data Reference
 
-This page explains every indicator the system fetches and how it uses each one.
-The same content is available in-app on the **Learn** tab.
+This page explains every indicator and data point the system fetches, how it is
+computed, and how it is used in the pipeline.
+The same content is available in-app on the **Learn** tab — click any section header to expand it.
+
+![Learn tab — Pipeline section expanded showing 8-step analysis walkthrough](../screenshots/04-learn-expanded.png)
 
 ---
 
-## How indicators are computed
+## How technical indicators are computed
+
+![Technical indicators section — RSI/MACD/EMA charts across 1H · 4H · 1D timeframes](../screenshots/explorer-05-indicators.png)
 
 OHLCV history is downloaded from **yfinance** and processed locally by the
 open-source **`ta`** library (no API key, no rate limits, MIT licence).
@@ -163,6 +168,91 @@ This is passed to the AI as additional context but not used directly in rule-bas
 
 ---
 
+## Company Fundamentals
+
+Fetched from **yfinance** alongside the price snapshot.
+
+| Field | Description |
+|---|---|
+| **Name / Sector / Industry** | Company metadata for context |
+| **Market Cap** | Total market value of outstanding shares |
+| **Trailing P/E (TTM)** | Price ÷ actual earnings per share over the last 12 months. High P/E = expensive relative to current earnings; context varies by sector. |
+| **Forward P/E** | Price ÷ consensus analyst EPS estimate for the next 12 months. Lower than trailing P/E implies expected earnings growth. |
+
+> **What the system checks (valuation rule):** TTM P/E > 60 fires a low-confidence
+> short flag (severely overvalued). 0 < P/E < 8 fires a low-confidence long flag
+> (deeply discounted). Confidence is intentionally low (40–42); designed to reinforce,
+> not drive, a signal.
+
+---
+
+## Balance Sheet
+
+![Financial health section — balance sheet bar chart and key metrics](../screenshots/explorer-07-balance-sheet.png)
+
+Fetched from **yfinance** annual filings; cached daily per ticker.
+
+| Field | Description |
+|---|---|
+| **Period** | Balance sheet date (e.g. `2026-03-31`) |
+| **Total Assets** | Everything the company owns or is owed |
+| **Total Liabilities** | Everything the company owes |
+| **Stockholders Equity** | Assets − Liabilities; the book value attributable to shareholders |
+| **Total Debt** | Short-term + long-term borrowings |
+| **Cash & Equivalents** | Liquid reserves |
+| **Debt-to-Equity (D/E)** | Total Debt ÷ Stockholders Equity. Measures leverage. > 3 is considered highly leveraged; varies significantly by industry. |
+
+> **What the system uses:** All balance sheet fields are included in the AI prompt.
+> The D/E ratio is shown as a tile in the Explorer's Balance Sheet card.
+
+---
+
+## US Macro Indicators
+
+![US macro context section — Fed rate, CPI, unemployment, yield curve, Shiller CAPE with status indicators](../screenshots/explorer-08-macro.png)
+
+Fetched from **FRED** (Federal Reserve Economic Data) key-free CSV endpoint, with
+the Shiller CAPE from **multpl.com**. Globally cached for 6 hours in the DB — one
+fetch serves all tickers in a scan cycle.
+
+| Indicator | Source | Description |
+|---|---|---|
+| **Fed Funds Rate** | FRED `FEDFUNDS` | The US Federal Reserve's benchmark overnight lending rate. High rates raise borrowing costs and compress valuation multiples. |
+| **CPI YoY** | FRED `CPIAUCSL` | Year-over-year change in the Consumer Price Index. The Fed targets 2%. High CPI forces rate rises that pressure equity multiples. |
+| **Unemployment** | FRED `UNRATE` | US unemployment rate. Context indicator: very low unemployment (< 4%) can indicate an overheating economy. |
+| **10y-2y Yield Spread** | FRED `T10Y2Y` | 10-year Treasury yield minus 2-year Treasury yield. **Negative = yield curve inverted** — a historically reliable recession precursor. |
+| **Shiller CAPE** | multpl.com | Cyclically Adjusted P/E Ratio (10-year inflation-adjusted earnings). > 30 indicates elevated market-wide valuation; < 15 is historically cheap. |
+
+> **What the system checks (macro regime filter):** After candidate signals are merged,
+> their confidence scores are adjusted:
+>
+> | Condition | Long candidates | Short candidates |
+> |---|---|---|
+> | Yield curve inverted | −8 confidence | +3 confidence |
+> | CAPE > 35 | −5 confidence | +3 confidence |
+> | CAPE < 15 | +5 confidence | −3 confidence |
+> | CPI YoY > 5% | −5 confidence | no change |
+
+> ⚠ **If macro data shows all `—`:** FRED's key-free CSV endpoint
+> (`fred.stlouisfed.org`) is sometimes blocked from Docker containers behind corporate
+> VPNs. Set `FRED_API_KEY` in `.env` to use the more reliable REST API
+> (`api.stlouisfed.org`). Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html
+
+---
+
+## News Headlines
+
+Fetched from **Finnhub** (optional). Requires a free `FINNHUB_API_KEY` in `.env`.
+
+- Returns up to 5 recent headlines (last 7 days) per ticker
+- Each headline includes: title, source, URL, and datetime
+- Injected into the AI prompt as a `RECENT NEWS HEADLINES` block
+- The AI uses them for qualitative context (earnings, guidance, litigation, etc.)
+
+Without a Finnhub key the news block is empty — the system still works but the AI prompt contains no news context.
+
+---
+
 ## Further reading
 
 - [RSI — Investopedia](https://www.investopedia.com/terms/r/rsi.asp)
@@ -170,3 +260,6 @@ This is passed to the AI as additional context but not used directly in rule-bas
 - [EMA — Investopedia](https://www.investopedia.com/terms/e/ema.asp)
 - [Bollinger Bands — Investopedia](https://www.investopedia.com/terms/b/bollingerbands.asp)
 - [Stochastic Oscillator — Investopedia](https://www.investopedia.com/terms/s/stochasticoscillator.asp)
+- [Shiller CAPE — Investopedia](https://www.investopedia.com/terms/s/schiller-pe-ratio.asp)
+- [Yield Curve Inversion — Investopedia](https://www.investopedia.com/terms/i/invertedyieldcurve.asp)
+- [FRED API documentation](https://fred.stlouisfed.org/docs/api/fred/)
