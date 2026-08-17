@@ -41,6 +41,7 @@ from .analysis import analyze as _analyze
 from .config import get_settings
 from .data import get_market_data as _get_market_data
 from .database import (
+    clear_all_data as _clear_all_data,
     delete_analysis as _delete_analysis,
     delete_signal as _delete_signal_row,
     get_analysis_history,
@@ -152,6 +153,14 @@ class OllamaSettingRequest(BaseModel):
     )
 
 
+class SchedulerSettingRequest(BaseModel):
+    running: bool = Field(..., description="True to start the scheduler, False to stop it")
+
+
+class ScanIntervalRequest(BaseModel):
+    minutes: int = Field(..., ge=1, le=1440, description="Scan interval in minutes (1–1440)")
+
+
 class TradingViewWebhook(BaseModel):
     """Loose schema for TradingView Pro alert payloads.
 
@@ -175,9 +184,21 @@ class TradingViewWebhook(BaseModel):
 # --------------------------------------------------------------------------- #
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialise the DB and start/stop the background scheduler."""
+    """Initialise the DB and start/stop the background scheduler.
+
+    Auto-scan is OFF by default.  It starts only when the DB setting
+    ``scheduler_running`` is explicitly ``"true"`` (set via the Settings page
+    or ``POST /settings/scheduler``).  This prevents unexpected background
+    scans on fresh installs and after container restarts.
+    """
     init_db()
-    scheduler.start()
+    # Start the scheduler if the DB setting says "true" (user has toggled it
+    # at runtime), or if no DB override exists yet and SCHEDULER_AUTO_START=true
+    # is set in .env (fresh install default).
+    db_sched = get_setting("scheduler_running", "")
+    env_auto = get_settings().scheduler_auto_start
+    if db_sched == "true" or (db_sched == "" and env_auto):
+        scheduler.start()
     try:
         yield
     finally:
@@ -293,6 +314,27 @@ def set_alerts(request: AlertsSettingRequest) -> Dict[str, Any]:
     return {"alerts_enabled": request.enabled}
 
 
+@app.post("/settings/scheduler")
+async def set_scheduler(request: SchedulerSettingRequest) -> Dict[str, Any]:
+    """Start or stop the background scheduler at runtime.
+
+    State is persisted to the DB so it survives container restarts.
+    """
+    set_setting("scheduler_running", "true" if request.running else "false")
+    if request.running:
+        scheduler.start()
+    else:
+        await scheduler.stop()
+    return scheduler.status()
+
+
+@app.post("/settings/scan-interval")
+def set_scan_interval(request: ScanIntervalRequest) -> Dict[str, Any]:
+    """Update the scan interval (persisted to DB; takes effect on next loop cycle)."""
+    set_setting("scan_interval_minutes", str(request.minutes))
+    return scheduler.status()
+
+
 @app.get("/settings")
 def get_all_settings() -> Dict[str, Any]:
     """Return current effective settings (env defaults overridden by DB values)."""
@@ -300,11 +342,13 @@ def get_all_settings() -> Dict[str, Any]:
     db_model   = get_setting("ollama_model",   "")
     db_timeout = get_setting("ollama_timeout", "")
     return {
-        "ollama_model":   db_model   or cfg.ollama.model,
-        "ollama_timeout": int(db_timeout) if db_timeout else cfg.ollama.timeout,
-        "alerts_enabled": _alerts_enabled(),
-        "env_model":      cfg.ollama.model,
-        "env_timeout":    cfg.ollama.timeout,
+        "ollama_model":         db_model   or cfg.ollama.model,
+        "ollama_timeout":       int(db_timeout) if db_timeout else cfg.ollama.timeout,
+        "alerts_enabled":       _alerts_enabled(),
+        "env_model":            cfg.ollama.model,
+        "env_timeout":          cfg.ollama.timeout,
+        "scan_interval_minutes": scheduler.status()["scan_interval_minutes"],
+        "scheduler_running":    scheduler.status()["running"],
     }
 
 
@@ -615,6 +659,13 @@ def delete_analysis_entry(entry_id: int) -> Dict[str, Any]:
             status_code=404, detail=f"analysis entry {entry_id} not found"
         )
     return {"deleted": True, "id": entry_id}
+
+
+@app.post("/data/reset")
+def reset_data() -> Dict[str, Any]:
+    """Clear all signals and analysis history. app_settings (watchlist, model, etc.) is preserved."""
+    counts = _clear_all_data()
+    return {"cleared": ["signals", "analysis_log"], **counts}
 
 
 @app.get("/analysis/{ticker}")

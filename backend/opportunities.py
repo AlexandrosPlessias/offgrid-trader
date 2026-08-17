@@ -14,6 +14,10 @@ Rules implemented:
   day's move exceeds ``significant_move_pct`` (direction follows the move).
 * **MACD crossover** — MACD sits above (bullish) / below (bearish) its signal
   line on both the 1D and 4H timeframes.
+* **Valuation extreme** — TTM P/E above 60 fires a low-confidence short flag;
+  TTM P/E below 8 (positive) fires a low-confidence long flag.
+* **Macro regime filter** (post-merge pass) — adjusts confidence ±N points
+  based on yield-curve inversion, Shiller CAPE, and CPI.
 
 Run standalone (uses live data + Ollama)::
 
@@ -166,6 +170,107 @@ def _check_macd_crossover(ticker: str, technicals: Dict[str, Any], price: Option
     return []
 
 
+def _check_valuation(
+    ticker: str,
+    fundamentals: Dict[str, Any],
+    price: Optional[float],
+) -> List[Dict[str, Any]]:
+    """Rule 5 — fire a low-confidence flag at extreme P/E valuations only.
+
+    Intentionally low confidence (40–42) so this rule reinforces rather than
+    drives a signal.  Negative P/E (loss-making companies) is skipped.
+    """
+    try:
+        raw = fundamentals.get("trailing_pe") or fundamentals.get("pe_ratio")
+        pe = float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return []
+    if pe is None or pe <= 0:
+        return []
+    if pe > 60:
+        return [_new_candidate(
+            ticker, "short", 40.0, "valuation_extreme",
+            f"TTM P/E {pe:.1f}× — severely overvalued (>60×)",
+            price, entry=price,
+        )]
+    if pe < 8:
+        return [_new_candidate(
+            ticker, "long", 42.0, "valuation_cheap",
+            f"TTM P/E {pe:.1f}× — deeply discounted (<8×)",
+            price, entry=price,
+        )]
+    return []
+
+
+def _apply_macro_regime_filter(
+    merged: List[Dict[str, Any]],
+    macro: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Post-merge confidence adjuster based on the macro regime.
+
+    Applied after :func:`_merge` so every rule's output is treated equally.
+    Adjustments are additive and clamped to [0, 100]; the confidence-floor
+    filter runs afterwards in :func:`filter_by_confidence`.
+
+    Conditions checked (additive, applied in order):
+
+    * Yield curve inverted  → long −8, short +3
+    * CAPE > 35             → long −5, short +3; append reason
+    * CAPE < 15             → long +5, short −3; append reason
+    * CPI YoY > 5%          → long −5; append reason
+    """
+    if not macro:
+        return merged
+
+    inverted = bool((macro.get("yield_spread") or {}).get("inverted"))
+    cape_val = ((macro.get("shiller_cape") or {}).get("value"))
+    cpi_val  = ((macro.get("cpi_yoy") or {}).get("value"))
+
+    def _adj(opp: Dict[str, Any]) -> Dict[str, Any]:
+        side = opp.get("type", "")
+        delta = 0.0
+        extra: List[str] = []
+
+        if inverted:
+            if side == "long":
+                delta -= 8.0
+                extra.append("⚠ yield curve inverted — macro headwind for longs")
+            else:
+                delta += 3.0
+
+        if cape_val is not None:
+            if cape_val > 35:
+                if side == "long":
+                    delta -= 5.0
+                    extra.append(f"⚠ Shiller CAPE {cape_val:.0f}× — market elevated")
+                else:
+                    delta += 3.0
+            elif cape_val < 15:
+                if side == "long":
+                    delta += 5.0
+                    extra.append(
+                        f"✓ CAPE {cape_val:.0f}× — market historically cheap"
+                    )
+                else:
+                    delta -= 3.0
+
+        if cpi_val is not None and cpi_val > 5.0:
+            if side == "long":
+                delta -= 5.0
+                extra.append(f"⚠ CPI {cpi_val:.1f}% YoY — Fed likely restrictive")
+
+        if delta == 0.0 and not extra:
+            return opp
+        out = dict(opp)
+        out["confidence"] = round(
+            max(0.0, min(100.0, out["confidence"] + delta)), 2
+        )
+        out["reasons"] = list(out.get("reasons", [])) + extra
+        return out
+
+    return [_adj(o) for o in merged]
+
+
 # --------------------------------------------------------------------------- #
 # De-duplication + scoring
 # --------------------------------------------------------------------------- #
@@ -215,14 +320,20 @@ def detect_opportunities(
     technicals = market_data.get("technicals", {}) or {}
     price = price_data.get("current")
 
+    fundamentals = market_data.get("fundamentals", {}) or {}
+    macro = market_data.get("macro", {}) or {}
+
     candidates: List[Dict[str, Any]] = []
     if analysis and not analysis.get("error"):
         candidates.extend(_check_ai(ticker, analysis, price, thresholds))
     candidates.extend(_check_rsi(ticker, technicals, price, thresholds))
     candidates.extend(_check_volume_spike(ticker, price_data, price, thresholds))
     candidates.extend(_check_macd_crossover(ticker, technicals, price, thresholds))
+    candidates.extend(_check_valuation(ticker, fundamentals, price))   # Rule 5
 
     merged = _merge(candidates)
+    merged = _apply_macro_regime_filter(merged, macro)                  # Rule 6
+
     # Finalise the joined ``source`` string for storage.
     for opp in merged:
         opp["source"] = "+".join(opp["sources"])
