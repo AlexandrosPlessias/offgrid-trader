@@ -154,6 +154,19 @@ class TelegramConfig:
 
 
 @dataclass(frozen=True)
+class OtelConfig:
+    """OpenTelemetry / Aspire observability settings."""
+
+    # When true, full prompt + response text are added as span events.
+    # Default false — prompts may contain sensitive ticker context.
+    include_llm_content: bool = field(
+        default_factory=lambda: (
+            _env_str("OTEL_INCLUDE_LLM_CONTENT", "false").lower() == "true"
+        )
+    )
+
+
+@dataclass(frozen=True)
 class Settings:
     """Top-level settings aggregate."""
 
@@ -184,8 +197,25 @@ class Settings:
 
     # Optional Finnhub API key — enables recent news headlines in AI prompt.
     # Get a free key at https://finnhub.io/  (60 req/min on the free tier).
+    # When true, the background scheduler starts automatically on container
+    # boot.  Can also be toggled at runtime via the Settings page or the API
+    # (POST /settings/scheduler); the DB value takes precedence over this env
+    # var once it has been explicitly set.
+    scheduler_auto_start: bool = field(
+        default_factory=lambda: _env_str("SCHEDULER_AUTO_START", "false").lower() == "true"
+    )
+
     finnhub_api_key: str = field(
         default_factory=lambda: _env_str("FINNHUB_API_KEY", "")
+    )
+
+    # Optional FRED API key — enables the FRED REST API (api.stlouisfed.org)
+    # which is more reliable from Docker containers than the key-free CSV
+    # endpoint (fred.stlouisfed.org) that is often blocked behind corporate VPNs.
+    # Get a free key (instant) at https://fred.stlouisfed.org/docs/api/api_key.html
+    # Rate limit: 120 req/min on the free tier — more than sufficient.
+    fred_api_key: str = field(
+        default_factory=lambda: _env_str("FRED_API_KEY", "")
     )
 
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
@@ -194,6 +224,7 @@ class Settings:
     email: EmailConfig = field(default_factory=EmailConfig)
     slack: SlackConfig = field(default_factory=SlackConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    otel: OtelConfig = field(default_factory=OtelConfig)
 
 
 # Singleton-style accessor -------------------------------------------------- #

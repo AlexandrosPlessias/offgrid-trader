@@ -71,6 +71,14 @@ networks:
   ai-shared:
     name: ai-shared
     driver: bridge
+    driver_opts:
+      # Corporate VPNs (Cisco AnyConnect, Zscaler, etc.) commonly lower the
+      # host MTU to ~1280 on both WSL2 and macOS. Docker defaults to 1500,
+      # causing HTTPS reads to time out (packets too large, DF-bit set, ICMP
+      # Fragmentation-Needed blocked). Setting MTU here — on the network that
+      # carries the default route — fixes it on all platforms without touching
+      # daemon.json or iptables.
+      com.docker.network.driver.mtu: "1280"
 
 volumes:
   ollama_models:

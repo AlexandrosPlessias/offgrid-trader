@@ -32,6 +32,11 @@ import sys
 import tempfile
 from unittest import mock
 
+# Ensure the repo root is on sys.path so ``from backend import …`` works
+# whether the script is run from the repo root, from tests/, or from inside
+# the Docker container (where WORKDIR=/app but the script lives in tests/).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Use an isolated temp DB so we never touch a real one.
 _TMP_DB = os.path.join(tempfile.gettempdir(), "offgrid_smoke.db")
 os.environ["DATABASE_PATH"] = _TMP_DB
@@ -210,10 +215,32 @@ try:
         "fetch_finnhub_news returns [] when no key set",
         fetch_finnhub_news("TEST", "") == [],
     )
+    # New: news returns List[Dict] when key is set
+    fake_article = {
+        "headline": "Test Co beats estimates",
+        "source":   "Reuters",
+        "url":      "https://example.com/1",
+        "datetime": 1700000000,
+        "summary":  "extra field — should be ignored",
+    }
+    fake_client = mock.MagicMock()
+    fake_client.company_news.return_value = [fake_article]
+    with mock.patch("finnhub.Client", return_value=fake_client):
+        news_result = fetch_finnhub_news("TEST", "fake_key_123")
+    check(
+        "fetch_finnhub_news returns List[Dict] with key set",
+        isinstance(news_result, list) and len(news_result) == 1
+        and isinstance(news_result[0], dict)
+        and news_result[0].get("headline") == "Test Co beats estimates"
+        and news_result[0].get("source") == "Reuters"
+        and news_result[0].get("datetime") == 1700000000,
+        detail=str(news_result),
+    )
 except Exception as exc:  # pragma: no cover
     check("compute_indicators smoke", False, repr(exc))
     check("compute_indicators 1H has RSI and recommendation", False)
     check("fetch_finnhub_news returns [] when no key set", False)
+    check("fetch_finnhub_news returns List[Dict] with key set", False)
 
 
 # --------------------------------------------------------------------------- #
@@ -288,6 +315,192 @@ try:
             check("/watchlist returns 200", wl.status_code == 200)
 except Exception as exc:  # pragma: no cover
     check("TestClient /health", False, repr(exc))
+
+
+# --------------------------------------------------------------------------- #
+# 11. Backlog item 2 — balance sheet, FRED macro, prompt blocks, cache
+# --------------------------------------------------------------------------- #
+try:
+    import pandas as pd  # noqa: F811 — already imported above
+    from backend.data import (  # noqa: F811
+        fetch_balance_sheet,
+        fetch_fred_macro,
+        _cached_json,
+        _store_json,
+    )
+    from backend.analysis import build_prompt
+
+    # 11a. Balance sheet: mocked yfinance DataFrame
+    _bs_period = pd.Timestamp("2026-03-31")
+    _bs_df = pd.DataFrame(
+        {
+            _bs_period: {
+                "Total Assets": 300e9,
+                "Total Liabilities Net Minority Interest": 200e9,
+                "Stockholders Equity": 100e9,
+                "Total Debt": 50e9,
+                "Cash And Cash Equivalents": 30e9,
+            }
+        }
+    )
+
+    class _FakeTicker:
+        balance_sheet = _bs_df
+
+    with mock.patch("yfinance.Ticker", return_value=_FakeTicker()):
+        bs = fetch_balance_sheet("TEST_BS")
+
+    check("fetch_balance_sheet returns expected keys",
+          all(k in bs for k in ("period", "total_assets", "total_liabilities",
+                                "stockholders_equity", "total_debt", "cash",
+                                "debt_to_equity")),
+          detail=str(list(bs.keys())))
+    check("fetch_balance_sheet computes debt_to_equity",
+          bs.get("debt_to_equity") == round(50e9 / 100e9, 3),
+          detail=str(bs.get("debt_to_equity")))
+    check("fetch_balance_sheet period is ISO string",
+          isinstance(bs.get("period"), str) and "-" in (bs.get("period") or ""),
+          detail=str(bs.get("period")))
+
+    # Balance sheet: empty DataFrame → all-None, no raise
+    class _EmptyTicker:
+        balance_sheet = pd.DataFrame()
+
+    with mock.patch("yfinance.Ticker", return_value=_EmptyTicker()):
+        bs_empty = fetch_balance_sheet("TEST_EMPTY_BS")
+
+    check("fetch_balance_sheet empty DataFrame → all None, no raise",
+          bs_empty.get("total_assets") is None)
+
+    # 11b. FRED macro: mocked requests.get
+    _FEDFUNDS_CSV = "DATE,VALUE\n2026-06-01,5.25\n2026-07-01,5.00\n"
+    _CPIAUCSL_ROWS = "\n".join(
+        [f"DATE,VALUE"] +
+        [f"202{i:d}-0{(j%12)+1:d}-01,310.{j:02d}" for i, j in enumerate(range(14))]
+    )
+    _UNRATE_CSV = "DATE,VALUE\n2026-07-01,3.9\n"
+    _T10Y2Y_CSV = "DATE,VALUE\n2026-07-01,-0.42\n"
+
+    def _fake_fred_get(url, *args, **kwargs):
+        # Build a response object that works for both the CSV endpoint and the
+        # FRED REST API (used when FRED_API_KEY is set in the environment).
+        # The REST API path calls r.json(); the CSV path reads r.text.
+        if "FEDFUNDS" in url:
+            _text = _FEDFUNDS_CSV
+            _json = {"observations": [
+                {"date": "2026-07-01", "value": "5.0"},   # newest first (API sort)
+                {"date": "2026-06-01", "value": "5.25"},
+            ]}
+        elif "CPIAUCSL" in url:
+            _text = _CPIAUCSL_ROWS
+            _json = {"observations": [
+                {"date": f"202{i}-{(j % 12) + 1:02d}-01", "value": f"310.{j:02d}"}
+                for i, j in enumerate(range(14))
+            ]}
+        elif "UNRATE" in url:
+            _text = _UNRATE_CSV
+            _json = {"observations": [{"date": "2026-07-01", "value": "3.9"}]}
+        elif "T10Y2Y" in url:
+            _text = _T10Y2Y_CSV
+            _json = {"observations": [{"date": "2026-07-01", "value": "-0.42"}]}
+        elif "multpl.com" in url:
+            _text = "<table><tr><td>Jul 2026</td><td>34.21</td></tr></table>"
+            _json = {}
+        else:
+            _text = ""
+            _json = {}
+
+        class _R:
+            text = _text
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self): return _json
+
+        return _R()
+
+    # Clear any macro cache from earlier balance-sheet test runs
+    from backend.database import set_setting as _ss
+    _ss("macro_cache", "")
+
+    import backend.data as _bdata
+    with mock.patch.object(_bdata, "requests") as _mock_req:
+        _mock_req.get.side_effect = _fake_fred_get
+        macro = fetch_fred_macro()
+
+    # Use `or {}` not the default arg — dict.get(key, default) returns default
+    # only when the key is absent, but returns None when the key is present
+    # with a None value (which happens if a FRED series fails to fetch).
+    check("fetch_fred_macro returns fed_funds_rate",
+          (macro.get("fed_funds_rate") or {}).get("value") == 5.0,
+          detail=str(macro.get("fed_funds_rate")))
+    check("fetch_fred_macro returns unemployment",
+          (macro.get("unemployment") or {}).get("value") == 3.9,
+          detail=str(macro.get("unemployment")))
+    check("fetch_fred_macro yield_spread inverted flag",
+          (macro.get("yield_spread") or {}).get("inverted") is True,
+          detail=str(macro.get("yield_spread")))
+    check("fetch_fred_macro returns shiller_cape",
+          (macro.get("shiller_cape") or {}).get("value") == 34.21,
+          detail=str(macro.get("shiller_cape")))
+
+    # 11c. build_prompt with all new fields
+    _synthetic_news = [
+        {"headline": "AAPL beats estimates", "source": "Reuters",
+         "url": "https://example.com", "datetime": 1700000000},
+    ]
+    _synthetic_bs = {
+        "period": "2026-03-31",
+        "total_assets": 300e9,
+        "total_liabilities": 200e9,
+        "stockholders_equity": 100e9,
+        "total_debt": 50e9,
+        "cash": 30e9,
+        "debt_to_equity": 0.5,
+    }
+    _synthetic_macro = {
+        "fed_funds_rate": {"value": 5.0, "date": "2026-07-01"},
+        "cpi_yoy": {"value": 3.1, "date": "2026-07-01"},
+        "unemployment": {"value": 3.9, "date": "2026-07-01"},
+        "yield_spread": {"value": -0.42, "date": "2026-07-01", "inverted": True},
+        "shiller_cape": {"value": 34.21, "date": "2026-07-01"},
+    }
+    _prompt_data = {
+        **synthetic,
+        "fundamentals": {
+            "name": "Apple Inc.", "sector": "Technology",
+            "industry": "Consumer Electronics",
+            "market_cap": 3e12,
+            "trailing_pe": 28.5, "pe_ratio": 28.5, "forward_pe": 25.0,
+        },
+        "news": _synthetic_news,
+        "balance_sheet": _synthetic_bs,
+        "macro": _synthetic_macro,
+    }
+    prompt_text = build_prompt(_prompt_data)
+    check("build_prompt contains BALANCE SHEET block",
+          "BALANCE SHEET" in prompt_text, detail=prompt_text[:200])
+    check("build_prompt contains MACRO CONTEXT block",
+          "MACRO CONTEXT" in prompt_text, detail=prompt_text[:200])
+    check("build_prompt contains RECENT NEWS HEADLINES block",
+          "RECENT NEWS HEADLINES" in prompt_text)
+    check("build_prompt news shows source",
+          "(Reuters)" in prompt_text)
+    check("build_prompt contains VALUATION block with P/E",
+          "VALUATION" in prompt_text and "28.5" in prompt_text)
+    check("build_prompt macro shows inverted warning",
+          "INVERTED" in prompt_text)
+
+    # 11d. Cache round-trip via _cached_json / _store_json
+    _store_json("smoke_test_cache_key", {"hello": "world", "n": 42})
+    _got = _cached_json("smoke_test_cache_key")
+    check("_cached_json/_store_json round-trip",
+          _got == {"hello": "world", "n": 42},
+          detail=str(_got))
+    check("_cached_json returns None for missing key",
+          _cached_json("smoke_test_no_such_key_xyz") is None)
+
+except Exception as exc:
+    check("backlog-item-2 data layer smoke", False, repr(exc))
 
 
 # --------------------------------------------------------------------------- #

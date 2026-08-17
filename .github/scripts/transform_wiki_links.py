@@ -33,6 +33,13 @@ REPO_LINK_RE = re.compile(
     r'\]\((?:\.\.\/)*\.\.\/(?P<path>[^)]+\.md(?:#[^)]*)?)\)'
 )
 
+# Images under ../screenshots/ (one level up from docs/wiki) → raw GitHub URL.
+# Matches both plain links ](../screenshots/foo.png) and markdown images
+# ![alt](../screenshots/foo.png) — the ]( token is the same in both.
+SCREENSHOT_LINK_RE = re.compile(
+    r'\]\(\.\./screenshots/(?P<filename>[^)]+\.(?:png|jpg|jpeg|gif|svg|webp))\)'
+)
+
 WIKI_LINK_RE = re.compile(
     r'\]\((?P<page>[A-Za-z0-9_\-]+)\.md(?P<anchor>#[^)]*)?\)'
 )
@@ -40,6 +47,7 @@ WIKI_LINK_RE = re.compile(
 
 def transform(text: str, repo: str) -> str:
     blob_base = f"https://github.com/{repo}/blob/main"
+    raw_base  = f"https://raw.githubusercontent.com/{repo}/main"
 
     # Rule 1: ../../SETUP.md  →  https://github.com/.../blob/main/SETUP.md
     def _repo_link(m: re.Match) -> str:
@@ -47,7 +55,13 @@ def transform(text: str, repo: str) -> str:
 
     text = REPO_LINK_RE.sub(_repo_link, text)
 
-    # Rule 2: architecture.md  →  architecture
+    # Rule 2: ../screenshots/foo.png  →  https://raw.githubusercontent.com/.../docs/screenshots/foo.png
+    def _screenshot_link(m: re.Match) -> str:
+        return f"]({raw_base}/docs/screenshots/{m.group('filename')})"
+
+    text = SCREENSHOT_LINK_RE.sub(_screenshot_link, text)
+
+    # Rule 3: architecture.md  →  architecture
     #         indicators.md#rsi  →  indicators#rsi
     def _wiki_link(m: re.Match) -> str:
         anchor = m.group("anchor") or ""

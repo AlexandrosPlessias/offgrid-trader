@@ -8,8 +8,9 @@ WORKDIR /app
 COPY requirements/backend.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the application package.
+# Copy the application package and tests.
 COPY backend/ backend/
+COPY tests/ tests/
 
 # Data dir for the SQLite database (mounted as a volume in compose).
 RUN mkdir -p /app/data

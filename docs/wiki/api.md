@@ -160,19 +160,61 @@ curl http://localhost:8010/market-data/AAPL
     "sector": "Technology",
     "industry": "Consumer Electronics",
     "market_cap": 3200000000000,
-    "pe_ratio": 32.4
+    "pe_ratio": 32.4,
+    "trailing_pe": 32.4,
+    "forward_pe": 28.1
   },
   "technicals": {
-    "1H": { "rsi": 54.2, "macd": 0.12, "macd_signal": 0.09, "macd_hist": 0.03,
-            "ema20": 210.8, "ema50": 209.1, "ema200": 198.4,
-            "bb_upper": 214.2, "bb_lower": 205.8, "stoch_k": 62.1, "stoch_d": 58.4,
+    "1H": { "RSI": 54.2, "MACD": {"macd": 0.12, "signal": 0.09, "histogram": 0.03},
+            "EMA20": 210.8, "EMA50": 209.1, "EMA200": 198.4,
+            "BollingerBands": {"upper": 214.2, "middle": 210.3, "lower": 205.8},
+            "Stochastic": {"k": 62.1, "d": 58.4},
             "recommendation": "BUY" },
-    "4H": { ... },
-    "1D": { ... }
+    "4H": { "..." : "..." },
+    "1D": { "..." : "..." }
   },
+  "balance_sheet": {
+    "period": "2026-03-31",
+    "total_assets": 364980000000,
+    "total_liabilities": 308030000000,
+    "stockholders_equity": 56950000000,
+    "total_debt": 104590000000,
+    "cash": 29650000000,
+    "debt_to_equity": 1.836
+  },
+  "macro": {
+    "fed_funds_rate": {"value": 5.0,   "date": "2026-07-01"},
+    "cpi_yoy":        {"value": 3.1,   "date": "2026-07-01"},
+    "unemployment":   {"value": 3.9,   "date": "2026-07-01"},
+    "yield_spread":   {"value": -0.42, "date": "2026-07-15", "inverted": true},
+    "shiller_cape":   {"value": 34.21, "date": "2026-07-01"}
+  },
+  "news": [
+    {
+      "headline": "Apple reports record quarter",
+      "source":   "Reuters",
+      "url":      "https://reuters.com/...",
+      "datetime": 1722412800
+    }
+  ],
   "exchange": "NASDAQ",
   "errors": []
 }
+```
+
+**New keys (added in backlog item 2):**
+
+| Key | Type | Notes |
+|---|---|---|
+| `fundamentals.trailing_pe` | `float\|null` | Same as `pe_ratio`; canonical name going forward |
+| `fundamentals.forward_pe` | `float\|null` | Forward P/E based on consensus estimates |
+| `balance_sheet` | `object` | Most recent annual balance sheet; daily DB cache |
+| `balance_sheet.period` | `string` | ISO date of the balance sheet period end |
+| `balance_sheet.debt_to_equity` | `float\|null` | Derived: `total_debt / stockholders_equity` |
+| `macro` | `object` | US macro indicators; global 6h DB cache |
+| `macro.yield_spread.inverted` | `bool` | `true` when 10y-2y < 0 (recession signal) |
+| `macro.shiller_cape` | `{value, date}\|null` | Shiller CAPE from multpl.com; `null` on scrape failure |
+| `news` | `List[Dict]` | List of `{headline, source, url, datetime}` dicts (was `List[str]` before) |
 ```
 
 ---
@@ -260,6 +302,80 @@ curl -X DELETE http://localhost:8010/watchlist/GOOGL
 
 ## Settings
 
+### `GET /settings`
+
+Returns all current effective settings (env file defaults overridden by any DB values set at runtime).
+
+```bash
+curl http://localhost:8010/settings
+```
+
+**Response**
+```json
+{
+  "ollama_model": "qwen2.5:7b",
+  "ollama_timeout": 180,
+  "alerts_enabled": false,
+  "env_model": "qwen2.5:7b",
+  "env_timeout": 180,
+  "scan_interval_minutes": 300,
+  "scheduler_running": false
+}
+```
+
+---
+
+### `POST /settings/scheduler`
+
+Start or stop the background auto-scan loop. **Off by default** — the scheduler does not start automatically unless explicitly enabled. State is persisted to SQLite and survives container restarts.
+
+**Request body**
+```json
+{ "running": true }
+```
+
+**Response** — current scheduler status
+```json
+{
+  "running": true,
+  "market_open": false,
+  "last_run": null,
+  "scan_interval_minutes": 300,
+  "watchlist": ["AAPL", "MSFT", "NVDA", "TSLA", "AMD", "SPY"]
+}
+```
+
+```bash
+# Turn on:
+curl -X POST http://localhost:8010/settings/scheduler \
+  -H 'Content-Type: application/json' \
+  -d '{"running": true}'
+
+# Turn off:
+curl -X POST http://localhost:8010/settings/scheduler \
+  -H 'Content-Type: application/json' \
+  -d '{"running": false}'
+```
+
+---
+
+### `POST /settings/scan-interval`
+
+Change the minutes between scans while the market is open. Takes effect on the next loop cycle — no restart required.
+
+**Request body**
+```json
+{ "minutes": 60 }
+```
+
+```bash
+curl -X POST http://localhost:8010/settings/scan-interval \
+  -H 'Content-Type: application/json' \
+  -d '{"minutes": 60}'
+```
+
+---
+
 ### `POST /settings/alerts`
 
 Enable or disable alert dispatch at runtime (no restart required).
@@ -274,6 +390,44 @@ curl -X POST http://localhost:8010/settings/alerts \
 curl -X POST http://localhost:8010/settings/alerts \
   -H 'Content-Type: application/json' \
   -d '{"enabled": true}'
+```
+
+---
+
+### `POST /settings/ollama`
+
+Override the Ollama model and/or timeout at runtime without restarting the container. Only models already pulled in Ollama can be selected.
+
+**Request body** (all fields optional)
+```json
+{ "model": "qwen2.5:14b", "timeout": 240 }
+```
+
+```bash
+curl -X POST http://localhost:8010/settings/ollama \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "qwen2.5:14b", "timeout": 240}'
+```
+
+---
+
+## Data
+
+### `POST /data/reset`
+
+Clear all rows from `signals` and `analysis_log`. App settings (watchlist overrides, scheduler state, scan interval, Ollama model, alerts toggle) are **preserved**.
+
+```bash
+curl -X POST http://localhost:8010/data/reset
+```
+
+**Response**
+```json
+{
+  "cleared": ["signals", "analysis_log"],
+  "signals_deleted": 42,
+  "analyses_deleted": 18
+}
 ```
 
 ---
