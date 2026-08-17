@@ -266,6 +266,15 @@ def set_setting(
         conn.commit()
 
 
+def clear_all_data(db_path: Optional[str] = None) -> Dict[str, int]:
+    """Delete all rows from signals and analysis_log. app_settings is preserved."""
+    with _connect(db_path) as conn:
+        sig_rows  = conn.execute("DELETE FROM signals").rowcount
+        log_rows  = conn.execute("DELETE FROM analysis_log").rowcount
+        conn.commit()
+    return {"signals_deleted": sig_rows, "analyses_deleted": log_rows}
+
+
 def get_effective_watchlist(db_path: Optional[str] = None) -> List[str]:
     """Return the watchlist as modified by add/remove overrides stored in DB."""
     from .config import get_settings as _cfg

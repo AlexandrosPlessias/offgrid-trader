@@ -26,6 +26,7 @@ from .config import MarketHours, get_settings
 from .data import get_market_data
 from .database import (
     get_effective_watchlist,
+    get_setting,
     init_db,
     save_analysis,
     save_signal,
@@ -137,10 +138,9 @@ class MonitorScheduler:
         self.running = False
 
     async def _loop(self) -> None:
-        settings = get_settings()
-        interval_seconds = max(60, settings.scan_interval_minutes * 60)
         init_db()
         self.running = True
+        settings = get_settings()
         _log.info("started; interval=%sm", settings.scan_interval_minutes)
         try:
             while not self._stop.is_set():
@@ -159,6 +159,12 @@ class MonitorScheduler:
                 else:
                     _log.info("market closed — sleeping")
 
+                # Re-read interval each cycle so UI changes take effect immediately
+                db_interval = get_setting("scan_interval_minutes", "")
+                interval_seconds = max(
+                    60,
+                    (int(db_interval) if db_interval and db_interval.isdigit() else settings.scan_interval_minutes) * 60,
+                )
                 try:
                     await asyncio.wait_for(
                         self._stop.wait(), timeout=interval_seconds
@@ -189,11 +195,13 @@ class MonitorScheduler:
 
     def status(self) -> Dict[str, Any]:
         settings = get_settings()
+        db_interval = get_setting("scan_interval_minutes", "")
+        effective_interval = int(db_interval) if db_interval and db_interval.isdigit() else settings.scan_interval_minutes
         return {
             "running": self.running,
             "market_open": is_market_open(),
             "last_run": self.last_run,
-            "scan_interval_minutes": settings.scan_interval_minutes,
+            "scan_interval_minutes": effective_interval,
             "watchlist": get_effective_watchlist(),
         }
 

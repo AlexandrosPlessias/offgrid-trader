@@ -352,22 +352,10 @@ curl -X POST http://localhost:8010/analyze \
 ## 7. Smoke test (optional)
 
 Verify the backend logic is wired correctly without touching live APIs.
-
-> **Note:** `tests/` is not copied into the Docker image (only `backend/` is).
-> `docker compose exec backend python tests/smoke_test.py` will fail with a
-> module-not-found error. Use the `-v` mount approach below instead.
+`tests/` is included in the Docker image, so the test runs directly:
 
 ```bash
-# Mount the repo into the already-built backend image and run offline:
-docker run --rm \
-  -v "$(pwd)":/workspace \
-  -w /workspace \
-  -e PYTHONPATH=/workspace \
-  -e DATABASE_PATH=/tmp/smoke.db \
-  -e EMAIL_ENABLED=false \
-  -e SLACK_ENABLED=false \
-  offgrid-trader-backend \
-  python3 tests/smoke_test.py
+docker compose exec backend python tests/smoke_test.py
 ```
 
 All checks should print `PASS`. The final line will read:

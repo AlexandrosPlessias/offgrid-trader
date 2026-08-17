@@ -145,7 +145,7 @@ docker compose ps
 |---|---|---|
 | POST | `/analyze` | On-demand analysis for any ticker |
 | POST | `/analyze/stream` | Same pipeline, streamed via SSE (step events + final result) |
-| GET | `/market-data/{ticker}` | Raw market-data dict (price, fundamentals, indicators) |
+| GET | `/market-data/{ticker}` | Raw market-data dict (price, fundamentals, balance sheet, macro, indicators, news) |
 | GET | `/market-data/{ticker}/history` | OHLCV + volume history (`?period=3mo&interval=1d`) |
 | POST | `/webhook/tradingview` | Receive a TradingView Pro alert → background scan |
 | GET | `/signals` | Recent stored signals (`?ticker=&limit=`) |
@@ -156,22 +156,24 @@ docker compose ps
 | GET | `/watchlist` | Watchlist + scheduler status + alerts toggle |
 | POST | `/watchlist` | Add ticker (`{"ticker": "GOOGL"}`) — persisted in SQLite |
 | DELETE | `/watchlist/{ticker}` | Remove ticker — persisted in SQLite |
+| GET | `/settings` | Current effective settings (env + DB overrides) |
 | POST | `/settings/alerts` | Toggle alert dispatch (`{"enabled": true/false}`) |
+| POST | `/settings/scheduler` | Start/stop auto-scan (`{"running": true/false}`); state persists across restarts |
+| POST | `/settings/scan-interval` | Change scan cadence (`{"minutes": 60}`) |
+| POST | `/settings/ollama` | Override Ollama model and/or timeout at runtime |
+| POST | `/data/reset` | Clear all signals and analysis history (app settings preserved) |
 | GET | `/health` | Liveness + config summary |
 
 Full reference with request/response shapes: [docs/wiki/api.md](docs/wiki/api.md).
 
-### Analysis Explorer & Learn page
+### UI pages
 
-The React UI has three tabs:
+The React UI has four tabs (Dashboard, Explorer, Learn) plus a Settings panel (⚙ gear icon in the header):
 
-- **Dashboard** — watchlist management and recent signals table (with per-row delete)
-- **Explorer** — ad-hoc analysis as a full-page walkthrough: live pipeline stepper,
-  price snapshot, 3-month history chart (toggle switch), RSI/MACD/EMA charts, AI
-  reasoning, the collapsible raw indicator table, and a collapsible **Analysis History**
-  panel that lets you re-open any saved run (with per-row delete)
-- **Learn** — static in-app wiki: how the pipeline works, what each indicator measures,
-  the four opportunity-detection rules, a trading glossary, and links to further reading
+- **Dashboard** — watchlist management and recent signals table (collapsible filters: side, confidence, ticker; per-row delete)
+- **Explorer** — ad-hoc analysis as a full-page walkthrough: live pipeline stepper, price snapshot, 3-month history chart, RSI/MACD/EMA charts, AI reasoning, raw indicator table, and a collapsible **Analysis History** panel (re-open any saved run; per-row delete)
+- **Learn** — in-app wiki: pipeline overview, technical indicators, fundamentals/macro/balance-sheet context, opportunity detection rules, trading glossary, and further reading links. All sections are collapsible; click a title in the sidebar to expand it.
+- **Settings** (⚙) — Scheduler toggle + scan interval, alerts toggle, Ollama model/timeout override, and a data-reset button (clears signals + analysis history; preserves settings)
 
 ### Examples
 
@@ -219,6 +221,22 @@ While the market is open it scans every ticker in `WATCHLIST` every
 `SCAN_INTERVAL_MINUTES`: fetch data → AI analysis → detect opportunities → save
 → alert. Outside market hours it sleeps.
 
+**Auto-scan is off by default.** Enable it from the Settings page (⚙ gear in the header) or via the API:
+
+```bash
+# Turn on auto-scan:
+curl -X POST http://localhost:8010/settings/scheduler \
+  -H "Content-Type: application/json" \
+  -d '{"running": true}'
+
+# Turn off auto-scan:
+curl -X POST http://localhost:8010/settings/scheduler \
+  -H "Content-Type: application/json" \
+  -d '{"running": false}'
+```
+
+The on/off state is **persisted to SQLite** and survives container restarts — you don't need to touch `.env`.
+
 ```bash
 # See what the scheduler is doing:
 docker compose logs -f backend | grep scheduler
@@ -227,9 +245,14 @@ docker compose logs -f backend | grep scheduler
 curl http://localhost:8010/watchlist
 ```
 
-To change the watchlist or cadence, edit `WATCHLIST` / `SCAN_INTERVAL_MINUTES`
-in `.env` and `docker compose up -d backend` (recreates the container so the new
-env is read — `restart` alone won't pick it up).
+To change the watchlist, edit `WATCHLIST` in `.env` and run `docker compose up -d backend`.
+To change the scan interval without restarting, use the Settings page or:
+
+```bash
+curl -X POST http://localhost:8010/settings/scan-interval \
+  -H "Content-Type: application/json" \
+  -d '{"minutes": 60}'
+```
 
 ---
 
@@ -314,7 +337,17 @@ python tests/smoke_test.py
 
 ## 10. Resetting state
 
-### Wipe the signals/analysis database
+### Clear signals and analysis history (keep settings)
+
+From the **Settings page** (⚙ gear in the header), use the **Clear all data** button. Or via API:
+
+```bash
+curl -X POST http://localhost:8010/data/reset
+```
+
+This removes all rows from `signals` and `analysis_log`. Watchlist overrides, scheduler state, scan interval, and Ollama model settings are preserved.
+
+### Wipe the entire database
 
 ```bash
 docker compose down
@@ -322,7 +355,7 @@ rm -f data/offgrid_trader.db
 docker compose up -d
 ```
 
-The backend recreates the schema on the next start.
+The backend recreates the schema on the next start. Use this only when you also want to wipe app settings (watchlist, scheduler state, etc.).
 
 ### Re-pull / reset the model weights
 
@@ -363,7 +396,43 @@ new value is applied).
 
 ---
 
-## 12. Troubleshooting
+## 12. Re-capturing documentation screenshots
+
+The `docs/screenshots/` directory contains 15 viewport screenshots (1440 × 900 px)
+captured by a [Playwright](https://playwright.dev) script. Re-run any time the UI
+changes:
+
+### One-time setup (per machine)
+
+```bash
+cd docs/screenshots
+npm install                      # installs playwright npm wrapper (~2 packages)
+npx playwright install chromium  # downloads headless Chromium browser (~200 MB)
+```
+
+### Capture
+
+```bash
+# Requirements: full stack running + at least one saved analysis
+
+# Create a saved analysis if you don't have one yet:
+curl -X POST http://localhost:8010/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"ticker": "AAPL"}'
+
+# Run the capture script:
+node docs/screenshots/capture.mjs
+```
+
+All 15 PNGs are written to `docs/screenshots/`, existing files are overwritten.
+The script prints `✓ <filename>` for each successful shot.
+
+See [docs/screenshots/README.md](docs/screenshots/README.md) for the full file
+inventory, script internals, and troubleshooting.
+
+---
+
+## 13. Troubleshooting
 
 | Symptom | Fix |
 |---|---|

@@ -129,28 +129,64 @@ function InfoTip({ text }) {
 
 // ─── AnalysisStepper ──────────────────────────────────────────────────────────
 
-function stepIcon(status) {
-  if (status === 'done')    return '✓'
-  if (status === 'running') return '⟳'
-  if (status === 'error')   return '✕'
-  return '·'
+const STEP_META = {
+  fetch: {
+    icon: '📦',
+    label: 'Fetch market data',
+    subs: ['Price & volume', 'Technical indicators (RSI, MACD, BBands)', 'Fundamentals & news', 'Balance sheet', 'Macro context (FRED)'],
+  },
+  analyze: {
+    icon: '🤖',
+    label: 'AI analysis',
+    subs: ['Build prompt with all context', 'Call local Ollama model', 'Parse structured response'],
+  },
+  detect: {
+    icon: '🎯',
+    label: 'Detect opportunities',
+    subs: ['Rule checks (RSI, MACD, volume, P/E)', 'Merge & deduplicate signals', 'Macro regime confidence filter'],
+  },
 }
 
 function AnalysisStepper({ steps }) {
+  const done  = steps.filter(s => s.status === 'done').length
+  const total = steps.length
+  const pct   = Math.round((done / total) * 100)
+
   return (
     <div className="stepper">
-      {steps.map(step => (
-        <div key={step.id} className={`step ${step.status}`}>
-          <span className="step-icon">{stepIcon(step.status)}</span>
-          <span className="step-label">{step.label}</span>
-          {step.status === 'error' && step.msg && (
-            <span className="step-msg">{step.msg}</span>
-          )}
-          {step.elapsed != null && step.status !== 'pending' && (
-            <span className="step-elapsed">{step.elapsed}s</span>
-          )}
-        </div>
-      ))}
+      <div className="stepper-bar-track">
+        <div className="stepper-bar-fill" style={{ width: `${pct}%` }} />
+      </div>
+      {steps.map((step, idx) => {
+        const meta = STEP_META[step.id] || { icon: '●', label: step.label, subs: [] }
+        return (
+          <div key={step.id} className={`step step-v2 ${step.status}`}>
+            <div className="step-left">
+              <span className="step-num">{idx + 1}</span>
+            </div>
+            <div className="step-body">
+              <div className="step-header-row">
+                <span className="step-icon-lg">{meta.icon}</span>
+                <span className="step-label">{meta.label}</span>
+                {step.elapsed != null && step.status !== 'pending' && (
+                  <span className="step-elapsed">{step.elapsed}s</span>
+                )}
+                <span className={`step-badge step-badge-${step.status}`}>
+                  {step.status === 'done' ? '✓ done' : step.status === 'running' ? '⟳ running' : step.status === 'error' ? '✕ error' : 'pending'}
+                </span>
+              </div>
+              {step.status !== 'pending' && (
+                <ul className="step-subs">
+                  {meta.subs.map(s => <li key={s}>{s}</li>)}
+                </ul>
+              )}
+              {step.status === 'error' && step.msg && (
+                <div className="step-msg">{step.msg}</div>
+              )}
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -494,20 +530,17 @@ function Header({ health, activeView, onViewChange }) {
           >
             Learn
           </button>
-          <button
-            className={`nav-tab ${activeView === 'settings' ? 'active' : ''}`}
-            onClick={() => onViewChange('settings')}
-          >
-            ⚙️ Settings
-          </button>
         </nav>
       </div>
       <div className="header-right">
         {health ? (
-          <div className="header-meta">
-            <span className={`dot ${ok ? 'green' : 'red'}`} title={ok ? 'backend online' : 'backend error'} />
+          <div className="header-status">
+            <span className={`api-pill ${ok ? 'ok' : 'err'}`}>
+              <span className="api-dot" />
+              {ok ? 'API' : 'Error'}
+            </span>
             <span className={`market-badge ${open ? 'open' : 'closed'}`}>
-              {open ? '● Market Open' : '○ Market Closed'}
+              {open ? 'Market Open' : 'Market Closed'}
             </span>
           </div>
         ) : (
@@ -516,6 +549,11 @@ function Header({ health, activeView, onViewChange }) {
         <div className="header-tools">
           <a href="http://localhost:18889" target="_blank" rel="noreferrer" className="tool-btn" title="Aspire — traces & logs">Logs</a>
           <a href="http://localhost:9000"  target="_blank" rel="noreferrer" className="tool-btn" title="Portainer — container management">Portainer</a>
+          <button
+            className={`tool-btn ${activeView === 'settings' ? 'tool-btn-active' : ''}`}
+            onClick={() => onViewChange('settings')}
+            title="Settings"
+          >⚙️</button>
         </div>
       </div>
     </header>
@@ -530,7 +568,7 @@ function WatchlistCard({ wl, onWatchlistChange }) {
 
   if (!wl) return <div className="card skeleton" style={{ minHeight: 100 }} />
 
-  const { watchlist, scan_interval_minutes, scheduler, alerts_enabled: alertsOn = true } = wl
+  const { watchlist, scan_interval_minutes, scheduler } = wl
 
   const addTicker = async () => {
     const t = newTicker.trim().toUpperCase()
@@ -554,20 +592,14 @@ function WatchlistCard({ wl, onWatchlistChange }) {
     onWatchlistChange()
   }
 
-  const toggleAlerts = async () => {
-    await fetch(`${API}/settings/alerts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: !alertsOn }),
-    })
-    onWatchlistChange()
-  }
-
   return (
     <section className="card">
       <div className="card-title">
         Watchlist
         <span className="card-sub">scan every {scan_interval_minutes}m</span>
+        <span className={`scheduler-status-chip ${scheduler?.running ? 'running' : 'stopped'}`}>
+          {scheduler?.running ? '● scanning' : '○ paused'}
+        </span>
       </div>
       <div className="chip-row">
         {watchlist.map((t) => (
@@ -592,27 +624,6 @@ function WatchlistCard({ wl, onWatchlistChange }) {
           onClick={addTicker}
           disabled={adding || !newTicker.trim()}
         >+</button>
-      </div>
-      <div className="scheduler-row">
-        Scheduler&nbsp;
-        <span className={scheduler?.running ? 'text-green' : 'text-dim'}>
-          {scheduler?.running ? 'running' : 'stopped'}
-        </span>
-        {scheduler?.last_run && (
-          <span className="text-dim">
-            &nbsp;· last {new Date(scheduler.last_run).toLocaleTimeString()}
-          </span>
-        )}
-      </div>
-      <div className="alerts-row">
-        Alerts
-        <button
-          className={`alerts-toggle ${alertsOn ? 'on' : 'off'}`}
-          onClick={toggleAlerts}
-          title={alertsOn ? 'Click to disable alert dispatch' : 'Click to enable alert dispatch'}
-        >
-          {alertsOn ? 'ON' : 'OFF'}
-        </button>
       </div>
     </section>
   )
@@ -803,6 +814,77 @@ function fmtTime(iso) {
   try { return new Date(iso).toLocaleString() } catch { return iso }
 }
 
+function fmtMarketCap(v) {
+  if (v == null) return '—'
+  if (v >= 1e12) return `$${(v / 1e12).toFixed(2)}T`
+  if (v >= 1e9)  return `$${(v / 1e9).toFixed(2)}B`
+  if (v >= 1e6)  return `$${(v / 1e6).toFixed(2)}M`
+  return `$${Number(v).toLocaleString()}`
+}
+
+function fmtNewsDate(epoch) {
+  if (!epoch) return ''
+  try {
+    return new Date(epoch * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  } catch { return '' }
+}
+
+/**
+ * Horizontal bar chart: Assets / Liabilities / Equity side-by-side.
+ * Uses a fixed 320px width to match the indicator charts' style.
+ */
+function BalanceSheetChart({ bs }) {
+  const FILLS = ['#22c55e', '#ef4444', '#3b82f6']
+  const data = [
+    { name: 'Assets',      value: bs.total_assets },
+    { name: 'Liabilities', value: bs.total_liabilities },
+    { name: 'Equity',      value: bs.stockholders_equity },
+  ].filter(d => d.value != null)
+  if (!data.length) return null
+  return (
+    <BarChart width={320} height={90} data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+      <XAxis dataKey="name" tick={{ fontSize: 10, fill: '#8b949e' }} />
+      <YAxis hide />
+      <Tooltip
+        {...CHART_TOOLTIP_STYLE}
+        formatter={(v, name, props) => [fmtMarketCap(v), props.payload.name]}
+      />
+      <Bar dataKey="value" radius={[3, 3, 0, 0]}>
+        {data.map((_, i) => <Cell key={i} fill={FILLS[i % FILLS.length]} />)}
+      </Bar>
+    </BarChart>
+  )
+}
+
+/** Returns a CSS class suffix and a plain-English label for a macro metric. */
+function macroStatus(key, value) {
+  if (value == null) return { cls: '', interp: '' }
+  switch (key) {
+    case 'fed_funds_rate':
+      if (value < 2)  return { cls: 'good', interp: 'Accommodative' }
+      if (value < 5)  return { cls: 'warn', interp: 'Neutral' }
+      return { cls: 'bad', interp: 'Restrictive' }
+    case 'cpi_yoy':
+      if (value < 2)  return { cls: 'good', interp: 'On target' }
+      if (value < 5)  return { cls: 'warn', interp: 'Elevated' }
+      return { cls: 'bad', interp: 'High inflation' }
+    case 'unemployment':
+      if (value < 4)  return { cls: 'good', interp: 'Strong labour' }
+      if (value < 6)  return { cls: 'warn', interp: 'Near average' }
+      return { cls: 'bad', interp: 'Weakening' }
+    case 'yield_spread':
+      return value > 0
+        ? { cls: 'good', interp: 'Normal curve' }
+        : { cls: 'bad',  interp: 'Inverted ⚠' }
+    case 'shiller_cape':
+      if (value < 20) return { cls: 'good', interp: 'Historically cheap' }
+      if (value < 30) return { cls: 'warn', interp: 'Fair value' }
+      return { cls: 'bad', interp: 'Elevated' }
+    default:
+      return { cls: '', interp: '' }
+  }
+}
+
 function SignalDetail({ signal, onClose }) {
   const [analysis, setAnalysis] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -848,66 +930,211 @@ function SignalDetail({ signal, onClose }) {
   )
 }
 
-function SignalsTable({ signals, reload }) {
-  const [selected, setSelected] = useState(null)
+const SOURCE_LABEL = {
+  ai:                '🤖 AI',
+  rsi_extreme:       'RSI',
+  macd_crossover:    'MACD cross',
+  volume_spike:      'Vol ↑',
+  valuation_extreme: 'P/E high',
+  valuation_cheap:   'P/E low',
+  macro_regime:      'Macro',
+}
 
-  if (!signals) return <div className="card skeleton" style={{ minHeight: 120 }} />
-
-  const rows = signals.signals ?? []
-
-  const handleDelete = async (id, e) => {
-    e.stopPropagation()
-    if (!confirm('Delete this signal?')) return
-    await fetch(`${API}/signals/${id}`, { method: 'DELETE' }).catch(() => {})
-    if (selected?.id === id) setSelected(null)
-    reload()
-  }
+function SignalCard({ r, expanded, onToggle, onDelete }) {
+  const isLong = r.type === 'long'
+  const conf   = r.confidence ?? 0
 
   return (
-    <section className="card">
-      <div className="card-title">
-        Recent Signals
-        <span className="card-sub">{rows.length} shown · click a row for LLM reasoning</span>
-        <button className="btn-ghost" onClick={reload} title="Refresh">↻</button>
+    <div className={`signal-card ${r.type ?? 'unknown'}`}>
+      {/* header row */}
+      <div className="signal-card-header" onClick={onToggle} style={{ cursor: 'pointer' }}>
+        <div className="signal-card-left">
+          <span className="signal-ticker">{r.ticker}</span>
+          <span className={`badge ${r.type}`} style={{ marginLeft: 8 }}>
+            {r.type?.toUpperCase() ?? '—'}
+          </span>
+          <span className="signal-time text-dim">{fmtTime(r.created_at)}</span>
+        </div>
+        <div className="signal-card-right">
+          <div className="signal-conf-wrap">
+            <span className="signal-conf-pct" style={{ color: isLong ? 'var(--green)' : 'var(--red)' }}>
+              {conf.toFixed(0)}%
+            </span>
+            <div className="signal-conf-track">
+              <div
+                className="signal-conf-fill"
+                style={{
+                  width: `${conf}%`,
+                  background: isLong ? 'var(--green)' : 'var(--red)',
+                  opacity: 0.85,
+                }}
+              />
+            </div>
+          </div>
+          <button
+            className="btn-delete"
+            onClick={e => { e.stopPropagation(); onDelete() }}
+            title="Delete"
+          >×</button>
+        </div>
       </div>
 
-      {rows.length === 0 ? (
-        <div className="text-dim empty">No signals stored yet.</div>
-      ) : (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Time</th><th>Ticker</th><th>Type</th><th>Conf</th>
-                <th>Price</th><th>Entry</th><th>Stop</th><th>Target</th><th>Source</th><th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map(r => (
-                <tr
-                  key={r.id}
-                  className={`clickable-row${selected?.id === r.id ? ' row-selected' : ''}`}
-                  onClick={() => setSelected(prev => prev?.id === r.id ? null : r)}
-                >
-                  <td className="text-dim ts">{fmtTime(r.created_at)}</td>
-                  <td><strong>{r.ticker}</strong></td>
-                  <td><span className={`badge ${r.type}`}>{r.type?.toUpperCase() ?? '—'}</span></td>
-                  <td>{(r.confidence ?? 0).toFixed(0)}%</td>
-                  <td>{fmtN(r.price)}</td>
-                  <td>{fmtN(r.entry)}</td>
-                  <td>{fmtN(r.stop)}</td>
-                  <td>{fmtN(r.target)}</td>
-                  <td className="text-dim source-cell">{r.source ?? '—'}</td>
-                  <td><button className="btn-delete" onClick={(e) => handleDelete(r.id, e)} title="Delete">×</button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {/* price grid */}
+      <div className="signal-levels-grid">
+        {[['Price', r.price], ['Entry', r.entry], ['Stop', r.stop], ['Target', r.target]].map(([lbl, val]) => (
+          <div key={lbl} className="signal-level-cell">
+            <span className="signal-level-label">{lbl}</span>
+            <span className="signal-level-value">{fmtN(val)}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* source chips */}
+      {r.source && (
+        <div className="signal-sources">
+          {r.source.split('+').map(s => (
+            <span key={s} className="signal-chip">{SOURCE_LABEL[s.trim()] ?? s.trim()}</span>
+          ))}
         </div>
       )}
 
-      {selected && <SignalDetail signal={selected} onClose={() => setSelected(null)} />}
-    </section>
+      {/* expanded: LLM reasoning */}
+      {expanded && r.llm_analysis && (
+        <div className="signal-reasoning">
+          <div className="signal-reasoning-label">AI Reasoning</div>
+          <div className="signal-reasoning-body">{r.llm_analysis}</div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SignalsTable({ signals, reload }) {
+  const [open,         setOpen]         = useState(false)
+  const [filterSide,   setFilterSide]   = useState('all')
+  const [filterConf,   setFilterConf]   = useState(0)
+  const [filterTicker, setFilterTicker] = useState('')
+  const [expanded,     setExpanded]     = useState(null)
+
+  if (!signals) return <div className="card skeleton" style={{ minHeight: 80 }} />
+
+  const allRows = signals.signals ?? []
+
+  const rows = allRows.filter(r => {
+    if (filterSide !== 'all' && r.type !== filterSide) return false
+    if ((r.confidence ?? 0) < filterConf) return false
+    if (filterTicker && !r.ticker?.includes(filterTicker.toUpperCase())) return false
+    return true
+  })
+
+  const handleDelete = async (id) => {
+    if (!confirm('Delete this signal?')) return
+    await fetch(`${API}/signals/${id}`, { method: 'DELETE' }).catch(() => {})
+    if (expanded === id) setExpanded(null)
+    reload()
+  }
+
+  const longCount  = allRows.filter(r => r.type === 'long').length
+  const shortCount = allRows.filter(r => r.type === 'short').length
+
+  return (
+    <details
+      className="card signals-collapsible"
+      open={open}
+      onToggle={e => setOpen(e.target.open)}
+    >
+      <summary className="signals-summary">
+        <div className="signals-summary-left">
+          <span className="card-title" style={{ margin: 0 }}>📊 Signals</span>
+          <span className="text-dim" style={{ fontSize: 13 }}>
+            {allRows.length} stored
+          </span>
+          {allRows.length > 0 && (
+            <div className="signals-summary-badges">
+              {longCount  > 0 && <span className="badge long">{longCount} long</span>}
+              {shortCount > 0 && <span className="badge short">{shortCount} short</span>}
+            </div>
+          )}
+        </div>
+        <div className="signals-summary-right">
+          <button
+            className="btn-ghost"
+            onClick={e => { e.stopPropagation(); e.preventDefault(); reload() }}
+            title="Refresh"
+          >↻</button>
+          <span className="section-chevron">{open ? '▲' : '▼'}</span>
+        </div>
+      </summary>
+
+      {/* Filter bar */}
+      {allRows.length > 0 && (
+        <div className="signals-filters">
+          <div className="filter-group">
+            {['all', 'long', 'short'].map(s => (
+              <button
+                key={s}
+                className={`filter-btn ${filterSide === s ? 'active' : ''}`}
+                onClick={() => setFilterSide(s)}
+              >
+                {s.charAt(0).toUpperCase() + s.slice(1)}
+              </button>
+            ))}
+          </div>
+
+          <div className="filter-group">
+            <label className="filter-label">Min conf</label>
+            <input
+              type="range" min={0} max={100} step={5}
+              value={filterConf}
+              onChange={e => setFilterConf(Number(e.target.value))}
+              className="filter-range"
+            />
+            <span className="filter-val">{filterConf}%</span>
+          </div>
+
+          <div className="filter-group">
+            <input
+              type="text"
+              placeholder="Ticker…"
+              value={filterTicker}
+              onChange={e => setFilterTicker(e.target.value)}
+              className="filter-ticker-input"
+            />
+          </div>
+
+          {(filterSide !== 'all' || filterConf > 0 || filterTicker) && (
+            <button
+              className="btn-ghost"
+              style={{ fontSize: 12 }}
+              onClick={() => { setFilterSide('all'); setFilterConf(0); setFilterTicker('') }}
+            >
+              Clear filters
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Cards */}
+      <div style={{ padding: '0 16px 16px' }}>
+        {rows.length === 0 && allRows.length === 0 && (
+          <div className="text-dim empty">No signals stored yet.</div>
+        )}
+        {rows.length === 0 && allRows.length > 0 && (
+          <div className="text-dim empty">No signals match the current filters.</div>
+        )}
+        <div className="signals-cards-grid">
+          {rows.map(r => (
+            <SignalCard
+              key={r.id}
+              r={r}
+              expanded={expanded === r.id}
+              onToggle={() => setExpanded(prev => prev === r.id ? null : r.id)}
+              onDelete={() => handleDelete(r.id)}
+            />
+          ))}
+        </div>
+      </div>
+    </details>
   )
 }
 
@@ -1038,6 +1265,56 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
         </div>
       )}
 
+      {/* Fundamentals card — collapsible */}
+      {mkt?.fundamentals && (
+        <details className="explorer-section explorer-collapsible" open>
+          <summary className="section-header">
+            <span className="section-badge">Fundamentals</span>
+            <span className="section-label">Company overview</span>
+            <span className="section-chevron">›</span>
+          </summary>
+          <p className="section-desc">
+            Key company data from yfinance. <strong>P/E (TTM)</strong> is trailing 12-month
+            price-to-earnings; <strong>P/E (Fwd)</strong> is based on next-year consensus estimates.
+            High P/E can mean growth expectations or overvaluation — context matters.
+          </p>
+          <div className="fundamentals-row">
+            {mkt.fundamentals.sector && (
+              <div className="fund-item">
+                <span className="fund-label">Sector</span>
+                <span className="fund-value">{mkt.fundamentals.sector}</span>
+              </div>
+            )}
+            {mkt.fundamentals.industry && (
+              <div className="fund-item">
+                <span className="fund-label">Industry</span>
+                <span className="fund-value">{mkt.fundamentals.industry}</span>
+              </div>
+            )}
+            {mkt.fundamentals.market_cap != null && (
+              <div className="fund-item">
+                <span className="fund-label">Market Cap</span>
+                <span className="fund-value">{fmtMarketCap(mkt.fundamentals.market_cap)}</span>
+              </div>
+            )}
+            {(mkt.fundamentals.trailing_pe ?? mkt.fundamentals.pe_ratio) != null && (
+              <div className="fund-item">
+                <span className="fund-label">P/E (TTM)</span>
+                <span className="fund-value">
+                  {fmtN(mkt.fundamentals.trailing_pe ?? mkt.fundamentals.pe_ratio)}×
+                </span>
+              </div>
+            )}
+            {mkt.fundamentals.forward_pe != null && (
+              <div className="fund-item">
+                <span className="fund-label">P/E (Fwd)</span>
+                <span className="fund-value">{fmtN(mkt.fundamentals.forward_pe)}×</span>
+              </div>
+            )}
+          </div>
+        </details>
+      )}
+
       {/* Section 3 — Historical price chart (toggle-gated) */}
       {result && (
         <div className="explorer-section">
@@ -1067,6 +1344,145 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
           <MarketCharts marketData={mkt} />
           <IndicatorTable marketData={mkt} />
         </div>
+      )}
+
+      {/* News card — collapsible */}
+      {mkt && (
+        <details className="explorer-section explorer-collapsible" open>
+          <summary className="section-header">
+            <span className="section-badge">News</span>
+            <span className="section-label">Recent headlines</span>
+            <span className="section-chevron">›</span>
+          </summary>
+          <p className="section-desc">
+            Last 7 days of company news from Finnhub. Headlines are included in the AI prompt
+            so the model can factor in recent events. Requires a free{' '}
+            <code>FINNHUB_API_KEY</code> in <code>.env</code>.
+          </p>
+          {mkt.news?.length > 0 ? (
+            <ul className="news-list">
+              {mkt.news.map((item, i) => (
+                <li key={i} className="news-item">
+                  <a
+                    className="news-headline"
+                    href={item.url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {item.headline}
+                  </a>
+                  <span className="news-meta">
+                    {item.source && <span>{item.source}</span>}
+                    {item.datetime && <span>{fmtNewsDate(item.datetime)}</span>}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="text-dim" style={{ fontSize: 12 }}>
+              No recent headlines — set <code>FINNHUB_API_KEY</code> in <code>.env</code> to enable.
+            </div>
+          )}
+        </details>
+      )}
+
+      {/* Balance sheet card — collapsible, with bar chart */}
+      {mkt?.balance_sheet && mkt.balance_sheet.period && (
+        <details className="explorer-section explorer-collapsible" open>
+          <summary className="section-header">
+            <span className="section-badge">Balance Sheet</span>
+            <span className="section-label">Financial health</span>
+            <span className="section-chevron">›</span>
+          </summary>
+          <p className="section-desc">
+            Most recent annual balance sheet from yfinance (period: <strong>{mkt.balance_sheet.period}</strong>).
+            Debt-to-equity above 2× warrants extra caution; negative equity indicates liabilities
+            exceed assets. The AI model sees this data in its prompt.
+          </p>
+          <BalanceSheetChart bs={mkt.balance_sheet} />
+          <details className="indicator-details" style={{ marginTop: 8 }}>
+            <summary>📊 Full balance sheet</summary>
+            <div className="table-wrap" style={{ marginTop: 8 }}>
+              <table>
+                <tbody>
+                  {[
+                    { label: 'Total Assets',         val: mkt.balance_sheet.total_assets },
+                    { label: 'Total Liabilities',    val: mkt.balance_sheet.total_liabilities },
+                    { label: 'Stockholders Equity',  val: mkt.balance_sheet.stockholders_equity },
+                    { label: 'Total Debt',           val: mkt.balance_sheet.total_debt },
+                    { label: 'Cash & Equivalents',   val: mkt.balance_sheet.cash },
+                    { label: 'Debt / Equity',        val: mkt.balance_sheet.debt_to_equity, raw: true },
+                  ].map(({ label, val, raw }) => (
+                    <tr key={label}>
+                      <td className="text-dim">{label}</td>
+                      <td>
+                        {val == null ? '—' : raw ? `${fmtN(val)}×` : fmtMarketCap(val)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        </details>
+      )}
+
+      {/* Macro context card — collapsible, status dots, interpretation labels */}
+      {mkt?.macro && Object.keys(mkt.macro).filter(k => !k.startsWith('_')).length > 0 && (
+        <details className="explorer-section explorer-collapsible" open>
+          <summary className="section-header">
+            <span className="section-badge">Macro</span>
+            <span className="section-label">
+              US macro context{' '}
+              <InfoTip text="Macro data from FRED (key-free CSV) and multpl.com. Data lags by days–weeks. Included in the AI prompt so the model can reason about the broader economic environment." />
+            </span>
+            <span className="section-chevron">›</span>
+          </summary>
+          <p className="section-desc">
+            Federal Reserve rate, inflation, unemployment and yield curve from FRED; Shiller CAPE
+            (P/E 10) from multpl.com. Cached for 6 hours and shared across all tickers in a scan.
+          </p>
+          {/* Fetch-failure banner — shown when all values are null */}
+          {['fed_funds_rate','cpi_yoy','unemployment','yield_spread','shiller_cape']
+            .every(k => mkt.macro[k]?.value == null) && (
+            <div className="macro-fetch-error">
+              ⚠ Could not fetch macro data — the Docker container may not have outbound internet
+              access to <code>fred.stlouisfed.org</code> / <code>multpl.com</code>.
+              {mkt?.errors?.some(e => e.startsWith('macro:')) && (
+                <span style={{ display: 'block', marginTop: 4, color: '#92400e' }}>
+                  {mkt.errors.filter(e => e.startsWith('macro:')).join(' · ')}
+                </span>
+              )}
+            </div>
+          )}
+          <div className="macro-grid">
+            {[
+              { key: 'fed_funds_rate', label: 'Fed Funds Rate', unit: '%' },
+              { key: 'cpi_yoy',        label: 'CPI YoY',        unit: '%' },
+              { key: 'unemployment',   label: 'Unemployment',   unit: '%' },
+              { key: 'yield_spread',   label: '10y-2y Spread',  unit: '%', isSpread: true },
+              { key: 'shiller_cape',   label: 'Shiller CAPE',   unit: '×' },
+            ].map(({ key, label, unit, isSpread }) => {
+              const metric   = mkt.macro[key]
+              const inverted = isSpread && metric?.inverted
+              const { cls, interp } = macroStatus(key, metric?.value ?? null)
+              return (
+                <div key={key} className={`macro-item${inverted ? ' macro-inverted' : ''}`}>
+                  <span className="macro-label">
+                    {cls && <span className={`macro-status macro-status-${cls}`} />}
+                    {label}
+                  </span>
+                  <span className="macro-value">
+                    {metric?.value != null ? `${fmtN(metric.value)}${unit}` : '—'}
+                    {inverted && <span className="macro-warn"> ⚠ inverted</span>}
+                  </span>
+                  {interp && <span className="macro-interp">{interp}</span>}
+                  {metric?.date && <span className="macro-date">as of {metric.date}</span>}
+                </div>
+              )
+            })}
+          </div>
+        </details>
       )}
 
       {/* Section 5 — AI reasoning */}
@@ -1141,9 +1557,79 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
 
 // ─── Education / Glossary page ───────────────────────────────────────────────
 
-function EduSection({ title, badge, children, defaultOpen = false }) {
+const GLOSSARY_TERMS = [
+  ['Bearish',              'Expecting price to fall. A bearish signal suggests a potential short opportunity.'],
+  ['Bullish',              'Expecting price to rise. A bullish signal suggests a potential long opportunity.'],
+  ['CAPE / Shiller P/E',   '10-year inflation-adjusted P/E ratio for the S&P 500 as a whole. Values above 30 indicate elevated market-wide valuation; below 15 is historically cheap. Used in the macro regime filter (Rule 6).'],
+  ['Confidence',           '0–100 score combining AI confidence and rule-based evidence. Higher = stronger agreement across sources.'],
+  ['Confidence floor',     'Minimum confidence to be considered actionable (default: 65). Filters out weak / uncertain signals.'],
+  ['CPI',                  'Consumer Price Index — measures the rate of consumer price inflation. The Fed targets 2% YoY. High CPI forces the Fed to keep rates elevated, which compresses equity valuation multiples. Shown in the Macro card.'],
+  ['Death Cross',          'EMA 50 crossing below EMA 200 — a long-term bearish signal that often attracts institutional selling.'],
+  ['Debt-to-Equity (D/E)', "Total debt divided by stockholders' equity. Measures financial leverage. High D/E amplifies both gains and losses in downturns. A D/E above 3 is considered highly leveraged; context varies by sector (utilities and banks naturally carry more debt)."],
+  ['Entry',                'Suggested price at which to open the position. Typically near the current price at signal time.'],
+  ['Fed Funds Rate',       "The US Federal Reserve's benchmark overnight lending rate. Higher rates raise borrowing costs across the economy and compress equity valuation multiples by making bonds relatively more attractive."],
+  ['Forward P/E',          'Price divided by consensus analyst EPS estimate for the next 12 months. A forward P/E lower than the trailing P/E implies the market expects earnings growth; higher implies expected contraction.'],
+  ['Golden Cross',         'EMA 50 crossing above EMA 200 — a long-term bullish signal widely watched by institutional traders.'],
+  ['Long',                 'Buying a security expecting its price to rise. Profit = price at exit − price at entry.'],
+  ['Macro regime',         '"Tailwind" conditions: low rates, low inflation, normal (upward-sloping) yield curve. "Headwind" conditions: inverted yield curve, high inflation, restrictive Fed. Rule 6 adjusts opportunity confidence scores accordingly.'],
+  ['OHLCV',                'Open, High, Low, Close, Volume — the five values in a price candle. Every bar on a chart encodes these.'],
+  ['R-multiple',           '(Target − Entry) ÷ (Entry − Stop). A 2R trade means your potential profit is twice your risk. Aim for ≥ 2R.'],
+  ['Resistance',           'A price level where selling pressure has historically been strong — like a ceiling the price struggles to break through.'],
+  ['Short',                "Selling a security you don't own (borrowing it) expecting its price to fall. Profit = price at entry − price at exit."],
+  ['Stop',                 'The price at which to exit if the trade goes wrong. Caps your loss. Set it at a technically significant level (e.g. below support).'],
+  ['Support',              'A price level where buying interest has historically been strong — like a floor the price bounces off.'],
+  ['Target',               'The price goal if the trade goes your way. Sets your reward level for the R-multiple calculation.'],
+  ['Timeframe',            '1H = each candle covers 1 hour. 4H = 4 hours. 1D = one full trading day. Longer timeframes filter more noise.'],
+  ['Trailing P/E (TTM)',   'Price divided by actual earnings over the trailing twelve months. A classic valuation measure. Context varies heavily by sector. Negative P/E (loss-making companies) cannot be interpreted as "cheap".'],
+  ['Trend',                'Sustained directional movement. Uptrend: higher highs and higher lows. Downtrend: lower highs and lower lows. Sideways: neither.'],
+  ['Volume spike',         'Unusually high volume (> 1.5× average). Often triggered by news, earnings surprises, or institutional order flow.'],
+  ['Yield curve inversion','When the 2-year US Treasury yield exceeds the 10-year yield, the curve is "inverted". Has preceded every US recession since the 1960s. Shown with ⚠ in the Macro card; applies −8 confidence to long signals (Rule 6).'],
+]
+
+function GlossarySection() {
+  const [query, setQuery] = useState('')
+  const q = query.toLowerCase()
+  const filtered = q
+    ? GLOSSARY_TERMS.filter(([term, def]) =>
+        term.toLowerCase().includes(q) || def.toLowerCase().includes(q))
+    : GLOSSARY_TERMS
+
   return (
-    <details className="edu-section" open={defaultOpen}>
+    <EduSection id="edu-glossary" title="Trading glossary" badge="Glossary">
+      <div className="gls-search-wrap">
+        <input
+          className="gls-search"
+          type="search"
+          placeholder="Search terms…"
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+        />
+        {q && (
+          <span className="gls-count">{filtered.length} of {GLOSSARY_TERMS.length}</span>
+        )}
+      </div>
+      {filtered.length === 0
+        ? <p className="section-desc" style={{ color: 'var(--dim)' }}>No terms match "{query}".</p>
+        : (
+          <table className="edu-glossary-table">
+            <tbody>
+              {filtered.map(([term, def]) => (
+                <tr key={term}>
+                  <td className="gls-term">{term}</td>
+                  <td className="gls-def">{def}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )
+      }
+    </EduSection>
+  )
+}
+
+function EduSection({ id, title, badge, children, defaultOpen = false }) {
+  return (
+    <details id={id} className="edu-section" open={defaultOpen}>
       <summary className="edu-summary">
         {badge && <span className="section-badge">{badge}</span>}
         <span className="edu-summary-title">{title}</span>
@@ -1154,20 +1640,48 @@ function EduSection({ title, badge, children, defaultOpen = false }) {
   )
 }
 
+const EDU_SECTIONS = [
+  { id: 'edu-pipeline',      label: 'Pipeline' },
+  { id: 'edu-indicators',    label: 'Indicators' },
+  { id: 'edu-fundamentals',  label: 'Fundamentals' },
+  { id: 'edu-rules',         label: 'Rules' },
+  { id: 'edu-glossary',      label: 'Glossary' },
+  { id: 'edu-further',       label: 'Further reading' },
+]
+
 function EducationPage() {
+  const scrollTo = (id) => {
+    const el = document.getElementById(id)
+    if (!el) return
+    el.open = true                                          // expand the <details>
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
   return (
-    <div className="education-page">
-      <div className="edu-header">
-        <h1 className="edu-title">📚 How it works</h1>
-        <p className="edu-subtitle">
-          A plain-English guide to the system: what data it fetches, what each indicator
-          measures, how it detects opportunities, and what the trading terms mean.
-        </p>
-        <p className="edu-expand-hint">Click any section header to expand or collapse it.</p>
-      </div>
+    <div className="education-layout">
+      {/* ── Sticky TOC sidebar ─────────────────────────────────────────────── */}
+      <nav className="edu-toc">
+        <div className="edu-toc-title">Contents</div>
+        {EDU_SECTIONS.map(s => (
+          <button key={s.id} className="edu-toc-link" onClick={() => scrollTo(s.id)}>
+            {s.label}
+          </button>
+        ))}
+      </nav>
+
+      {/* ── Main content ───────────────────────────────────────────────────── */}
+      <div className="education-page">
+        <div className="edu-header">
+          <h1 className="edu-title">📚 How it works</h1>
+          <p className="edu-subtitle">
+            A plain-English guide to the system: what data it fetches, what each indicator
+            measures, how it detects opportunities, and what the trading terms mean.
+          </p>
+          <p className="edu-expand-hint">Click any section header to expand or collapse it.</p>
+        </div>
 
       {/* Section 1 — Pipeline */}
-      <EduSection title="The analysis pipeline" badge="Pipeline" defaultOpen={true}>
+      <EduSection id="edu-pipeline" title="The analysis pipeline" badge="Pipeline">
         <p className="section-desc">
           Every analysis — whether triggered by the scheduler or an ad-hoc run — flows
           through the same six steps:
@@ -1175,7 +1689,8 @@ function EducationPage() {
         <ol className="edu-steps">
           <li>
             <strong>yfinance</strong> — fetches live price, volume, day change, fundamentals
-            (name, sector, P/E, market cap) and 20-day averages. Free, no API key.
+            (name, sector, industry, market cap, P/E trailing + forward) and 20-day averages.
+            Free, no API key. The annual balance sheet is also fetched here (daily cache).
           </li>
           <li>
             <strong>yfinance + ta library</strong> — OHLCV history is downloaded for three
@@ -1184,10 +1699,20 @@ function EducationPage() {
             <code>ta</code> library. No account or API key needed; fully offline.
           </li>
           <li>
-            <strong>Local Ollama AI</strong> — all indicator data is assembled into a
-            structured prompt and sent to the local model (default: <code>qwen2.5:14b</code>).
-            Nothing leaves your machine. The model returns a JSON object with trend, momentum,
-            signals, risk factors, support/resistance levels, and a confidence score.
+            <strong>FRED + multpl.com</strong> — US macro context is fetched from the Federal
+            Reserve's key-free CSV API (Fed funds rate, CPI, unemployment, yield curve) and
+            Shiller CAPE from multpl.com. Cached globally for 6 hours across all tickers.
+          </li>
+          <li>
+            <strong>Finnhub</strong> (optional) — recent company news headlines including
+            source and date. Requires a free <code>FINNHUB_API_KEY</code>.
+          </li>
+          <li>
+            <strong>Local Ollama AI</strong> — all of the above (price, indicators, balance
+            sheet health, macro environment, P/E, recent news) is assembled into a structured
+            prompt and sent to the local model (default: <code>qwen2.5:14b</code>).
+            Nothing leaves your machine. Every LLM call is traced in Aspire with input/output
+            token counts and time-to-first-token (TTFT).
           </li>
           <li>
             <strong>Rule-based opportunity detection</strong> — four deterministic checks run
@@ -1213,7 +1738,7 @@ function EducationPage() {
       </EduSection>
 
       {/* Section 2 — Indicators */}
-      <EduSection title="Technical indicators explained" badge="Indicators">
+      <EduSection id="edu-indicators" title="Technical indicators explained" badge="Indicators">
         <p className="section-desc">
           Technical indicators are mathematical formulas applied to price and volume history.
           They compress raw data into numbers that are easier to compare and pattern-match.
@@ -1331,8 +1856,159 @@ function EducationPage() {
         </div>
       </EduSection>
 
-      {/* Section 3 — Opportunity detection rules */}
-      <EduSection title="How opportunities are detected" badge="Rules">
+      {/* Section 3 — Fundamentals, balance sheet & macro */}
+      <EduSection id="edu-fundamentals" title="Fundamentals, balance sheet & macro context" badge="Fundamentals">
+        <p className="section-desc">
+          In addition to technical indicators, the AI prompt includes company fundamentals,
+          balance-sheet health, and US macroeconomic context. These give the model a broader
+          view of <em>why</em> a price is moving — not just <em>how</em>.
+        </p>
+
+        <div className="edu-indicator-grid">
+          <div className="edu-indicator-card">
+            <div className="edu-ind-name">P/E Ratio — Trailing (TTM)</div>
+            <div className="edu-ind-scale">Price ÷ Earnings per share (last 12 months)</div>
+            <p>
+              Measures how much investors pay for each dollar of current earnings. A higher
+              P/E means the market expects strong future growth; a lower P/E may mean
+              undervaluation or earnings concern.
+            </p>
+            <ul className="edu-ind-levels">
+              <li><span className="lvl-green">&lt; 15</span> — Cheap by historical standards.</li>
+              <li><span className="lvl-dim">15–25</span> — Fair value range for most sectors.</li>
+              <li><span className="lvl-red">&gt; 35</span> — Elevated; growth expectations are high.</li>
+            </ul>
+            <p className="edu-ind-check">
+              <strong>Source:</strong> yfinance <code>.info["trailingPE"]</code>. Shown in the Explorer Fundamentals card and included in the AI prompt VALUATION block.
+            </p>
+          </div>
+
+          <div className="edu-indicator-card">
+            <div className="edu-ind-name">P/E Ratio — Forward</div>
+            <div className="edu-ind-scale">Price ÷ Consensus EPS estimate (next 12 months)</div>
+            <p>
+              Uses analyst earnings forecasts rather than reported results. Forward P/E
+              is often lower than trailing if growth is expected, and is more forward-looking
+              than the TTM ratio.
+            </p>
+            <ul className="edu-ind-levels">
+              <li><span className="lvl-dim">Forward &lt; Trailing</span> — Earnings growth expected.</li>
+              <li><span className="lvl-red">Forward &gt; Trailing</span> — Earnings are expected to shrink.</li>
+            </ul>
+            <p className="edu-ind-check">
+              <strong>Source:</strong> yfinance <code>.info["forwardPE"]</code>. May be absent for companies without analyst coverage.
+            </p>
+          </div>
+
+          <div className="edu-indicator-card">
+            <div className="edu-ind-name">Shiller CAPE (P/E 10)</div>
+            <div className="edu-ind-scale">Price ÷ 10-year average inflation-adjusted earnings</div>
+            <p>
+              Developed by Nobel laureate Robert Shiller. Smooths out business-cycle
+              fluctuations by averaging 10 years of real earnings. Used to gauge overall
+              market valuation, not individual stocks.
+            </p>
+            <ul className="edu-ind-levels">
+              <li><span className="lvl-green">&lt; 20</span> — Historically cheap market.</li>
+              <li><span className="lvl-dim">20–30</span> — Fair-value range (long-run average ≈ 17).</li>
+              <li><span className="lvl-red">&gt; 30</span> — Elevated; corrections are historically more likely.</li>
+            </ul>
+            <p className="edu-ind-check">
+              <strong>Source:</strong> multpl.com (monthly scrape, 24h cache). Applies to the S&P 500 market as a whole and gives the AI macro valuation context.
+            </p>
+          </div>
+
+          <div className="edu-indicator-card">
+            <div className="edu-ind-name">Debt-to-Equity (D/E)</div>
+            <div className="edu-ind-scale">Total debt ÷ Stockholders' equity</div>
+            <p>
+              Measures financial leverage. A higher ratio means the company finances more
+              of its assets with debt — which amplifies both profits and losses.
+            </p>
+            <ul className="edu-ind-levels">
+              <li><span className="lvl-green">&lt; 1.0</span> — Conservative; more equity than debt.</li>
+              <li><span className="lvl-dim">1.0–2.0</span> — Moderate leverage; common in many sectors.</li>
+              <li><span className="lvl-red">&gt; 3.0</span> — Highly leveraged; sensitive to rate rises.</li>
+            </ul>
+            <p className="edu-ind-check">
+              <strong>Source:</strong> yfinance annual balance sheet (daily cache). Shown in the Explorer Balance Sheet card.
+            </p>
+          </div>
+
+          <div className="edu-indicator-card">
+            <div className="edu-ind-name">Fed Funds Rate</div>
+            <div className="edu-ind-scale">US Federal Reserve overnight lending rate (%)</div>
+            <p>
+              The rate banks charge each other for overnight loans — the benchmark for
+              all other interest rates in the economy. Higher rates increase borrowing
+              costs, compress equity valuations, and slow growth.
+            </p>
+            <ul className="edu-ind-levels">
+              <li><span className="lvl-green">Low (&lt; 2%)</span> — Accommodative; cheap money, supports equity multiples.</li>
+              <li><span className="lvl-red">High (&gt; 4%)</span> — Restrictive; hurts growth stocks and highly indebted companies.</li>
+            </ul>
+            <p className="edu-ind-check">
+              <strong>Source:</strong> FRED series <code>FEDFUNDS</code> (key-free CSV, 6h cache).
+            </p>
+          </div>
+
+          <div className="edu-indicator-card">
+            <div className="edu-ind-name">CPI YoY (Inflation)</div>
+            <div className="edu-ind-scale">Year-over-year % change in the Consumer Price Index</div>
+            <p>
+              The percentage change in the prices of a basket of consumer goods over the
+              past year. High inflation erodes purchasing power and prompts central banks
+              to raise rates, which can pressure equity markets.
+            </p>
+            <ul className="edu-ind-levels">
+              <li><span className="lvl-green">&lt; 2%</span> — Fed target; stable environment.</li>
+              <li><span className="lvl-dim">2–4%</span> — Mildly elevated; watch for rate moves.</li>
+              <li><span className="lvl-red">&gt; 5%</span> — High inflation; central bank likely tightening.</li>
+            </ul>
+            <p className="edu-ind-check">
+              <strong>Source:</strong> FRED series <code>CPIAUCSL</code> — YoY% computed from the last 13 monthly observations.
+            </p>
+          </div>
+
+          <div className="edu-indicator-card">
+            <div className="edu-ind-name">10y-2y Yield Spread</div>
+            <div className="edu-ind-scale">10-year Treasury yield minus 2-year Treasury yield</div>
+            <p>
+              Normally the 10-year rate is higher than the 2-year (the yield curve is
+              "normal"). When the 2-year exceeds the 10-year, the curve <strong>inverts</strong>.
+              Yield curve inversions have preceded every US recession since the 1960s.
+            </p>
+            <ul className="edu-ind-levels">
+              <li><span className="lvl-green">Positive</span> — Normal curve; healthy growth expectations.</li>
+              <li><span className="lvl-red">Negative (inverted)</span> — Recession signal. Shown with ⚠ in the Macro card.</li>
+            </ul>
+            <p className="edu-ind-check">
+              <strong>Source:</strong> FRED series <code>T10Y2Y</code> (daily data, 6h cache).
+            </p>
+          </div>
+
+          <div className="edu-indicator-card">
+            <div className="edu-ind-name">Unemployment Rate</div>
+            <div className="edu-ind-scale">% of the labour force actively seeking work</div>
+            <p>
+              A lagging indicator of economic health. Low unemployment typically signals
+              a strong economy (bullish for equities). Very low unemployment can also
+              feed wage inflation, prompting the Fed to keep rates elevated.
+            </p>
+            <ul className="edu-ind-levels">
+              <li><span className="lvl-green">&lt; 4%</span> — Strong labour market.</li>
+              <li><span className="lvl-dim">4–6%</span> — Near long-run average.</li>
+              <li><span className="lvl-red">&gt; 6%</span> — Weakening; watch for policy response.</li>
+            </ul>
+            <p className="edu-ind-check">
+              <strong>Source:</strong> FRED series <code>UNRATE</code> (monthly data, 6h cache).
+            </p>
+          </div>
+        </div>
+      </EduSection>
+
+      {/* Section 5 — Opportunity detection rules */}
+      <EduSection id="edu-rules" title="How opportunities are detected" badge="Rules">
         <p className="section-desc">
           After the AI analysis runs, four independent rule-based checks are applied to the
           same market data. Any check that fires creates a candidate signal. Candidates for the
@@ -1340,99 +2016,72 @@ function EducationPage() {
         </p>
 
         <div className="edu-rules">
-          <div className="edu-rule">
-            <div className="edu-rule-num">1</div>
-            <div className="edu-rule-body">
-              <div className="edu-rule-title">AI signal</div>
-              <p>
-                The local model returns a <code>long</code> or <code>short</code> direction with
-                a confidence value. If confidence ≥ the floor (default: 65), a candidate is
-                raised with the AI's entry, stop and target suggestions.
-              </p>
+          {[
+            {
+              num: 1, icon: '🤖', title: 'AI signal',
+              side: 'both', conf: '65–95',
+              trigger: 'LLM returns long/short with confidence ≥ floor',
+              body: <>The local model returns a <code>long</code> or <code>short</code> direction with a confidence value. If confidence ≥ the floor (default: 65), a candidate is raised with the AI's entry, stop and target suggestions.</>,
+            },
+            {
+              num: 2, icon: '📊', title: 'RSI extreme (multi-timeframe)',
+              side: 'both', conf: '55–85',
+              trigger: 'RSI <30 or >70 on 2+ of 1H / 4H / 1D',
+              body: <>RSI oversold (&lt;30 = potential long) or overbought (&gt;70 = potential short) on <strong>2 or more</strong> of the 1H / 4H / 1D timeframes simultaneously. Single-timeframe extremes are ignored — too common to be meaningful on their own.</>,
+            },
+            {
+              num: 3, icon: '📈', title: 'MACD crossover (cross-timeframe)',
+              side: 'both', conf: '62',
+              trigger: 'MACD above/below signal on both 1D and 4H',
+              body: <>MACD above its signal line on <strong>both</strong> 1D and 4H = bullish candidate. MACD below on both = bearish. Requiring both timeframes filters out noisy intra-day whipsaws.</>,
+            },
+            {
+              num: 4, icon: '🔊', title: 'Volume spike + significant move',
+              side: 'both', conf: '55–80',
+              trigger: 'Volume ≥ 2× avg AND price move ≥ 2%',
+              body: <>Volume ≥ <code>VOLUME_SPIKE_MULTIPLIER</code>× 20-day average <em>and</em> the day's price move ≥ <code>SIGNIFICANT_MOVE_PCT</code>% (both set in <code>.env</code>). A large move on high volume is more likely to be sustained than one on thin volume.</>,
+            },
+            {
+              num: 5, icon: '💰', title: 'Valuation extreme (P/E)',
+              side: 'both', conf: '40–42',
+              trigger: 'TTM P/E > 60 (short) or 0 < P/E < 8 (long)',
+              body: <><strong>P/E &gt; 60×</strong> → low-confidence short ("severely overvalued"). <strong>P/E &lt; 8×</strong> (positive) → low-confidence long ("deeply discounted"). Confidence intentionally low — reinforces but never drives a signal. Negative P/E (loss-making) is skipped.</>,
+            },
+            {
+              num: 6, icon: '🌍', title: 'Macro regime filter',
+              side: 'adjust', conf: '±3 to ±8',
+              trigger: 'Post-merge confidence adjuster — yield curve, CAPE, CPI',
+              body: <><strong>Yield curve inverted</strong>: long −8, short +3. <strong>CAPE &gt; 35</strong>: long −5, short +3. <strong>CAPE &lt; 15</strong>: long +5, short −3. <strong>CPI &gt; 5%</strong>: long −5. Clamped to 0–100; confidence floor applies afterwards.</>,
+            },
+          ].map(({ num, icon, title, side, conf, trigger, body }) => (
+            <div key={num} className="edu-rule edu-rule-v2">
+              <div className="edu-rule-header">
+                <span className="edu-rule-num">{num}</span>
+                <span className="edu-rule-icon">{icon}</span>
+                <span className="edu-rule-title">{title}</span>
+                <span className={`edu-rule-side edu-rule-side-${side}`}>
+                  {side === 'both' ? 'long & short' : side === 'adjust' ? 'adjuster' : side}
+                </span>
+                <span className="edu-rule-conf">conf {conf}</span>
+              </div>
+              <div className="edu-rule-trigger">⚡ Fires when: {trigger}</div>
+              <div className="edu-rule-body">{body}</div>
             </div>
-          </div>
-          <div className="edu-rule">
-            <div className="edu-rule-num">2</div>
-            <div className="edu-rule-body">
-              <div className="edu-rule-title">RSI extreme (multi-timeframe)</div>
-              <p>
-                RSI oversold (&lt;30 = potential long) or overbought (&gt;70 = potential short)
-                on <strong>2 or more</strong> of the 1H / 4H / 1D timeframes simultaneously.
-                Single-timeframe RSI extremes are ignored — they are too common to be
-                meaningful on their own.
-              </p>
-            </div>
-          </div>
-          <div className="edu-rule">
-            <div className="edu-rule-num">3</div>
-            <div className="edu-rule-body">
-              <div className="edu-rule-title">MACD crossover (cross-timeframe)</div>
-              <p>
-                MACD above its signal line on <strong>both</strong> 1D and 4H = bullish
-                crossover candidate. MACD below on both = bearish. Requiring both timeframes
-                filters out noisy intra-day whipsaws.
-              </p>
-            </div>
-          </div>
-          <div className="edu-rule">
-            <div className="edu-rule-num">4</div>
-            <div className="edu-rule-body">
-              <div className="edu-rule-title">Volume spike + significant move</div>
-              <p>
-                Volume ≥ <code>VOLUME_SPIKE_MULTIPLIER</code>× 20-day average <em>and</em> the
-                day's price move ≥ <code>SIGNIFICANT_MOVE_PCT</code>% (both set in{' '}
-                <code>.env</code>). A large move on high volume is more likely to be
-                sustained than one on thin volume.
-              </p>
-            </div>
-          </div>
+          ))}
         </div>
 
-        <p className="section-desc" style={{ marginTop: 12 }}>
-          When multiple rules fire for the same ticker, signals are merged: the type (long/short)
-          is determined by majority vote, and the confidence score is boosted by each additional
-          agreeing rule. The final score must still clear the confidence floor to be actionable.
+        <p className="section-desc" style={{ marginTop: 16 }}>
+          When multiple rules fire for the same ticker, signals are merged and confidence scores
+          are boosted by each additional agreeing rule. Rule 6 runs post-merge. The final score
+          must still clear the confidence floor to be actionable.
         </p>
       </EduSection>
 
-      {/* Section 4 — Glossary */}
-      <EduSection title="Trading glossary" badge="Glossary">
-        <p className="section-desc">
-          Quick reference for terms used throughout the app.
-        </p>
-        <table className="edu-glossary-table">
-          <tbody>
-            {[
-              ['Bearish',         'Expecting price to fall. A bearish signal suggests a potential short opportunity.'],
-              ['Bullish',         'Expecting price to rise. A bullish signal suggests a potential long opportunity.'],
-              ['Confidence',      '0–100 score combining AI confidence and rule-based evidence. Higher = stronger agreement across sources.'],
-              ['Confidence floor','Minimum confidence to be considered actionable (default: 65). Filters out weak / uncertain signals.'],
-              ['Death Cross',     'EMA 50 crossing below EMA 200 — a long-term bearish signal that often attracts institutional selling.'],
-              ['Entry',           'Suggested price at which to open the position. Typically near the current price at signal time.'],
-              ['Golden Cross',    'EMA 50 crossing above EMA 200 — a long-term bullish signal widely watched by institutional traders.'],
-              ['Long',            'Buying a security expecting its price to rise. Profit = price at exit − price at entry.'],
-              ['OHLCV',           'Open, High, Low, Close, Volume — the five values in a price candle. Every bar on a chart encodes these.'],
-              ['R-multiple',      '(Target − Entry) ÷ (Entry − Stop). A 2R trade means your potential profit is twice your risk. Aim for ≥ 2R.'],
-              ['Resistance',      'A price level where selling pressure has historically been strong — like a ceiling the price struggles to break through.'],
-              ['Short',           'Selling a security you don\'t own (borrowing it) expecting its price to fall. Profit = price at entry − price at exit.'],
-              ['Stop',            'The price at which to exit if the trade goes wrong. Caps your loss. Set it at a technically significant level (e.g. below support).'],
-              ['Support',         'A price level where buying interest has historically been strong — like a floor the price bounces off.'],
-              ['Target',          'The price goal if the trade goes your way. Sets your reward level for the R-multiple calculation.'],
-              ['Timeframe',       '1H = each candle covers 1 hour. 4H = 4 hours. 1D = one full trading day. Longer timeframes filter more noise.'],
-              ['Trend',           'Sustained directional movement. Uptrend: higher highs and higher lows. Downtrend: lower highs and lower lows. Sideways: neither.'],
-              ['Volume spike',    'Unusually high volume (> 1.5× average). Often triggered by news, earnings surprises, or institutional order flow.'],
-            ].map(([term, def]) => (
-              <tr key={term}>
-                <td className="gls-term">{term}</td>
-                <td className="gls-def">{def}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </EduSection>
+      {/* Section 6 — Glossary with live search */}
+      <GlossarySection />
 
-      {/* Section 5 — Disclaimer + further reading */}
-      <EduSection title="Disclaimer & further reading" badge="⚠️">
+      {/* Section 7 — Disclaimer + further reading */}
+      <EduSection id="edu-further" title="Disclaimer & further reading" badge="⚠️">
         <div className="edu-disclaimer">
           <strong>⚠ Not financial advice.</strong> This system is for educational and research
           purposes only. It does not constitute financial, investment, or trading advice.
@@ -1440,37 +2089,100 @@ function EducationPage() {
           not predictions and may be wrong. Markets are inherently risky. You are solely
           responsible for any decisions you make. Never trade money you cannot afford to lose.
         </div>
-        <p className="section-desc" style={{ marginTop: 12 }}>
-          Want to go deeper? These free resources explain the indicators used here:
-        </p>
-        <ul className="edu-links">
-          <li>
-            <a href="https://www.investopedia.com/terms/r/rsi.asp" target="_blank" rel="noreferrer">
-              Investopedia — RSI (Relative Strength Index)
-            </a>
-          </li>
-          <li>
-            <a href="https://www.investopedia.com/terms/m/macd.asp" target="_blank" rel="noreferrer">
-              Investopedia — MACD
-            </a>
-          </li>
-          <li>
-            <a href="https://www.investopedia.com/terms/e/ema.asp" target="_blank" rel="noreferrer">
-              Investopedia — Exponential Moving Average (EMA)
-            </a>
-          </li>
-          <li>
-            <a href="https://www.investopedia.com/terms/b/bollingerbands.asp" target="_blank" rel="noreferrer">
-              Investopedia — Bollinger Bands
-            </a>
-          </li>
-          <li>
-            <a href="https://www.investopedia.com/terms/s/stochasticoscillator.asp" target="_blank" rel="noreferrer">
-              Investopedia — Stochastic Oscillator
-            </a>
-          </li>
-        </ul>
+
+        <div className="edu-reading-grid">
+          {/* Project wiki */}
+          <div className="edu-reading-group">
+            <div className="edu-reading-group-title">📖 Project wiki</div>
+            <ul className="edu-links">
+              <li>
+                <a href="https://github.com/AlexandrosPlessias/offgrid-trader"
+                   target="_blank" rel="noreferrer">
+                  GitHub repository — source code & releases
+                </a>
+              </li>
+              <li>
+                <a href="https://github.com/AlexandrosPlessias/offgrid-trader/wiki/architecture"
+                   target="_blank" rel="noreferrer">
+                  Architecture — data pipeline, AI analysis, opportunity detection
+                </a>
+              </li>
+              <li>
+                <a href="https://github.com/AlexandrosPlessias/offgrid-trader/wiki/api"
+                   target="_blank" rel="noreferrer">
+                  API reference — all REST endpoints with request/response shapes
+                </a>
+              </li>
+              <li>
+                <a href="https://github.com/AlexandrosPlessias/offgrid-trader/wiki/observability"
+                   target="_blank" rel="noreferrer">
+                  Observability — Aspire setup, LLM spans, OTEL attribute reference
+                </a>
+              </li>
+            </ul>
+          </div>
+
+          {/* Technical indicators */}
+          <div className="edu-reading-group">
+            <div className="edu-reading-group-title">📊 Technical indicators</div>
+            <ul className="edu-links">
+              <li>
+                <a href="https://www.investopedia.com/terms/r/rsi.asp" target="_blank" rel="noreferrer">
+                  Investopedia — RSI (Relative Strength Index)
+                </a>
+              </li>
+              <li>
+                <a href="https://www.investopedia.com/terms/m/macd.asp" target="_blank" rel="noreferrer">
+                  Investopedia — MACD
+                </a>
+              </li>
+              <li>
+                <a href="https://www.investopedia.com/terms/e/ema.asp" target="_blank" rel="noreferrer">
+                  Investopedia — Exponential Moving Average (EMA)
+                </a>
+              </li>
+              <li>
+                <a href="https://www.investopedia.com/terms/b/bollingerbands.asp" target="_blank" rel="noreferrer">
+                  Investopedia — Bollinger Bands
+                </a>
+              </li>
+              <li>
+                <a href="https://www.investopedia.com/terms/s/stochasticoscillator.asp" target="_blank" rel="noreferrer">
+                  Investopedia — Stochastic Oscillator
+                </a>
+              </li>
+            </ul>
+          </div>
+
+          {/* Macro & valuation */}
+          <div className="edu-reading-group">
+            <div className="edu-reading-group-title">🌍 Macro &amp; valuation</div>
+            <ul className="edu-links">
+              <li>
+                <a href="https://www.investopedia.com/terms/s/schillerpe.asp" target="_blank" rel="noreferrer">
+                  Investopedia — Shiller P/E (CAPE)
+                </a>
+              </li>
+              <li>
+                <a href="https://www.investopedia.com/terms/y/yieldcurve.asp" target="_blank" rel="noreferrer">
+                  Investopedia — Yield curve inversion
+                </a>
+              </li>
+              <li>
+                <a href="https://fred.stlouisfed.org" target="_blank" rel="noreferrer">
+                  FRED — Federal Reserve Economic Data
+                </a>
+              </li>
+              <li>
+                <a href="https://www.multpl.com/shiller-pe" target="_blank" rel="noreferrer">
+                  multpl.com — Shiller CAPE historical chart
+                </a>
+              </li>
+            </ul>
+          </div>
+        </div>
       </EduSection>
+      </div>
     </div>
   )
 }
@@ -1584,151 +2296,248 @@ function AnalysisHistoryPanel({ onOpenInExplorer }) {
 
 // ─── Settings page ────────────────────────────────────────────────────────────
 
-function SettingsPage() {
-  const [models,   setModels]   = useState([])
-  const [model,    setModel]    = useState('')
-  const [timeout,  setTimeout_] = useState('')
-  const [status,   setStatus]   = useState(null)   // null | 'saving' | 'ok' | 'error'
-  const [errMsg,   setErrMsg]   = useState('')
+function SettingSection({ title, icon, children }) {
+  return (
+    <div className="settings-section">
+      <div className="settings-section-title">{icon} {title}</div>
+      {children}
+    </div>
+  )
+}
 
-  // Load current settings + available models on mount
+function SaveRow({ status, errMsg, onSave, label = 'Save' }) {
+  return (
+    <div className="settings-save-row">
+      <button className="btn-primary btn-sm" onClick={onSave} disabled={status === 'saving'}>
+        {status === 'saving' ? 'Saving…' : label}
+      </button>
+      {status === 'ok'    && <span className="settings-ok">✓ Saved</span>}
+      {status === 'error' && <span className="settings-err">✗ {errMsg || 'Failed'}</span>}
+    </div>
+  )
+}
+
+function SettingsPage() {
+  // ── Ollama model + timeout ──────────────────────────────────────────────────
+  const [models,  setModels]  = useState([])
+  const [model,   setModel]   = useState('')
+  const [timeout, setTimeout_] = useState('')
+  const [ollamaStatus, setOllamaStatus] = useState(null)
+  const [ollamaErr,    setOllamaErr]    = useState('')
+
+  // ── Scheduler + scan interval ───────────────────────────────────────────────
+  const [schedulerRunning,  setSchedulerRunning]  = useState(true)
+  const [scanInterval,      setScanInterval]      = useState('15')
+  const [schedStatus,       setSchedStatus]       = useState(null)
+  const [schedErr,          setSchedErr]          = useState('')
+
+  // ── Alerts ──────────────────────────────────────────────────────────────────
+  const [alertsOn,     setAlertsOn]     = useState(true)
+  const [alertsStatus, setAlertsStatus] = useState(null)
+
+  // ── Data reset ──────────────────────────────────────────────────────────────
+  const [resetStatus, setResetStatus] = useState(null)
+
+  // Load on mount
   useEffect(() => {
     Promise.all([
       fetch(`${API}/settings`).then(r => r.json()),
       fetch(`${API}/settings/models`).then(r => r.json()),
     ]).then(([cfg, m]) => {
-      setModel(cfg.ollama_model   ?? '')
+      setModel(cfg.ollama_model ?? '')
       setTimeout_(String(cfg.ollama_timeout ?? 120))
       setModels(m.models ?? [])
+      setScanInterval(String(cfg.scan_interval_minutes ?? 15))
+      setSchedulerRunning(cfg.scheduler_running ?? true)
+      setAlertsOn(cfg.alerts_enabled ?? true)
     }).catch(() => {})
   }, [])
 
-  const save = async () => {
-    setStatus('saving')
-    setErrMsg('')
+  const saveOllama = async () => {
+    setOllamaStatus('saving'); setOllamaErr('')
     try {
       const body = {}
       if (model)   body.model   = model
       if (timeout) body.timeout = parseInt(timeout, 10)
       const r = await fetch(`${API}/settings/ollama`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
       if (!r.ok) throw new Error(await r.text())
-      setStatus('ok')
-      setTimeout(() => setStatus(null), 3000)
-    } catch (e) {
-      setStatus('error')
-      setErrMsg(e.message)
-    }
+      setOllamaStatus('ok')
+      setTimeout(() => setOllamaStatus(null), 3000)
+    } catch (e) { setOllamaStatus('error'); setOllamaErr(e.message) }
+  }
+
+  const saveScheduler = async () => {
+    setSchedStatus('saving'); setSchedErr('')
+    try {
+      await fetch(`${API}/settings/scan-interval`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ minutes: parseInt(scanInterval, 10) }),
+      })
+      setSchedStatus('ok')
+      setTimeout(() => setSchedStatus(null), 3000)
+    } catch (e) { setSchedStatus('error'); setSchedErr(e.message) }
+  }
+
+  const toggleScheduler = async () => {
+    const next = !schedulerRunning
+    setSchedulerRunning(next)          // optimistic update
+    try {
+      const r = await fetch(`${API}/settings/scheduler`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ running: next }),
+      })
+      if (r.ok) {
+        const data = await r.json()
+        setSchedulerRunning(data.running ?? next)   // reconcile with server
+      } else {
+        setSchedulerRunning(!next)                  // revert on error
+      }
+    } catch (e) { setSchedulerRunning(!next) }      // revert on network error
+  }
+
+  const toggleAlerts = async () => {
+    const next = !alertsOn
+    try {
+      await fetch(`${API}/settings/alerts`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      })
+      setAlertsOn(next)
+      setAlertsStatus('ok')
+      setTimeout(() => setAlertsStatus(null), 2000)
+    } catch (e) { /* best-effort */ }
+  }
+
+  const resetData = async () => {
+    if (!window.confirm('Clear ALL signals and analysis history? App settings (watchlist, model, interval) will be preserved. This cannot be undone.')) return
+    setResetStatus('clearing')
+    try {
+      const r = await fetch(`${API}/data/reset`, { method: 'POST' })
+      if (!r.ok) throw new Error(await r.text())
+      setResetStatus('ok')
+      setTimeout(() => setResetStatus(null), 4000)
+    } catch (e) { setResetStatus('error') }
   }
 
   return (
-    <div className="card" style={{ maxWidth: 560 }}>
-      <div className="card-header">
-        <span className="card-title">⚙️ Settings</span>
-      </div>
-      <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+    <div className="settings-page">
 
-        {/* Model selector */}
-        <div>
-          <label style={{ display: 'block', marginBottom: 6, fontWeight: 600 }}>
-            Ollama model
-          </label>
-          <p className="text-dim" style={{ marginBottom: 8, fontSize: 13 }}>
-            Only models already pulled in Ollama are listed. Match the model
-            size to your GPU VRAM: 3b ≈ 3 GB, 7b ≈ 5 GB, 14b ≈ 10 GB.
-          </p>
+      {/* ── Scheduler ─────────────────────────────────────────────────────── */}
+      <SettingSection title="Scheduler" icon="🕐">
+        <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
+          The scheduler automatically scans every ticker in your watchlist while
+          the US market is open. You can pause it without stopping the container.
+        </p>
+
+        <div className="settings-row">
+          <div className="settings-row-label">
+            <span>Auto-scan</span>
+            <span className="text-dim" style={{ fontSize: 12 }}>
+              {schedulerRunning ? 'Running — scanning on schedule' : 'Stopped — manual runs only'}
+            </span>
+          </div>
+          <button
+            className={`settings-toggle ${schedulerRunning ? 'on' : 'off'}`}
+            onClick={toggleScheduler}
+            title={schedulerRunning ? 'Stop scheduler' : 'Start scheduler'}
+          >
+            <span className="settings-toggle-knob" />
+          </button>
+        </div>
+
+        <div className="settings-row" style={{ marginTop: 12 }}>
+          <div className="settings-row-label">
+            <span>Scan interval</span>
+            <span className="text-dim" style={{ fontSize: 12 }}>Minutes between automatic scans</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input
+              type="number" min={1} max={1440}
+              value={scanInterval}
+              onChange={e => setScanInterval(e.target.value)}
+              className="settings-num-input"
+            />
+            <span className="text-dim" style={{ fontSize: 13 }}>min</span>
+          </div>
+        </div>
+        <SaveRow status={schedStatus} errMsg={schedErr} onSave={saveScheduler} label="Apply interval" />
+      </SettingSection>
+
+      {/* ── Alerts ────────────────────────────────────────────────────────── */}
+      <SettingSection title="Alerts" icon="🔔">
+        <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
+          Enable or disable outbound alert dispatch (email, Slack, Telegram).
+          Toggling here is instant — no restart required.
+        </p>
+        <div className="settings-row">
+          <div className="settings-row-label">
+            <span>Alert dispatch</span>
+            <span className="text-dim" style={{ fontSize: 12 }}>
+              {alertsOn ? 'Alerts will be sent on actionable signals' : 'All alert channels suppressed'}
+            </span>
+          </div>
+          <button
+            className={`settings-toggle ${alertsOn ? 'on' : 'off'}`}
+            onClick={toggleAlerts}
+          >
+            <span className="settings-toggle-knob" />
+          </button>
+        </div>
+        {alertsStatus === 'ok' && (
+          <div className="settings-ok" style={{ marginTop: 8 }}>✓ Updated</div>
+        )}
+      </SettingSection>
+
+      {/* ── Ollama ────────────────────────────────────────────────────────── */}
+      <SettingSection title="Ollama (Local LLM)" icon="🤖">
+        <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
+          Only models already pulled in Ollama are listed. Match model size to
+          GPU VRAM: 3b ≈ 3 GB · 7b ≈ 5 GB · 14b ≈ 10 GB.
+          To pull a new model: <code className="inline-code">docker exec ollama ollama pull &lt;model&gt;</code>
+        </p>
+
+        <div className="settings-field">
+          <label className="settings-label">Model</label>
           {models.length > 0 ? (
-            <select
-              value={model}
-              onChange={e => setModel(e.target.value)}
-              style={{
-                width: '100%', padding: '8px 10px', borderRadius: 6,
-                border: '1px solid var(--border)', background: 'var(--bg-card)',
-                color: 'var(--text)', fontSize: 14,
-              }}
-            >
-              {models.map(m => (
-                <option key={m} value={m}>{m}</option>
-              ))}
+            <select value={model} onChange={e => setModel(e.target.value)} className="settings-select">
+              {models.map(m => <option key={m} value={m}>{m}</option>)}
             </select>
           ) : (
-            <input
-              type="text"
-              value={model}
-              onChange={e => setModel(e.target.value)}
-              placeholder="e.g. qwen2.5:7b"
-              style={{
-                width: '100%', padding: '8px 10px', borderRadius: 6,
-                border: '1px solid var(--border)', background: 'var(--bg-card)',
-                color: 'var(--text)', fontSize: 14, boxSizing: 'border-box',
-              }}
-            />
+            <input type="text" value={model} onChange={e => setModel(e.target.value)}
+              placeholder="e.g. qwen2.5:7b" className="settings-select" />
           )}
         </div>
 
-        {/* Timeout */}
-        <div>
-          <label style={{ display: 'block', marginBottom: 6, fontWeight: 600 }}>
-            Request timeout (seconds)
-          </label>
-          <p className="text-dim" style={{ marginBottom: 8, fontSize: 13 }}>
-            How long to wait for Ollama before failing. Increase if the model
-            is large or running partly on CPU (min 10, max 3600).
-          </p>
-          <input
-            type="number"
-            min={10}
-            max={3600}
-            value={timeout}
-            onChange={e => setTimeout_(e.target.value)}
-            style={{
-              width: 120, padding: '8px 10px', borderRadius: 6,
-              border: '1px solid var(--border)', background: 'var(--bg-card)',
-              color: 'var(--text)', fontSize: 14,
-            }}
-          />
-          <span className="text-dim" style={{ marginLeft: 10, fontSize: 13 }}>seconds</span>
+        <div className="settings-field">
+          <label className="settings-label">Request timeout</label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input type="number" min={10} max={3600} value={timeout}
+              onChange={e => setTimeout_(e.target.value)} className="settings-num-input" />
+            <span className="text-dim" style={{ fontSize: 13 }}>seconds</span>
+          </div>
         </div>
 
-        {/* Save */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <button
-            className="btn-primary"
-            onClick={save}
-            disabled={status === 'saving'}
-          >
-            {status === 'saving' ? 'Saving…' : 'Save settings'}
+        <SaveRow status={ollamaStatus} errMsg={ollamaErr} onSave={saveOllama} label="Save model settings" />
+      </SettingSection>
+
+      {/* ── Data ──────────────────────────────────────────────────────────── */}
+      <SettingSection title="Data" icon="🗑️">
+        <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
+          Clear all stored signals and analysis history. App settings (watchlist,
+          interval, model, alerts) are preserved. This cannot be undone.
+        </p>
+        <div className="settings-save-row">
+          <button className="btn-danger btn-sm" onClick={resetData} disabled={resetStatus === 'clearing'}>
+            {resetStatus === 'clearing' ? 'Clearing…' : 'Clear all data'}
           </button>
-          {status === 'ok' && (
-            <span style={{ color: 'var(--green)', fontSize: 14 }}>
-              ✓ Saved — takes effect on the next analysis
-            </span>
-          )}
-          {status === 'error' && (
-            <span style={{ color: 'var(--red)', fontSize: 14 }}>
-              ✗ {errMsg || 'Save failed'}
-            </span>
-          )}
+          {resetStatus === 'ok'    && <span className="settings-ok">✓ All signals and analyses cleared</span>}
+          {resetStatus === 'error' && <span className="settings-err">✗ Reset failed — see backend logs</span>}
         </div>
+      </SettingSection>
 
-        {/* Info box */}
-        <div style={{
-          background: 'var(--bg-hover)', borderRadius: 6,
-          padding: '10px 14px', fontSize: 13, color: 'var(--text-dim)',
-          borderLeft: '3px solid var(--accent)',
-        }}>
-          Changes take effect on the <strong>next</strong> /analyze call — no
-          container restart needed. The new model must already be pulled in
-          Ollama; to pull a new model run{' '}
-          <code style={{ background: 'var(--bg)', padding: '1px 5px', borderRadius: 3 }}>
-            docker exec ollama ollama pull &lt;model&gt;
-          </code>{' '}
-          then reload this page.
-        </div>
-      </div>
     </div>
   )
 }

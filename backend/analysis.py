@@ -21,9 +21,12 @@ import time
 from typing import Any, Dict, List, Optional
 
 import requests
+from opentelemetry import trace as _otel_trace
 
 from .config import get_settings
 from .database import get_setting as _get_db_setting
+
+_tracer = _otel_trace.get_tracer("marketsage.analysis")
 
 _log = logging.getLogger(__name__)
 
@@ -82,7 +85,12 @@ def build_prompt(market_data: Dict[str, Any]) -> str:
     price = market_data.get("price", {}) or {}
     fundamentals = market_data.get("fundamentals", {}) or {}
     technicals = market_data.get("technicals", {}) or {}
-    news: List[str] = market_data.get("news") or []
+    news: List[Dict[str, Any]] = market_data.get("news") or []
+
+    def _v(d: Dict[str, Any], key: str) -> Any:
+        """Extract .value from a nested {value, date} dict."""
+        sub = (d or {}).get(key) or {}
+        return sub.get("value") if isinstance(sub, dict) else None
 
     lines: List[str] = []
     lines.append(f"Ticker: {market_data.get('ticker')}")
@@ -137,11 +145,61 @@ def build_prompt(market_data: Dict[str, Any]) -> str:
         lines.append("")
         lines.append("DATA WARNINGS: " + "; ".join(market_data["errors"]))
 
+    # Balance sheet block (skipped when all values are None)
+    bs = market_data.get("balance_sheet") or {}
+    bs_vals = [
+        bs.get("total_assets"), bs.get("total_liabilities"),
+        bs.get("stockholders_equity"), bs.get("cash"),
+    ]
+    if any(v is not None for v in bs_vals):
+        lines.append("")
+        lines.append(f"BALANCE SHEET (most recent: {_fmt(bs.get('period'))})")
+        lines.append(
+            f"  Assets={_fmt(bs.get('total_assets'))} | "
+            f"Liab={_fmt(bs.get('total_liabilities'))} | "
+            f"Equity={_fmt(bs.get('stockholders_equity'))} | "
+            f"Debt/Equity={_fmt(bs.get('debt_to_equity'))} | "
+            f"Cash={_fmt(bs.get('cash'))}"
+        )
+
+    # Macro context block
+    macro = market_data.get("macro") or {}
+    if macro:
+        spread = macro.get("yield_spread") or {}
+        cape  = macro.get("shiller_cape") or {}
+        inv   = " [INVERTED]" if spread.get("inverted") else ""
+        lines.append("")
+        lines.append("MACRO CONTEXT (US)")
+        lines.append(
+            f"  Fed Funds={_fmt(_v(macro, 'fed_funds_rate'))}% | "
+            f"CPI YoY={_fmt(_v(macro, 'cpi_yoy'))}% | "
+            f"Unemployment={_fmt(_v(macro, 'unemployment'))}% | "
+            f"10y-2y={_fmt(_v(macro, 'yield_spread'))}{inv} | "
+            f"Shiller CAPE={_fmt(cape.get('value'))}"
+        )
+
+    # Fundamentals P/E in prompt
+    pe_trailing = fundamentals.get("trailing_pe") or fundamentals.get("pe_ratio")
+    pe_forward  = fundamentals.get("forward_pe")
+    if pe_trailing is not None or pe_forward is not None:
+        lines.append("")
+        lines.append("VALUATION")
+        lines.append(
+            f"  P/E (TTM)={_fmt(pe_trailing)} | P/E (Fwd)={_fmt(pe_forward)}"
+        )
+
     if news:
         lines.append("")
         lines.append("RECENT NEWS HEADLINES")
-        for headline in news:
-            lines.append(f"  - {headline}")
+        for item in news:
+            # item is a dict with headline/source/url/datetime
+            if isinstance(item, dict):
+                headline = item.get("headline", "")
+                src = f" ({item['source']})" if item.get("source") else ""
+                lines.append(f"  - {headline}{src}")
+            else:
+                # Backward compat: plain string
+                lines.append(f"  - {item}")
 
     lines.append("")
     lines.append(
@@ -192,54 +250,131 @@ def call_ollama(
         user_prompt,
     )
 
-    t0 = time.monotonic()
-    try:
-        response = requests.post(
-            settings.ollama.chat_url,
-            json=payload,
-            timeout=_timeout,
+    with _tracer.start_as_current_span("llm.chat") as span:
+        span.set_attribute("gen_ai.system", "ollama")
+        span.set_attribute("gen_ai.request.model", _model)
+        span.set_attribute("llm.ticker", ticker or "")
+        span.set_attribute("gen_ai.system_prompt_chars", len(system_prompt))
+        span.set_attribute("gen_ai.user_prompt_chars",   len(user_prompt))
+        span.set_attribute("llm.prompt_chars", len(user_prompt))  # backward compat
+
+        # Message sequence — always emit role+size events so the call structure
+        # is visible in Aspire even when full text is suppressed.
+        span.add_event("gen_ai.system.message", {
+            "role": "system",
+            "chars": len(system_prompt),
+        })
+        span.add_event("gen_ai.user.message", {
+            "role": "user",
+            "chars": len(user_prompt),
+        })
+        # Full text as child spans — visible as distinct bars in Aspire waterfall.
+        # Gated behind OTEL_INCLUDE_LLM_CONTENT (default true in .env.example;
+        # set false in production to prevent prompt storage in trace backends).
+        if settings.otel.include_llm_content:
+            with _tracer.start_as_current_span("llm.system_prompt") as _s:
+                _s.set_attribute("role",    "system")
+                _s.set_attribute("content", system_prompt)
+                _s.set_attribute("chars",   len(system_prompt))
+            with _tracer.start_as_current_span("llm.user_prompt") as _u:
+                _u.set_attribute("role",    "user")
+                _u.set_attribute("content", user_prompt)
+                _u.set_attribute("chars",   len(user_prompt))
+
+        t0 = time.monotonic()
+        try:
+            response = requests.post(
+                settings.ollama.chat_url,
+                json=payload,
+                timeout=_timeout,
+            )
+        except requests.exceptions.ConnectionError as exc:
+            span.set_attribute("error", str(exc))
+            raise OllamaError(
+                f"Cannot reach Ollama at {settings.ollama.host}. "
+                "Is it running? Start it with `ollama serve` and "
+                f"`ollama pull {_model}`."
+            ) from exc
+        except requests.exceptions.Timeout as exc:
+            span.set_attribute("error", f"timeout after {_timeout}s")
+            raise OllamaError(
+                f"Ollama request timed out after {_timeout}s."
+            ) from exc
+        except requests.exceptions.RequestException as exc:  # pragma: no cover
+            span.set_attribute("error", str(exc))
+            raise OllamaError(f"Ollama request failed: {exc}") from exc
+
+        latency = time.monotonic() - t0
+
+        if response.status_code != 200:
+            span.set_attribute("error", f"HTTP {response.status_code}")
+            raise OllamaError(
+                f"Ollama returned HTTP {response.status_code}: "
+                f"{response.text[:300]}"
+            )
+
+        try:
+            body = response.json()
+        except ValueError as exc:
+            span.set_attribute("error", "invalid JSON envelope")
+            raise OllamaError(
+                "Ollama response was not valid JSON envelope."
+            ) from exc
+
+        content = (body.get("message") or {}).get("content", "")
+        if not content:
+            span.set_attribute("error", "empty content")
+            raise OllamaError("Ollama response contained no message content.")
+
+        # Token counts and timing from Ollama response body.
+        input_tokens  = body.get("prompt_eval_count") or 0
+        output_tokens = body.get("eval_count") or 0
+        ttft_s = round(
+            (
+                body.get("load_duration", 0)
+                + body.get("prompt_eval_duration", 0)
+            ) / 1e9,
+            3,
         )
-    except requests.exceptions.ConnectionError as exc:
-        raise OllamaError(
-            f"Cannot reach Ollama at {settings.ollama.host}. "
-            "Is it running? Start it with `ollama serve` and "
-            f"`ollama pull {_model}`."
-        ) from exc
-    except requests.exceptions.Timeout as exc:
-        raise OllamaError(
-            f"Ollama request timed out after {_timeout}s."
-        ) from exc
-    except requests.exceptions.RequestException as exc:  # pragma: no cover
-        raise OllamaError(f"Ollama request failed: {exc}") from exc
+        total_latency_s = round(
+            body.get("total_duration", 0) / 1e9, 3
+        ) or round(latency, 2)
 
-    latency = time.monotonic() - t0
+        span.set_attribute("llm.input_tokens",    input_tokens)
+        span.set_attribute("llm.output_tokens",   output_tokens)
+        span.set_attribute("llm.ttft_s",          ttft_s)
+        span.set_attribute("llm.total_latency_s", total_latency_s)
+        span.set_attribute("llm.response_chars",  len(content))
 
-    if response.status_code != 200:
-        raise OllamaError(
-            f"Ollama returned HTTP {response.status_code}: "
-            f"{response.text[:300]}"
+        # Always record the completion message structure as a span event.
+        span.add_event("gen_ai.assistant.message", {
+            "role": "assistant",
+            "chars": len(content),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        })
+        # Full response as a child span for easy inspection in Aspire.
+        if settings.otel.include_llm_content:
+            with _tracer.start_as_current_span("llm.assistant_response") as _a:
+                _a.set_attribute("role",          "assistant")
+                _a.set_attribute("content",       content)
+                _a.set_attribute("chars",         len(content))
+                _a.set_attribute("input_tokens",  input_tokens)
+                _a.set_attribute("output_tokens", output_tokens)
+
+        _log.info(
+            "ollama ◀ ticker=%s model=%s latency=%.1fs "
+            "in_tok=%d out_tok=%d ttft=%.2fs chars=%d\n%s",
+            ticker or "?",
+            _model,
+            latency,
+            input_tokens,
+            output_tokens,
+            ttft_s,
+            len(content),
+            content,
         )
-
-    try:
-        body = response.json()
-    except ValueError as exc:
-        raise OllamaError(
-            "Ollama response was not valid JSON envelope."
-        ) from exc
-
-    content = (body.get("message") or {}).get("content", "")
-    if not content:
-        raise OllamaError("Ollama response contained no message content.")
-
-    _log.info(
-        "ollama ◀ ticker=%s model=%s latency=%.1fs chars=%d\n%s",
-        ticker or "?",
-        _model,
-        latency,
-        len(content),
-        content,
-    )
-    return content
+        return content
 
 
 # --------------------------------------------------------------------------- #

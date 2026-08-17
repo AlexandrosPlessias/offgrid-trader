@@ -70,6 +70,11 @@ services:
 networks:
   offgrid-net:
     driver: bridge
+    driver_opts:
+      # Match the WSL2 host MTU (1280, set by corporate VPN).
+      # Without this Docker defaults to 1500, causing PMTUD blackholes for
+      # HTTPS connections to external hosts (e.g. fred.stlouisfed.org).
+      com.docker.network.driver.mtu: "1280"
   ai-shared:
     external: true
     name: ai-shared
