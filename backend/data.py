@@ -29,6 +29,7 @@ import csv
 import io
 import json
 import logging
+import math
 import re
 import requests
 from datetime import date, datetime, timedelta, timezone
@@ -79,7 +80,7 @@ def _safe_float(value: Any) -> Optional[float]:
         if value is None:
             return None
         result = float(value)
-        if result != result:  # noqa: PLR0124 - NaN check
+        if math.isnan(result):
             return None
         return result
     except (TypeError, ValueError):
@@ -143,11 +144,11 @@ def fetch_yfinance(ticker: str) -> Dict[str, Any]:
             # Historical window for moving averages and average volume.
             history = yf_ticker.history(period="3mo", interval="1d")
             closes = (
-                [c for c in history["Close"].tolist() if c == c]
+                [c for c in history["Close"].tolist() if not math.isnan(c)]
                 if not history.empty else []
             )
             volumes = (
-                [v for v in history["Volume"].tolist() if v == v]
+                [v for v in history["Volume"].tolist() if not math.isnan(v)]
                 if not history.empty else []
             )
 
@@ -499,8 +500,8 @@ def _parse_fred_csv(text: str) -> List[tuple]:
                 rows.append((date_str, float(val_str)))
             except ValueError:
                 pass
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001
+        _log.debug("_parse_fred_csv: unexpected parse error", exc_info=True)
     return rows
 
 
@@ -622,8 +623,8 @@ def fetch_fred_macro() -> Dict[str, Any]:
             if age_h < _CACHE_TTL_H:
                 _log.info("macro ◀ (cache hit, age=%.1fh)", age_h)
                 return cached.get("data", {})
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001
+            _log.debug("fetch_fred_macro: cache parse error, re-fetching", exc_info=True)
 
     with _tracer.start_as_current_span("data.fetch_macro") as span:
         span.set_attribute("data_source", "fred+multpl")
@@ -924,7 +925,15 @@ def get_market_data(ticker: str) -> Dict[str, Any]:
 
 if __name__ == "__main__":
     import json as _json
+    import re as _re
     import sys
 
     symbol = sys.argv[1] if len(sys.argv) > 1 else "AAPL"
-    print(_json.dumps(get_market_data(symbol), indent=2, default=str))
+    # Redact API keys that may appear in error-message URLs before printing.
+    _output = _json.dumps(get_market_data(symbol), indent=2, default=str)
+    _output = _re.sub(
+        r'(?i)(api_key|apikey|api-key|token)=([^&"\s]{4})[^&"\s]*',
+        r'\1=\2***',
+        _output,
+    )
+    sys.stdout.write(_output + "\n")
