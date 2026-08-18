@@ -1,11 +1,14 @@
-"""SQLite persistence for signals and full analysis logs.
+"""SQLite persistence for signals, analysis logs, and agent memory.
 
-Two tables:
+Three user-facing tables:
 
 * ``signals`` — one row per detected opportunity
   (ticker, type, confidence, source, entry, stop, target, price, timestamp).
 * ``analysis_log`` — the full AI analysis JSON plus the market-data snapshot
   that produced it, for later inspection/backtesting.
+* ``ticker_memory`` — one row per ticker; updated after every agent run.
+  Provides the MemoryLayer with per-ticker scan history so the AI prompt
+  can reference prior signals and RSI streaks.
 
 A fresh connection is opened per call so the module is safe to use from both
 the FastAPI request threads and the async scheduler. Run standalone to create
@@ -70,6 +73,18 @@ CREATE INDEX IF NOT EXISTS idx_analysis_ticker ON analysis_log(ticker);
 CREATE TABLE IF NOT EXISTS app_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ticker_memory (
+    ticker                TEXT PRIMARY KEY,
+    last_scan             TEXT,
+    last_signal           TEXT,
+    last_confidence       REAL,
+    consecutive_oversold  INTEGER DEFAULT 0,
+    consecutive_overbought INTEGER DEFAULT 0,
+    last_price            REAL,
+    price_trend_pct       REAL,
+    updated_at            TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 """
 
@@ -291,6 +306,69 @@ def get_effective_watchlist(db_path: Optional[str] = None) -> List[str]:
             seen.add(t)
             result.append(t)
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Ticker memory — per-ticker agent context (one row per ticker, UPSERT)
+# --------------------------------------------------------------------------- #
+
+def get_ticker_memory(ticker: str, db_path: Optional[str] = None) -> Dict[str, Any]:
+    """Return the memory row for *ticker* as a plain dict, or {} if absent."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM ticker_memory WHERE ticker = ?", (ticker.upper(),)
+        ).fetchone()
+    if row is None:
+        return {}
+    return dict(row)
+
+
+def upsert_ticker_memory(
+    ticker: str,
+    *,
+    last_scan: Optional[str] = None,
+    last_signal: Optional[str] = None,
+    last_confidence: Optional[float] = None,
+    consecutive_oversold: int = 0,
+    consecutive_overbought: int = 0,
+    last_price: Optional[float] = None,
+    price_trend_pct: Optional[float] = None,
+    db_path: Optional[str] = None,
+) -> None:
+    """Insert or replace the memory row for *ticker*."""
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO ticker_memory
+                (ticker, last_scan, last_signal, last_confidence,
+                 consecutive_oversold, consecutive_overbought,
+                 last_price, price_trend_pct,
+                 updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            """,
+            (
+                ticker.upper(),
+                last_scan,
+                last_signal,
+                last_confidence,
+                consecutive_oversold,
+                consecutive_overbought,
+                last_price,
+                price_trend_pct,
+            ),
+        )
+        conn.commit()
+
+
+def delete_ticker_memory(ticker: str, db_path: Optional[str] = None) -> bool:
+    """Remove the memory row for *ticker*. Returns True if a row was deleted."""
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM ticker_memory WHERE ticker = ?", (ticker.upper(),)
+        )
+        conn.commit()
+    return cur.rowcount > 0
 
 
 if __name__ == "__main__":

@@ -75,11 +75,15 @@ def _fmt(value: Any) -> str:
     return "n/a" if value is None else str(value)
 
 
-def build_prompt(market_data: Dict[str, Any]) -> str:
+def build_prompt(market_data: Dict[str, Any], memory: Optional[Dict[str, Any]] = None) -> str:
     """Render *market_data* into a compact, readable prompt for the model.
 
     Optional ``news`` key in *market_data* (a list of headline strings from
     Finnhub) is injected before the risk-factor section when non-empty.
+
+    Optional ``memory`` dict (from :class:`~backend.memory.MemoryLayer`) is
+    injected as a ``PRIOR CONTEXT`` section at the top of the prompt so the
+    model can reference prior signals and RSI streaks.
     """
 
     price = market_data.get("price", {}) or {}
@@ -93,6 +97,15 @@ def build_prompt(market_data: Dict[str, Any]) -> str:
         return sub.get("value") if isinstance(sub, dict) else None
 
     lines: List[str] = []
+
+    # Inject prior-scan context at the top when memory is available.
+    if memory:
+        from backend.memory import MemoryLayer as _ML
+        prior = _ML().format_prompt_section(memory)
+        if prior:
+            lines.append(prior)
+            lines.append("")
+
     lines.append(f"Ticker: {market_data.get('ticker')}")
     name = fundamentals.get("name")
     if name:
@@ -427,15 +440,23 @@ def parse_ai_response(content: str) -> Dict[str, Any]:
     return normalised
 
 
-def analyze(market_data: Dict[str, Any]) -> Dict[str, Any]:
+def analyze(
+    market_data: Dict[str, Any],
+    memory: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Full pipeline: prompt -> Ollama -> parsed analysis.
 
     Always returns a dict. On failure the dict contains ``error`` (and, when
     available, ``raw`` with the offending model output) instead of raising.
+
+    Args:
+        market_data: The full market-data dict from ``get_market_data()``.
+        memory:      Optional per-ticker memory from :class:`~backend.memory.MemoryLayer`;
+                     injected as a ``PRIOR CONTEXT`` section in the prompt.
     """
 
     ticker = market_data.get("ticker")
-    prompt = build_prompt(market_data)
+    prompt = build_prompt(market_data, memory=memory)
 
     try:
         raw = call_ollama(prompt, ticker=ticker)
