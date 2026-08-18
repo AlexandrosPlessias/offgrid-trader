@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import urllib.parse
 from unittest import mock
 
 # Ensure the repo root is on sys.path so ``from backend import …`` works
@@ -178,8 +179,6 @@ check(
 # --------------------------------------------------------------------------- #
 # 6. compute_indicators with mocked yfinance (no network)
 # --------------------------------------------------------------------------- #
-import numpy as np  # noqa: E402
-
 _n = 300  # enough bars for EMA200
 _idx = list(range(_n))
 _price = [100.0 + i * 0.01 for i in _idx]
@@ -403,7 +402,8 @@ try:
         elif "T10Y2Y" in url:
             _text = _T10Y2Y_CSV
             _json = {"observations": [{"date": "2026-07-01", "value": "-0.42"}]}
-        elif "multpl.com" in url:
+        elif urllib.parse.urlparse(url).netloc in ("multpl.com", "www.multpl.com") or \
+                urllib.parse.urlparse(url).netloc.endswith(".multpl.com"):
             _text = "<table><tr><td>Jul 2026</td><td>34.21</td></tr></table>"
             _json = {}
         else:
@@ -422,8 +422,7 @@ try:
     from backend.database import set_setting as _ss
     _ss("macro_cache", "")
 
-    import backend.data as _bdata
-    with mock.patch.object(_bdata, "requests") as _mock_req:
+    with mock.patch.object(data, "requests") as _mock_req:
         _mock_req.get.side_effect = _fake_fred_get
         macro = fetch_fred_macro()
 

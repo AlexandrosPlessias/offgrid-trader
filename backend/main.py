@@ -423,7 +423,7 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
     async def _event(payload: Dict[str, Any]) -> str:
         return f"data: {json.dumps(payload)}\n\n"
 
-    async def _stream() -> AsyncGenerator[str, None]:
+    async def _stream_body() -> AsyncGenerator[str, None]:
         errors: list = []
 
         # ── Step 1: fetch market data ──────────────────────────────────────
@@ -435,10 +435,11 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
         try:
             market_data = await asyncio.to_thread(_get_market_data, ticker)
             errors.extend(market_data.get("errors", []))
-        except Exception as exc:
+        except Exception:
+            _log.exception("fetch failed for %s", ticker)
             yield await _event(
                 {"type": "step", "step": "fetch", "status": "error",
-                 "msg": str(exc)}
+                 "msg": f"Failed to fetch market data for {ticker} — check server logs"}
             )
             return
         elapsed_fetch = round(time.monotonic() - t0, 1)
@@ -455,17 +456,19 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
         t0 = time.monotonic()
         try:
             analysis = await asyncio.to_thread(_analyze, market_data)
-        except Exception as exc:
+        except Exception:
+            _log.exception("analysis failed for %s", ticker)
             yield await _event(
                 {"type": "step", "step": "analyze", "status": "error",
-                 "msg": str(exc)}
+                 "msg": "AI analysis failed — check server logs"}
             )
             return
         if analysis.get("error"):
             errors.append(analysis["error"])
+            _log.warning("analysis error for %s: %s", ticker, analysis["error"])
             yield await _event(
                 {"type": "step", "step": "analyze", "status": "error",
-                 "msg": analysis["error"]}
+                 "msg": "AI analysis returned an error — check server logs"}
             )
             return
         elapsed_analyze = round(time.monotonic() - t0, 1)
@@ -485,10 +488,11 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
                 detect_opportunities, market_data, analysis
             )
             actionable = filter_by_confidence(opportunities)
-        except Exception as exc:
+        except Exception:
+            _log.exception("detect failed for %s", ticker)
             yield await _event(
                 {"type": "step", "step": "detect", "status": "error",
-                 "msg": str(exc)}
+                 "msg": "Opportunity detection failed — check server logs"}
             )
             return
         elapsed_detect = round(time.monotonic() - t0, 1)
@@ -500,21 +504,24 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
         # ── Persist to database ────────────────────────────────────────────
         try:
             await asyncio.to_thread(_save_analysis, ticker, analysis, market_data)
-        except Exception as exc:
-            errors.append(f"save_analysis failed: {exc}")
+        except Exception:
+            _log.exception("save_analysis failed for %s", ticker)
+            errors.append("save_analysis failed — check server logs")
 
         saved_ids: list = []
         alerts_sent: list = []
         for opp in actionable:
             try:
                 saved_ids.append(await asyncio.to_thread(_save_signal, opp))
-            except Exception as exc:
-                errors.append(f"save_signal failed: {exc}")
+            except Exception:
+                _log.exception("save_signal failed for %s", ticker)
+                errors.append("save_signal failed — check server logs")
             if send_alerts:
                 try:
                     alerts_sent.append(await asyncio.to_thread(_send_alert, opp))
-                except Exception as exc:
-                    errors.append(f"send_alert failed: {exc}")
+                except Exception:
+                    _log.exception("send_alert failed for %s", ticker)
+                    errors.append("send_alert failed — check server logs")
 
         # ── Final result ───────────────────────────────────────────────────
         yield await _event(
@@ -530,6 +537,19 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
                 "errors": errors,
             }
         )
+
+    async def _stream() -> AsyncGenerator[str, None]:
+        """Outer wrapper — catches any unhandled exception so no stack trace
+        is ever written to the SSE stream (py/stack-trace-exposure)."""
+        try:
+            async for chunk in _stream_body():
+                yield chunk
+        except Exception:
+            _log.exception("unhandled error in SSE stream for %s", ticker)
+            yield await _event({
+                "type": "error",
+                "msg": "An internal error occurred. Check server logs.",
+            })
 
     return StreamingResponse(
         _stream(),
@@ -593,8 +613,9 @@ async def market_data_history(
 
     try:
         rows = await asyncio.to_thread(_fetch)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"yfinance error: {exc}") from exc
+    except Exception:
+        _log.exception("candles fetch failed for %s", ticker)
+        raise HTTPException(status_code=502, detail="Failed to fetch candle data — check server logs")
 
     return {"ticker": ticker, "period": period, "interval": interval, "candles": rows}
 
