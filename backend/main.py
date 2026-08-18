@@ -36,8 +36,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import __version__
-from .alerts import send_alert as _send_alert
-from .analysis import analyze as _analyze
 from .config import get_settings
 from .data import get_market_data as _get_market_data
 from .database import (
@@ -50,11 +48,8 @@ from .database import (
     get_recent_signals,
     get_setting,
     init_db,
-    save_analysis as _save_analysis,
-    save_signal as _save_signal,
     set_setting,
 )
-from .opportunities import detect_opportunities, filter_by_confidence
 from .scheduler import scan_ticker_async, scheduler
 
 
@@ -424,117 +419,50 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
         return f"data: {json.dumps(payload)}\n\n"
 
     async def _stream_body() -> AsyncGenerator[str, None]:
-        errors: list = []
+        from backend.agent import TickerAgent
+        from backend.scheduler import _memory
 
-        # ── Step 1: fetch market data ──────────────────────────────────────
-        yield await _event(
-            {"type": "step", "step": "fetch", "status": "running",
-             "msg": f"Fetching market data for {ticker}…"}
-        )
-        t0 = time.monotonic()
-        try:
-            market_data = await asyncio.to_thread(_get_market_data, ticker)
-            errors.extend(market_data.get("errors", []))
-        except Exception:
-            _log.exception("fetch failed for %s", ticker)
-            yield await _event(
-                {"type": "step", "step": "fetch", "status": "error",
-                 "msg": f"Failed to fetch market data for {ticker} — check server logs"}
-            )
-            return
-        elapsed_fetch = round(time.monotonic() - t0, 1)
-        yield await _event(
-            {"type": "step", "step": "fetch", "status": "done",
-             "elapsed": elapsed_fetch}
-        )
+        agent = TickerAgent(ticker, memory=_memory, send_alerts=send_alerts)
 
-        # ── Step 2: AI analysis ────────────────────────────────────────────
-        yield await _event(
-            {"type": "step", "step": "analyze", "status": "running",
-             "msg": f"Running AI analysis ({settings.ollama.model})…"}
-        )
-        t0 = time.monotonic()
-        try:
-            analysis = await asyncio.to_thread(_analyze, market_data)
-        except Exception:
-            _log.exception("analysis failed for %s", ticker)
-            yield await _event(
-                {"type": "step", "step": "analyze", "status": "error",
-                 "msg": "AI analysis failed — check server logs"}
-            )
-            return
-        if analysis.get("error"):
-            errors.append(analysis["error"])
-            _log.warning("analysis error for %s: %s", ticker, analysis["error"])
-            yield await _event(
-                {"type": "step", "step": "analyze", "status": "error",
-                 "msg": "AI analysis returned an error — check server logs"}
-            )
-            return
-        elapsed_analyze = round(time.monotonic() - t0, 1)
-        yield await _event(
-            {"type": "step", "step": "analyze", "status": "done",
-             "elapsed": elapsed_analyze}
-        )
+        # Run skill by skill, draining ctx.events after each one completes.
+        # We run the whole agent in one shot and stream its accumulated events,
+        # because asyncio.to_thread cannot yield mid-execution. The agent
+        # collects all events in ctx.events; we forward them here.
+        result = await agent.run()
+        ctx = result.context
 
-        # ── Step 3: detect opportunities ───────────────────────────────────
-        yield await _event(
-            {"type": "step", "step": "detect", "status": "running",
-             "msg": "Detecting opportunities…"}
-        )
-        t0 = time.monotonic()
-        try:
-            opportunities = await asyncio.to_thread(
-                detect_opportunities, market_data, analysis
-            )
-            actionable = filter_by_confidence(opportunities)
-        except Exception:
-            _log.exception("detect failed for %s", ticker)
-            yield await _event(
-                {"type": "step", "step": "detect", "status": "error",
-                 "msg": "Opportunity detection failed — check server logs"}
-            )
-            return
-        elapsed_detect = round(time.monotonic() - t0, 1)
-        yield await _event(
-            {"type": "step", "step": "detect", "status": "done",
-             "elapsed": elapsed_detect}
-        )
-
-        # ── Persist to database ────────────────────────────────────────────
-        try:
-            await asyncio.to_thread(_save_analysis, ticker, analysis, market_data)
-        except Exception:
-            _log.exception("save_analysis failed for %s", ticker)
-            errors.append("save_analysis failed — check server logs")
-
-        saved_ids: list = []
-        alerts_sent: list = []
-        for opp in actionable:
-            try:
-                saved_ids.append(await asyncio.to_thread(_save_signal, opp))
-            except Exception:
-                _log.exception("save_signal failed for %s", ticker)
-                errors.append("save_signal failed — check server logs")
-            if send_alerts:
-                try:
-                    alerts_sent.append(await asyncio.to_thread(_send_alert, opp))
-                except Exception:
-                    _log.exception("send_alert failed for %s", ticker)
-                    errors.append("send_alert failed — check server logs")
+        # Forward every event the agent emitted, translating skill names to
+        # the step names the frontend already understands.
+        _SKILL_TO_STEP = {
+            "fetch_data": "fetch",
+            "ai_analysis": "analyze",
+            "opportunity_detect": "detect",
+            "persist": "persist",
+            "alert": "alert",
+        }
+        for ev in ctx.events:
+            ev_type = ev.get("type")
+            if ev_type == "step":
+                step = _SKILL_TO_STEP.get(ev.get("step", ""), ev.get("step", ""))
+                out = dict(ev)
+                out["step"] = step
+                yield await _event(out)
+            elif ev_type in ("retry", "memory", "skill_error"):
+                yield await _event(ev)
+            # agent_start events are internal — skip
 
         # ── Final result ───────────────────────────────────────────────────
         yield await _event(
             {
                 "type": "result",
                 "ticker": ticker,
-                "analysis": analysis,
-                "market_data": market_data,
-                "opportunities": opportunities,
-                "actionable": actionable,
-                "saved_signal_ids": saved_ids,
-                "alerts": alerts_sent,
-                "errors": errors,
+                "analysis": ctx.analysis,
+                "market_data": ctx.market_data,
+                "opportunities": ctx.opportunities or [],
+                "actionable": ctx.actionable or [],
+                "saved_signal_ids": ctx.saved_signal_ids,
+                "alerts": ctx.alerts_sent,
+                "errors": ctx.errors,
             }
         )
 
