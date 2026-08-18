@@ -3,24 +3,24 @@
 # Ollama and Portainer are provided by the shared infra stack.
 # Start it first (safe to re-run — idempotent):
 #
-#   docker compose -f docker-compose.infra.yml up -d
+#   make infra                    (recommended — auto-detects GPU)
+#   bash infra/start-infra.sh     (same thing)
 #
-# Then start this project:
+# Then start this project (from the project root):
 #
-#   docker compose up --build                                        (GPU)
-#   docker compose -f docker-compose.yml \
-#                  -f docker-compose.override.cpu.yml up --build    (CPU-only)
+#   make up                       (recommended)
+#   docker compose -f infra/docker-compose.yml up --build
 
 services:
 
   # ── Backend API (FastAPI) ────────────────────────────────────────────────────
   backend:
     build:
-      context: .
-      dockerfile: docker/backend/Dockerfile
+      context: ..
+      dockerfile: infra/backend/Dockerfile
     restart: unless-stopped
     env_file:
-      - .env
+      - ../.env
     environment:
       OLLAMA_HOST: http://ollama:11434
       DATABASE_PATH: /app/data/offgrid_trader.db
@@ -28,7 +28,7 @@ services:
     ports:
       - "8010:8000"
     volumes:
-      - ./data:/app/data
+      - ../data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
       interval: 15s
@@ -56,8 +56,8 @@ services:
   # ── Frontend UI (React / Vite → nginx) ──────────────────────────────────────
   frontend:
     build:
-      context: .
-      dockerfile: docker/frontend/Dockerfile
+      context: ..
+      dockerfile: infra/frontend/Dockerfile
     restart: unless-stopped
     ports:
       - "5174:5173"

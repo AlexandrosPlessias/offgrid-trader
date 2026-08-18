@@ -87,15 +87,15 @@ sudo service docker start
 # macOS — open Docker Desktop first:
 open -a Docker
 
-./start-infra.sh              # start shared Ollama + Portainer
-docker compose up --build     # build and start MarketSage
+make infra                    # start shared Ollama + Portainer (auto-detects GPU)
+make build                    # build and start MarketSage
 ```
 
 **When you are done — stop everything to free RAM/GPU:**
 
 ```bash
-docker compose down
-docker compose -f docker-compose.infra.yml down
+make down
+docker compose -f infra/docker-compose.infra.yml down
 sudo service docker stop      # WSL2 only
 ```
 

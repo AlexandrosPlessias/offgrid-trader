@@ -51,7 +51,7 @@ to verify the result.
 | Requirement | Notes |
 |---|---|
 | **Docker Desktop for Mac** | Intel or Apple Silicon; allocate ≥12 GB RAM in Settings → Resources |
-| **Ollama (native)** | Install from https://ollama.com/download — must be running before `./start-infra.sh`. The infra script proxies Docker to the native Ollama so inference runs on Apple Metal GPU |
+| **Ollama (native)** | Install from https://ollama.com/download — must be running before `make infra`. The infra script proxies Docker to the native Ollama so inference runs on Apple Metal GPU |
 | **RAM** | 8 GB minimum; 16 GB recommended for `qwen2.5:14b` |
 | **Disk** | ~6 GB free (`qwen2.5:7b` weights stored in `~/.ollama` by native Ollama) |
 | **git** | Xcode Command Line Tools (`xcode-select --install`) or Homebrew git |
@@ -251,15 +251,15 @@ Wait until the Docker icon in the menu bar stops animating (usually ~10 s).
 >
 > *WSL2:*
 > ```bash
-> docker compose down                                    # stop MarketSage
-> docker compose -f docker-compose.infra.yml down       # stop Ollama + Portainer
-> sudo service docker stop                              # stop Docker daemon
+> make down                                               # stop MarketSage
+> docker compose -f infra/docker-compose.infra.yml down  # stop Ollama + Portainer
+> sudo service docker stop                               # stop Docker daemon
 > ```
 >
 > *macOS:*
 > ```bash
-> docker compose down
-> docker compose -f docker-compose.infra.yml down
+> make down
+> docker compose -f infra/docker-compose.infra.yml down
 > osascript -e 'quit app "Docker Desktop"'              # quit Docker Desktop
 > ```
 
@@ -271,7 +271,7 @@ Ollama and Portainer live in a shared stack so they can be reused by other
 local AI projects (e.g. `insurance-agent-rag-poc`) without running duplicates.
 
 ```bash
-./start-infra.sh
+make infra
 ```
 
 The script auto-detects whether an NVIDIA GPU is available and applies the GPU
@@ -283,15 +283,15 @@ You can also run it manually if needed:
 
 ```bash
 # macOS (proxies to native Ollama for Metal GPU)
-docker compose -f docker-compose.infra.yml \
-               -f docker-compose.override.mac.yml up -d
+docker compose -f infra/docker-compose.infra.yml \
+               -f infra/docker-compose.override.mac.yml up -d
 
 # CPU-only (Windows/Linux, no GPU)
-docker compose -f docker-compose.infra.yml up -d
+docker compose -f infra/docker-compose.infra.yml up -d
 
 # GPU explicit (Windows/Linux with NVIDIA)
-docker compose -f docker-compose.infra.yml \
-               -f docker-compose.override.gpu.yml up -d
+docker compose -f infra/docker-compose.infra.yml \
+               -f infra/docker-compose.override.gpu.yml up -d
 ```
 
 > **First-time model download:** `ollama-pull` will download `qwen2.5:14b`
@@ -301,19 +301,15 @@ docker compose -f docker-compose.infra.yml \
 ### Step 2 — Start MarketSage
 
 ```bash
-# GPU
-docker compose up --build
-
-# CPU-only (Ollama already running without GPU from Step 1)
-docker compose up --build
+make build
 ```
 
 ### What happens on first run
 
 | Phase | What | Approx time |
 |---|---|---|
-| Infra start (`docker-compose.infra.yml`) | Ollama starts, models download | 15–30 min first time, <30 s after |
-| Image build (`docker compose up --build`) | Docker builds `backend` + `frontend` | 1–3 min |
+| Infra start (`make infra`) | Ollama starts, models download | 15–30 min first time, <30 s after |
+| Image build (`make build`) | Docker builds `backend` + `frontend` | 1–3 min |
 | Backend start | FastAPI comes up, DB initialises, scheduler starts | < 30 s |
 
 **Total first-run time: 20–35 minutes.** Subsequent runs start in under a
@@ -378,13 +374,13 @@ python tests/smoke_test.py
 | Symptom | Fix |
 |---|---|
 | `Ollama request timed out after 120s` | Inference is running (partly) on **CPU**. Confirm GPU reachability with `docker exec ollama nvidia-smi` (a *"GPU access blocked by the operating system"* error = no GPU), and check the CPU/GPU split with `docker exec ollama ollama ps`. Fix GPU passthrough: `sudo nvidia-ctk runtime configure --runtime=docker && sudo service docker restart`, then check `docker info \| grep -i runtime` lists `nvidia`. If the model is simply too big for your VRAM (see next row), pick a smaller `OLLAMA_MODEL` or raise `OLLAMA_TIMEOUT` in `.env`, then `docker compose up -d backend` |
-| GPU present on host but container runs on CPU | The `nvidia` runtime isn't registered with the Docker daemon even though the toolkit is installed. `docker info \| grep -i runtime` won't list `nvidia`. Run `sudo nvidia-ctk runtime configure --runtime=docker && sudo service docker restart`, then `./start-infra.sh` again |
+| GPU present on host but container runs on CPU | The `nvidia` runtime isn't registered with the Docker daemon even though the toolkit is installed. `docker info \| grep -i runtime` won't list `nvidia`. Run `sudo nvidia-ctk runtime configure --runtime=docker && sudo service docker restart`, then `make infra` again |
 | Model splits CPU/GPU or won't fit in VRAM | `docker exec ollama ollama ps` shows a `CPU/GPU` split (e.g. `70%/30%`) — the model is larger than your VRAM. Check VRAM with `docker exec ollama nvidia-smi --query-gpu=memory.total --format=csv,noheader`, then choose a model that fits: `qwen2.5:14b` (~10 GB) needs ≥12 GB; `qwen2.5:7b` (~4.7 GB) needs ~6 GB; `qwen2.5:3b` (~3 GB) fits **fully** in a 4 GB GPU. Set `OLLAMA_MODEL` in `.env`, `docker compose up -d backend`, then confirm `100% GPU` via `docker exec ollama ollama ps` |
-| `could not select device driver "nvidia"` | No GPU / toolkit. Run `./start-infra.sh --cpu` to start Ollama in CPU mode, then `docker compose up --build` normally |
+| `could not select device driver "nvidia"` | No GPU / toolkit. Run `make infra --cpu` to start Ollama in CPU mode, then `docker compose up --build` normally |
 | `env file .env not found` | You skipped `cp .env.example .env`. Create it (section 4) |
 | `ollama-pull` stalls or errors | Download interrupted — `docker compose restart ollama-pull`. Already-downloaded weights are kept in the volume |
 | `backend` keeps restarting | Check `docker compose logs backend`. Usually it's waiting on `ollama-pull` to finish the model download |
-| Port already in use (8010 / 9000 / 18889) | Find the owner: `ss -tlnp \| grep :<port>` — stop it or change the host port in `docker-compose.yml` |
+| Port already in use (8010 / 9000 / 18889) | Find the owner: `ss -tlnp \| grep :<port>` — stop it or change the host port in `infra/docker-compose.yml` |
 | `address already in use` on 11434 | A native Ollama is running. This stack does not publish 11434, so a native Ollama is harmless — but stop it with `pkill ollama` if you want the container to own the GPU |
 | Docker OOM — container killed | Raise Docker Desktop memory: Settings → Resources → Memory (12 GB recommended for the 14b model) |
 | `permission denied` on `data/` | WSL2 bind-mount issue. `chmod -R 777 data` or move the repo to ext4 (section 2) |

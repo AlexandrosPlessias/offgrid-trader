@@ -4,16 +4,19 @@
 # Auto-detects NVIDIA GPU support and applies the GPU override when available.
 # Safe to run repeatedly — already-running containers are left untouched.
 #
-# Usage:
-#   ./start-infra.sh          # auto-detect (recommended)
-#   ./start-infra.sh --gpu    # force GPU
-#   ./start-infra.sh --cpu    # force CPU
+# Usage (from the project root or from infra/):
+#   make infra                # recommended
+#   bash infra/start-infra.sh
+#   bash infra/start-infra.sh --gpu    # force GPU
+#   bash infra/start-infra.sh --cpu    # force CPU
 
 set -euo pipefail
 
-INFRA=docker-compose.infra.yml
-GPU_OVERRIDE=docker-compose.override.gpu.yml
-MAC_OVERRIDE=docker-compose.override.mac.yml
+# Resolve paths relative to this script — works from any working directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INFRA="$SCRIPT_DIR/docker-compose.infra.yml"
+GPU_OVERRIDE="$SCRIPT_DIR/docker-compose.override.gpu.yml"
+MAC_OVERRIDE="$SCRIPT_DIR/docker-compose.override.mac.yml"
 
 # ── macOS detection ──────────────────────────────────────────────────────────
 is_mac() { [[ "$(uname -s)" == "Darwin" ]]; }
