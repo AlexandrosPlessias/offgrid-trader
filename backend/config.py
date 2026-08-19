@@ -13,15 +13,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import List
 from zoneinfo import ZoneInfo
 
 try:  # optional: load a local .env file if python-dotenv is installed
     from dotenv import load_dotenv
 
     load_dotenv()
-except Exception:  # pragma: no cover - dotenv is optional at runtime
-    pass
+except Exception:  # pragma: no cover - dotenv is optional at runtime  # noqa: S110
+    pass  # python-dotenv not installed in production container; silently skip
 
 
 # --------------------------------------------------------------------------- #
@@ -46,7 +45,7 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
-def _env_list(key: str, default: List[str]) -> List[str]:
+def _env_list(key: str, default: list[str]) -> list[str]:
     raw = os.getenv(key)
     if not raw:
         return list(default)
@@ -106,7 +105,9 @@ class Thresholds:
 class EmailConfig:
     """Gmail SMTP settings. Use a Gmail *App Password*, not the account password."""
 
-    enabled: bool = field(default_factory=lambda: _env_str("EMAIL_ENABLED", "false").lower() == "true")
+    enabled: bool = field(
+        default_factory=lambda: _env_str("EMAIL_ENABLED", "false").lower() == "true"
+    )
     smtp_host: str = field(default_factory=lambda: _env_str("SMTP_HOST", "smtp.gmail.com"))
     smtp_port: int = field(default_factory=lambda: _env_int("SMTP_PORT", 587))
     username: str = field(default_factory=lambda: _env_str("SMTP_USERNAME", ""))
@@ -124,7 +125,9 @@ class EmailConfig:
 class SlackConfig:
     """Slack Incoming Webhook settings."""
 
-    enabled: bool = field(default_factory=lambda: _env_str("SLACK_ENABLED", "false").lower() == "true")
+    enabled: bool = field(
+        default_factory=lambda: _env_str("SLACK_ENABLED", "false").lower() == "true"
+    )
     webhook_url: str = field(default_factory=lambda: _env_str("SLACK_WEBHOOK_URL", ""))
 
     @property
@@ -137,16 +140,10 @@ class TelegramConfig:
     """Telegram Bot API settings for alert delivery."""
 
     enabled: bool = field(
-        default_factory=lambda: (
-            _env_str("TELEGRAM_ENABLED", "false").lower() == "true"
-        )
+        default_factory=lambda: (_env_str("TELEGRAM_ENABLED", "false").lower() == "true")
     )
-    bot_token: str = field(
-        default_factory=lambda: _env_str("TELEGRAM_BOT_TOKEN", "")
-    )
-    chat_id: str = field(
-        default_factory=lambda: _env_str("TELEGRAM_CHAT_ID", "")
-    )
+    bot_token: str = field(default_factory=lambda: _env_str("TELEGRAM_BOT_TOKEN", ""))
+    chat_id: str = field(default_factory=lambda: _env_str("TELEGRAM_CHAT_ID", ""))
 
     @property
     def is_configured(self) -> bool:
@@ -160,9 +157,7 @@ class OtelConfig:
     # When true, full prompt + response text are added as span events.
     # Default false — prompts may contain sensitive ticker context.
     include_llm_content: bool = field(
-        default_factory=lambda: (
-            _env_str("OTEL_INCLUDE_LLM_CONTENT", "false").lower() == "true"
-        )
+        default_factory=lambda: (_env_str("OTEL_INCLUDE_LLM_CONTENT", "false").lower() == "true")
     )
 
 
@@ -172,20 +167,22 @@ class Settings:
 
     # Set false to suppress email + Slack sends while keeping Telegram active.
     alerts_send_enabled: bool = field(
-        default_factory=lambda: (
-            _env_str("ALERTS_SEND_ENABLED", "true").lower() == "true"
-        )
+        default_factory=lambda: (_env_str("ALERTS_SEND_ENABLED", "true").lower() == "true")
     )
 
-    watchlist: List[str] = field(
+    watchlist: list[str] = field(
         default_factory=lambda: _env_list(
             "WATCHLIST", ["AAPL", "MSFT", "NVDA", "TSLA", "AMD", "SPY"]
         )
     )
-    scan_interval_minutes: int = field(default_factory=lambda: _env_int("SCAN_INTERVAL_MINUTES", 15))
-    database_path: str = field(default_factory=lambda: _env_str("DATABASE_PATH", "offgrid_trader.db"))
+    scan_interval_minutes: int = field(
+        default_factory=lambda: _env_int("SCAN_INTERVAL_MINUTES", 15)
+    )
+    database_path: str = field(
+        default_factory=lambda: _env_str("DATABASE_PATH", "offgrid_trader.db")
+    )
     # Comma-separated list of origins allowed by CORS (frontend dev server).
-    cors_origins: List[str] = field(
+    cors_origins: list[str] = field(
         default_factory=lambda: [
             o.strip()
             for o in _env_str(
@@ -205,18 +202,14 @@ class Settings:
         default_factory=lambda: _env_str("SCHEDULER_AUTO_START", "false").lower() == "true"
     )
 
-    finnhub_api_key: str = field(
-        default_factory=lambda: _env_str("FINNHUB_API_KEY", "")
-    )
+    finnhub_api_key: str = field(default_factory=lambda: _env_str("FINNHUB_API_KEY", ""))
 
     # Optional FRED API key — enables the FRED REST API (api.stlouisfed.org)
     # which is more reliable from Docker containers than the key-free CSV
     # endpoint (fred.stlouisfed.org) that is often blocked behind corporate VPNs.
     # Get a free key (instant) at https://fred.stlouisfed.org/docs/api/api_key.html
     # Rate limit: 120 req/min on the free tier — more than sufficient.
-    fred_api_key: str = field(
-        default_factory=lambda: _env_str("FRED_API_KEY", "")
-    )
+    fred_api_key: str = field(default_factory=lambda: _env_str("FRED_API_KEY", ""))
 
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     market_hours: MarketHours = field(default_factory=MarketHours)
@@ -255,7 +248,11 @@ def _redacted_summary(cfg: Settings) -> dict:
         "scan_interval_minutes": cfg.scan_interval_minutes,
         "database_path": cfg.database_path,
         "cors_origins": cfg.cors_origins,
-        "ollama": {"host": cfg.ollama.host, "model": cfg.ollama.model, "timeout": cfg.ollama.timeout},
+        "ollama": {
+            "host": cfg.ollama.host,
+            "model": cfg.ollama.model,
+            "timeout": cfg.ollama.timeout,
+        },
         "market_hours": {
             "timezone": cfg.market_hours.timezone,
             "open": f"{cfg.market_hours.open_hour:02d}:{cfg.market_hours.open_minute:02d}",

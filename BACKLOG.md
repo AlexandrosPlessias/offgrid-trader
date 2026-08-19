@@ -129,7 +129,7 @@ Groq or SambaNova are the preferred starting point — free, fast, no credit car
 - `backend/analysis.py` — replace `requests.post(ollama_chat_url)` with an OpenAI-SDK call (`openai.chat.completions.create`) pointed at the chosen provider's base URL
 - `backend/config.py` — add `LLM_PROVIDER` (`ollama` / `groq` / `sambanova`), `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`; make Ollama the default so existing local setups are unchanged
 - `.env.example` — document the new env vars
-- `docker-compose.yml` — make `ollama` service optional (skip if `LLM_PROVIDER != "ollama"`)
+- `infra/docker-compose.yml` — make `ollama` service optional (skip if `LLM_PROVIDER != "ollama"`)
 - `SETUP.md` — add "Cloud AI" quick-start path alongside the existing local Ollama path
 
 ### Open questions (revisit before implementing)
@@ -141,16 +141,23 @@ Groq or SambaNova are the preferred starting point — free, fast, no credit car
 
 ---
 
-## 3. Agentic architecture — workers and skills
+## ✅ 3b. Agentic architecture — workers, skills, orchestrator, memory
+*Shipped on branch `feat/backlog-3b-agentic-arch`*
 
-Replace the monolithic scan loop with a proper agent framework.
+Replaced the monolithic scan loop with a lightweight agent framework — no new dependencies, no new external services.
 
-- **Worker per ticker** — each ticker runs as an independent agent; agents can be paused, retried, or scaled
-- **Skill modules** — separate pluggable skills: `fetch_data`, `technical_analysis`, `ai_analysis`, `risk_score`, `opportunity_detect`, each composable and individually testable
-- **Orchestrator agent** — coordinates workers, respects rate limits, prioritises watchlist by volatility or news events
-- **Memory layer** — agents remember prior analysis for a ticker so reasoning can be contextual ("RSI was oversold yesterday and is still oversold today → stronger signal")
-- **Tool-use loop** — give the LLM access to tools (fetch price, read DB, query news) and let it reason in multiple steps before producing a signal
-- Potential frameworks: LangGraph, CrewAI, or a lightweight custom loop using Ollama tool-call support
+| Component | File | What |
+|---|---|---|
+| **Skills** | `backend/skills/` | Five independently testable pipeline steps: `FetchDataSkill`, `AIAnalysisSkill` (retries on OllamaError), `OpportunityDetectSkill`, `PersistSkill`, `AlertSkill` |
+| **TickerAgent** | `backend/agent.py` | Runs skills in sequence; retries `can_retry` skills with exponential back-off; loads/saves memory; emits structured SSE events |
+| **MemoryLayer** | `backend/memory.py` | Per-ticker context in `ticker_memory` DB table (UPSERT); injected into AI prompt as `PRIOR CONTEXT` section; 48h TTL |
+| **Orchestrator** | `backend/orchestrator.py` | Sorts watchlist by scan staleness; caps concurrency at 3 via `asyncio.Semaphore` |
+| **Infra cleanup** | `infra/` | Moved all Docker files from root into `infra/`; added `Makefile` (`make up/build/down/infra`) |
+
+New SSE event types: `type:"retry"` (skill retried with back-off), `type:"memory"` (prior context loaded).
+
+**Remaining / future:**
+- Tool-use loop — give the LLM function-calling tools (fetch price, query DB, search news) for multi-step reasoning (ReAct style)
 
 ---
 

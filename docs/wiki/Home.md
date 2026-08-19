@@ -11,21 +11,22 @@ Everything runs on your machine — no paid APIs, no cloud AI, no subscription.
 
 ## What does it do?
 
-For each ticker in your watchlist (or on demand) the system runs a six-step pipeline:
+For each ticker in your watchlist (or on demand), a **TickerAgent** runs five sequential skills:
 
 ```
-yfinance          → live price, volume, fundamentals, balance sheet
-yfinance + ta     → OHLCV history → RSI / MACD / EMA / BB / Stoch (1H · 4H · 1D)
-FRED + multpl.com → US macro: Fed rate, CPI, unemployment, yield curve, Shiller CAPE
-Finnhub           → optional news headlines (free API key)
-Prompt builder    → assembles the market dict into a structured prompt
-Local Ollama      → qwen2.5:14b reasons about the data → JSON output
-Rule engine       → 5 rule checks + macro regime filter → scored, confidence-filtered signals
-SQLite            → signals + analysis log persisted locally
-Alerts            → optional Gmail SMTP · Slack · Telegram bot
+MemoryLayer       → load prior scan context (signal history, RSI streak, price trend)
+FetchDataSkill    → yfinance price + fundamentals + ta indicators (1H/4H/1D)
+                    + balance sheet · FRED macro · multpl.com CAPE · Finnhub news
+AIAnalysisSkill   → builds prompt with PRIOR CONTEXT, sends to local Ollama qwen2.5:14b
+                    → retries up to 2× on OllamaError with exponential back-off
+OpportunityDetect → 5 rule checks (RSI, MACD, volume, valuation, AI signal)
+                    + macro regime confidence filter → scored, confidence-filtered signals
+PersistSkill      → save analysis log + signals to SQLite
+AlertSkill        → optional Gmail SMTP · Telegram bot
+MemoryLayer       → update ticker_memory for next scan
 ```
 
-Results are visible in the React UI (Dashboard · Explorer · Learn · Settings) and via the REST API.
+The **Orchestrator** sorts watchlist tickers by scan staleness and caps concurrency at 3 (respects Ollama VRAM). Results are visible in the React UI (Dashboard · Explorer · Learn · Settings) and via the REST API. Live progress streams via SSE — including `retry` and `memory` events.
 
 ---
 
@@ -113,24 +114,34 @@ See [docs/screenshots/README.md](../screenshots/README.md) for full instructions
 backend/
 ├── config.py         — env-driven settings, thresholds, secrets
 ├── data.py           — yfinance OHLCV + ta library → indicators + market dict
-├── analysis.py       — prompt → Ollama /api/chat → parsed JSON
-├── opportunities.py  — AI output + 5 rule checks + macro filter → scored signals
-├── database.py       — SQLite: signals, analysis_log, app_settings
-├── alerts.py         — Gmail SMTP · Slack · Telegram bot (confidence-gated)
-├── scheduler.py      — async, market-hours-aware scan loop
-└── main.py           — FastAPI: endpoints, SSE streaming, lifespan
+├── analysis.py       — prompt builder → Ollama /api/chat → parsed JSON
+├── opportunities.py  — 5 rule checks + macro regime filter → scored signals
+├── database.py       — SQLite: signals, analysis_log (+ opportunities_json / actionable_json),
+│                       app_settings, ticker_memory
+├── alerts.py         — Gmail SMTP · Telegram bot (confidence-gated)
+├── memory.py         — MemoryLayer: load/update ticker_memory; 48h TTL
+├── agent.py          — TickerAgent: runs skills with retry + memory + OTEL spans/metrics
+├── orchestrator.py   — Orchestrator: staleness-sorted dispatch, concurrency cap=3
+├── scheduler.py      — async, market-hours-aware scan loop (uses Orchestrator)
+├── skills/           — five pipeline skills (fetch_data, ai_analysis, opportunity_detect,
+│                       persist, alert)
+├── prompts/          — system_prompt.md (loaded at runtime), user_prompt_structure.md
+└── main.py           — FastAPI: endpoints, SSE streaming, lifespan, OTEL setup
 
 frontend/src/
 ├── App.jsx           — all UI components + custom hooks
 └── index.css         — component styles
 
-docker/
-├── frontend/nginx.conf  — nginx reverse proxy (SSE buffering off)
-└── ...
+infra/
+├── docker-compose.yml          — MarketSage stack (backend + frontend + aspire)
+├── docker-compose.infra.yml    — shared infra (Ollama + Portainer)
+├── backend/Dockerfile
+├── frontend/Dockerfile + nginx.conf   — nginx reverse proxy (SSE buffering off)
+└── start-infra.sh
 
 docs/wiki/            — you are here
 tests/
-└── smoke_test.py     — offline regression test (36 checks, no live APIs)
+└── smoke_test.py     — offline regression test (no live APIs); run with `make smoke`
 ```
 
 ---

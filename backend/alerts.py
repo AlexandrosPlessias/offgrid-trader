@@ -19,7 +19,7 @@ import smtplib
 import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import requests
 
@@ -36,11 +36,11 @@ def _is_alerts_enabled() -> bool:
     return get_settings().alerts_send_enabled
 
 
-def _fmt_level(value: Optional[float]) -> str:
+def _fmt_level(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.2f}"
 
 
-def format_alert(opportunity: Dict[str, Any]) -> Dict[str, str]:
+def format_alert(opportunity: dict[str, Any]) -> dict[str, str]:
     """Build a ``{"subject", "text"}`` message from an opportunity dict."""
 
     ticker = opportunity.get("ticker", "?")
@@ -52,7 +52,7 @@ def format_alert(opportunity: Dict[str, Any]) -> Dict[str, str]:
 
     subject = f"[offgrid-trader] {side} {ticker} ({confidence:.0f}% confidence)"
 
-    lines: List[str] = [
+    lines: list[str] = [
         f"Ticker:     {ticker}",
         f"Direction:  {side}",
         f"Confidence: {confidence:.0f}%",
@@ -134,9 +134,7 @@ def send_telegram(subject: str, body: str) -> bool:
         return False
 
     text = f"*{subject}*\n\n{body}"
-    url = (
-        f"https://api.telegram.org/bot{tg.bot_token}/sendMessage"
-    )
+    url = f"https://api.telegram.org/bot{tg.bot_token}/sendMessage"
     try:
         r = httpx.post(
             url,
@@ -155,10 +153,10 @@ def send_telegram(subject: str, body: str) -> bool:
 
 
 def send_alert(
-    opportunity: Dict[str, Any],
+    opportunity: dict[str, Any],
     *,
-    min_confidence: Optional[float] = None,
-) -> Dict[str, Any]:
+    min_confidence: float | None = None,
+) -> dict[str, Any]:
     """Format and dispatch an alert if it clears the confidence floor.
 
     Returns a result dict describing what happened, e.g.
@@ -178,7 +176,7 @@ def send_alert(
         }
 
     message = format_alert(opportunity)
-    channels: List[str] = []
+    channels: list[str] = []
 
     if _is_alerts_enabled():
         if send_email(message["subject"], message["text"]):
