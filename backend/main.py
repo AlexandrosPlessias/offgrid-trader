@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import date, datetime
@@ -60,6 +61,28 @@ from .database import (
 from .scheduler import scan_ticker_async, scheduler
 
 _log = logging.getLogger(__name__)
+
+# Tickers are short alphanumeric symbols (optionally with '.' or '-', e.g.
+# "BRK.B"). Enforcing this early rejects any control characters (CR/LF etc.)
+# before a ticker value is ever interpolated into a log message, closing off
+# log-injection via crafted request bodies (CodeQL py/log-injection).
+_TICKER_RE = re.compile(r"^[A-Z0-9.\-]{1,15}$")
+
+
+def _clean_ticker(raw: str) -> str:
+    """Normalise and validate a user-supplied ticker symbol.
+
+    Raises ``HTTPException(400)`` if *raw* doesn't look like a real ticker.
+    """
+    ticker = raw.strip().upper()
+    if not ticker or not _TICKER_RE.match(ticker):
+        raise HTTPException(status_code=400, detail="invalid ticker")
+    return ticker
+
+
+def _log_safe(value: str) -> str:
+    """Strip CR/LF from *value* so it can't forge extra log lines/entries."""
+    return value.replace("\r", "").replace("\n", "")
 
 
 # --------------------------------------------------------------------------- #
@@ -382,9 +405,7 @@ def list_ollama_models() -> dict[str, Any]:
 @app.post("/analyze")
 async def analyze_ticker(request: AnalyzeRequest) -> dict[str, Any]:
     """On-demand analysis for a single ticker."""
-    ticker = request.ticker.strip().upper()
-    if not ticker:
-        raise HTTPException(status_code=400, detail="ticker is required")
+    ticker = _clean_ticker(request.ticker)
 
     result = await scan_ticker_async(ticker, send_alerts=request.send_alerts)
     return {
@@ -406,9 +427,7 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:  
     ``type:"result"`` event with the full analysis + market data.
     Results are persisted to the database (analysis_log + signals tables).
     """
-    ticker = request.ticker.strip().upper()
-    if not ticker:
-        raise HTTPException(status_code=400, detail="ticker is required")
+    ticker = _clean_ticker(request.ticker)
 
     # Capture before entering generator (request not in scope inside async gen)
     send_alerts = request.send_alerts
@@ -475,7 +494,7 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:  
             async for chunk in _stream_body():
                 yield chunk
         except Exception:
-            _log.exception("unhandled error in SSE stream for %s", ticker)
+            _log.exception("unhandled error in SSE stream for %s", _log_safe(ticker))
             yield await _event(
                 {
                     "type": "error",
@@ -496,9 +515,7 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:  
 @app.get("/market-data/{ticker}")
 async def market_data(ticker: str) -> dict[str, Any]:
     """Return the raw market data dict for *ticker* (price, fundamentals, indicators)."""
-    ticker = ticker.strip().upper()
-    if not ticker:
-        raise HTTPException(status_code=400, detail="ticker is required")
+    ticker = _clean_ticker(ticker)
     data = await asyncio.to_thread(_get_market_data, ticker)
     return data
 
@@ -514,9 +531,7 @@ async def market_data_history(
     Each entry: ``{date, open, high, low, close, volume}``.
     Used by the price history chart in the Analysis Explorer.
     """
-    ticker = ticker.strip().upper()
-    if not ticker:
-        raise HTTPException(status_code=400, detail="ticker is required")
+    ticker = _clean_ticker(ticker)
 
     def _fetch() -> list:
         import yfinance as yf  # local import — not needed at startup
@@ -550,7 +565,7 @@ async def market_data_history(
     try:
         rows = await asyncio.to_thread(_fetch)
     except Exception as exc:
-        _log.exception("candles fetch failed for %s", ticker)
+        _log.exception("candles fetch failed for %s", _log_safe(ticker))
         raise HTTPException(
             status_code=502, detail="Failed to fetch candle data — check server logs"
         ) from exc
