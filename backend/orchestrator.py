@@ -57,7 +57,7 @@ class Orchestrator:
                         balances throughput with Ollama VRAM pressure.
     """
 
-    def __init__(self, *, memory: "MemoryLayer", max_concurrent: int = 3) -> None:
+    def __init__(self, *, memory: MemoryLayer, max_concurrent: int = 3) -> None:
         self._memory = memory
         self._sem = asyncio.Semaphore(max_concurrent)
 
