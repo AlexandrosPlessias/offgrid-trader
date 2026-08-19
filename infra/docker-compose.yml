@@ -11,6 +11,11 @@
 #   make up                       (recommended)
 #   docker compose -f infra/docker-compose.yml up --build
 
+# Explicit project name prevents Docker Compose from using the directory
+# name ("infra") as the prefix — networks and containers stay under
+# "offgrid-trader" regardless of where the compose file lives.
+name: offgrid-trader
+
 services:
 
   # ── Backend API (FastAPI) ────────────────────────────────────────────────────
@@ -18,6 +23,7 @@ services:
     build:
       context: ..
       dockerfile: infra/backend/Dockerfile
+    image: offgrid-trader-backend:latest
     restart: unless-stopped
     env_file:
       - ../.env
@@ -42,7 +48,6 @@ services:
   # ── Aspire dashboard (OpenTelemetry traces + logs UI) ───────────────────────
   aspire:
     image: mcr.microsoft.com/dotnet/aspire-dashboard:9.0
-    container_name: aspire-offgrid
     restart: unless-stopped
     ports:
       - "18889:18888"
@@ -58,6 +63,7 @@ services:
     build:
       context: ..
       dockerfile: infra/frontend/Dockerfile
+    image: offgrid-trader-frontend:latest
     restart: unless-stopped
     ports:
       - "5174:5173"
