@@ -207,8 +207,8 @@ TELEGRAM_BOT_TOKEN=123456789:AAF...
 TELEGRAM_CHAT_ID=123456789
 ```
 
-Apply the change: `docker compose up -d backend` (recreates the container so the
-new `.env` values are read — a plain `restart` keeps the old environment).
+Apply the change: `make up` (or `docker compose -f infra/docker-compose.yml up -d backend`) — this recreates the container so the
+new `.env` values are read. A plain `restart` keeps the old environment.
 Trigger a test alert via the React UI or `curl` to confirm delivery.
 
 > `.env` is gitignored and `.dockerignore` prevents it from being baked into
@@ -251,16 +251,14 @@ Wait until the Docker icon in the menu bar stops animating (usually ~10 s).
 >
 > *WSL2:*
 > ```bash
-> make down                                               # stop MarketSage
-> docker compose -f infra/docker-compose.infra.yml down  # stop Ollama + Portainer
-> sudo service docker stop                               # stop Docker daemon
+> make down    # stops MarketSage; prompts "Stop shared infra (Ollama + Portainer)? [y/N]"
+>              # answer y → also stops Ollama + Portainer and the Docker daemon
 > ```
 >
 > *macOS:*
 > ```bash
-> make down
-> docker compose -f infra/docker-compose.infra.yml down
-> osascript -e 'quit app "Docker Desktop"'              # quit Docker Desktop
+> make down                                        # stops MarketSage + shared infra (when prompted)
+> osascript -e 'quit app "Docker Desktop"'         # quit Docker Desktop
 > ```
 
 ---
@@ -348,10 +346,10 @@ curl -X POST http://localhost:8010/analyze \
 ## 7. Smoke test (optional)
 
 Verify the backend logic is wired correctly without touching live APIs.
-`tests/` is included in the Docker image, so the test runs directly:
+`tests/` is included in the Docker image, so the test runs directly via the Makefile:
 
 ```bash
-docker compose exec backend python tests/smoke_test.py
+make smoke
 ```
 
 All checks should print `PASS`. The final line will read:
@@ -360,12 +358,15 @@ All checks should print `PASS`. The final line will read:
 SMOKE TEST PASSED — all checks green
 ```
 
-To run locally instead (requires dev deps installed in the host environment):
+The Makefile expands to `docker compose -f infra/docker-compose.yml exec backend python tests/smoke/smoke_test.py`. Running bare `docker compose exec ...` from the project root will fail because the compose file lives in `infra/` — always use `make smoke` or prefix with `-f infra/docker-compose.yml`.
+
+To run the full local quality gate instead (ruff + flake8 + black + smoke, no Docker needed):
 
 ```bash
-pip install -r requirements/dev.txt
-python tests/smoke_test.py
+make lint
 ```
+
+This creates `.venv/` at the repo root, installs everything from `tests/lint/requirements.dev.txt`, and runs all checks. See [docs/wiki/development.md](docs/wiki/development.md) for details.
 
 ---
 
@@ -373,13 +374,13 @@ python tests/smoke_test.py
 
 | Symptom | Fix |
 |---|---|
-| `Ollama request timed out after 120s` | Inference is running (partly) on **CPU**. Confirm GPU reachability with `docker exec ollama nvidia-smi` (a *"GPU access blocked by the operating system"* error = no GPU), and check the CPU/GPU split with `docker exec ollama ollama ps`. Fix GPU passthrough: `sudo nvidia-ctk runtime configure --runtime=docker && sudo service docker restart`, then check `docker info \| grep -i runtime` lists `nvidia`. If the model is simply too big for your VRAM (see next row), pick a smaller `OLLAMA_MODEL` or raise `OLLAMA_TIMEOUT` in `.env`, then `docker compose up -d backend` |
+| `Ollama request timed out after 120s` | Inference is running (partly) on **CPU**. Confirm GPU reachability with `docker exec ollama nvidia-smi` (a *"GPU access blocked by the operating system"* error = no GPU), and check the CPU/GPU split with `docker exec ollama ollama ps`. Fix GPU passthrough: `sudo nvidia-ctk runtime configure --runtime=docker && sudo service docker restart`, then check `docker info \| grep -i runtime` lists `nvidia`. If the model is simply too big for your VRAM (see next row), pick a smaller `OLLAMA_MODEL` or raise `OLLAMA_TIMEOUT` in `.env`, then `make up` |
 | GPU present on host but container runs on CPU | The `nvidia` runtime isn't registered with the Docker daemon even though the toolkit is installed. `docker info \| grep -i runtime` won't list `nvidia`. Run `sudo nvidia-ctk runtime configure --runtime=docker && sudo service docker restart`, then `make infra` again |
-| Model splits CPU/GPU or won't fit in VRAM | `docker exec ollama ollama ps` shows a `CPU/GPU` split (e.g. `70%/30%`) — the model is larger than your VRAM. Check VRAM with `docker exec ollama nvidia-smi --query-gpu=memory.total --format=csv,noheader`, then choose a model that fits: `qwen2.5:14b` (~10 GB) needs ≥12 GB; `qwen2.5:7b` (~4.7 GB) needs ~6 GB; `qwen2.5:3b` (~3 GB) fits **fully** in a 4 GB GPU. Set `OLLAMA_MODEL` in `.env`, `docker compose up -d backend`, then confirm `100% GPU` via `docker exec ollama ollama ps` |
-| `could not select device driver "nvidia"` | No GPU / toolkit. Run `make infra --cpu` to start Ollama in CPU mode, then `docker compose up --build` normally |
+| Model splits CPU/GPU or won't fit in VRAM | `docker exec ollama ollama ps` shows a `CPU/GPU` split (e.g. `70%/30%`) — the model is larger than your VRAM. Check VRAM with `docker exec ollama nvidia-smi --query-gpu=memory.total --format=csv,noheader`, then choose a model that fits: `qwen2.5:14b` (~10 GB) needs ≥12 GB; `qwen2.5:7b` (~4.7 GB) needs ~6 GB; `qwen2.5:3b` (~3 GB) fits **fully** in a 4 GB GPU. Set `OLLAMA_MODEL` in `.env`, `make up`, then confirm `100% GPU` via `docker exec ollama ollama ps` |
+| `could not select device driver "nvidia"` | No GPU / toolkit. Run `make infra --cpu` to start Ollama in CPU mode, then `make build` normally |
 | `env file .env not found` | You skipped `cp .env.example .env`. Create it (section 4) |
-| `ollama-pull` stalls or errors | Download interrupted — `docker compose restart ollama-pull`. Already-downloaded weights are kept in the volume |
-| `backend` keeps restarting | Check `docker compose logs backend`. Usually it's waiting on `ollama-pull` to finish the model download |
+| `ollama-pull` stalls or errors | Download interrupted — `docker compose -f infra/docker-compose.yml restart ollama-pull`. Already-downloaded weights are kept in the volume |
+| `backend` keeps restarting | Check `make logs` or `docker compose -f infra/docker-compose.yml logs backend`. Usually it's waiting on `ollama-pull` to finish the model download |
 | Port already in use (8010 / 9000 / 18889) | Find the owner: `ss -tlnp \| grep :<port>` — stop it or change the host port in `infra/docker-compose.yml` |
 | `address already in use` on 11434 | A native Ollama is running. This stack does not publish 11434, so a native Ollama is harmless — but stop it with `pkill ollama` if you want the container to own the GPU |
 | Docker OOM — container killed | Raise Docker Desktop memory: Settings → Resources → Memory (12 GB recommended for the 14b model) |

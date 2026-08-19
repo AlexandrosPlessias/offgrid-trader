@@ -4,9 +4,32 @@ System design for **MarketSage** — a local, zero-cost AI stock monitor.
 
 ---
 
-## Pipeline
+## Agent pipeline
 
-Every analysis (scheduled or ad-hoc) flows through the same steps:
+Every analysis (scheduled or on-demand) runs through the **TickerAgent**. The agent executes five sequential skills; critical skills that fail stop the pipeline early, non-critical ones are skipped and logged.
+
+```mermaid
+flowchart TD
+    subgraph Orchestrator
+        direction TB
+        O[Orchestrator\nstaleness priority\nasyncio.Semaphore cap=3]
+    end
+
+    subgraph TickerAgent
+        direction LR
+        M[MemoryLayer\nload prior context\nticker_memory DB] --> F
+        F[FetchDataSkill\ncritical · retries=2] --> A
+        A[AIAnalysisSkill\ncritical · retries=2\nexp back-off on OllamaError] --> D
+        D[OpportunityDetectSkill\nnon-critical] --> P
+        P[PersistSkill\nnon-critical] --> AL
+        AL[AlertSkill\nnon-critical]
+        AL --> MU[MemoryLayer\nupdate ticker_memory]
+    end
+
+    O -->|bounded slot| TickerAgent
+```
+
+### Data flow per skill
 
 ```mermaid
 flowchart LR
@@ -16,32 +39,52 @@ flowchart LR
     A --> E2[FRED CSV\nFed rate · CPI\nunemployment\nyield curve]
     A --> E3[multpl.com\nShiller CAPE]
     A --> F2[Finnhub\nnews headlines\noptional]
-    B & D & E2 & E3 & F2 --> E[Prompt builder\nassembles market dict]
+    B & D & E2 & E3 & F2 --> E[Prompt builder\n+ PRIOR CONTEXT\nfrom MemoryLayer]
     E --> F[Local Ollama\nllm.chat OTEL span\nqwen2.5:14b]
     F --> G[AI JSON\ntrend · signals · confidence\nentry · stop · target]
-    D & G --> H[Rule-based detection\n4 checks]
+    D & G --> H[Rule-based detection\n5 checks]
     H --> I[Confidence scoring\nmerge + filter]
-    I --> J[SQLite\nanalysis_log · signals\nBS + macro cache]
+    I --> J[SQLite\nanalysis_log · signals\nBS + macro + memory cache]
     I --> K[Alert dispatch\nemail · Telegram]
     F --> L[Aspire OTEL\ntokens · TTFT · latency]
 ```
 
-### Steps in detail
+### Skill reference
 
 ![Explorer — Pipeline walkthrough section showing each step with timing badges](../screenshots/explorer-01-pipeline.png)
 
-| Step | Module | What happens |
-|---|---|---|
-| 1. Fetch price | `backend/data.py` — `fetch_yfinance()` | OHLCV, fundamentals (P/E trailing + forward, market cap, sector), 20-day averages — OTEL span: `data.fetch_price_fundamentals` |
-| 2. Indicators | `backend/data.py` — `compute_indicators()` | Downloads OHLCV (1y@1h, 2y@1d), resamples to 4H, computes RSI/MACD/EMA/BB/Stoch via `ta` library — OTEL span: `data.compute_indicators` |
-| 3. Balance sheet | `backend/data.py` — `fetch_balance_sheet()` | Annual balance sheet from yfinance (assets/liabilities/equity/debt/cash/D:E); daily DB cache per ticker — OTEL span: `data.fetch_balance_sheet` |
-| 4. Macro | `backend/data.py` — `fetch_fred_macro()` | FEDFUNDS/CPI YoY/UNRATE/T10Y2Y from FRED key-free CSV; Shiller CAPE from multpl.com; global 6h DB cache — OTEL span: `data.fetch_macro` |
-| 5. News | `backend/data.py` — `fetch_finnhub_news()` | Optional: last 7 days of headlines (requires `FINNHUB_API_KEY`) — returns `List[Dict]` with source/url/date — OTEL span: `data.fetch_news` |
-| 6. Prompt | `backend/analysis.py` — `build_prompt()` | All indicator data + balance sheet + macro + P/E + news assembled into structured prompt |
-| 7. AI | `backend/analysis.py` — `call_ollama()` | Prompt sent to Ollama `/api/chat`; response parsed from JSON — OTEL span: `llm.chat` (token counts, TTFT, latency from Ollama response body) |
-| 8. Detect | `backend/opportunities.py` — `detect_opportunities()` | 5 rule-based checks run on market data + AI output; candidates merged, then post-merge macro regime confidence filter applied |
-| 9. Persist | `backend/database.py` | `save_analysis()` stores full analysis log; `save_signal()` stores each actionable signal |
-| 10. Alert | `backend/alerts.py` | Confidence-gated dispatch to email (Gmail SMTP) and Telegram bot |
+| Skill | Module | Critical | Retries | What happens |
+|---|---|---|---|---|
+| **FetchDataSkill** | `backend/skills/fetch_data.py` | ✅ | 2 (3s base) | Calls `get_market_data()` — yfinance price/fundamentals + ta indicators + balance sheet + macro + news; OTEL spans |
+| **AIAnalysisSkill** | `backend/skills/ai_analysis.py` | ✅ | 2 (2s base) | Calls `analyze(market_data, memory=...)` — builds prompt with PRIOR CONTEXT section if memory available, sends to Ollama, parses JSON; retries on `OllamaError` with exponential back-off |
+| **OpportunityDetectSkill** | `backend/skills/opportunity_detect.py` | ❌ | 0 | `detect_opportunities()` + `filter_by_confidence()` — 5 rule checks + macro regime filter |
+| **PersistSkill** | `backend/skills/persist.py` | ❌ | 0 | `save_analysis()` + `save_signal()` per actionable opportunity; each DB write individually guarded |
+| **AlertSkill** | `backend/skills/alert.py` | ❌ | 0 | `send_alert()` per actionable opportunity; respects `send_alerts` flag |
+
+### Retry back-off
+
+`can_retry` skills retry up to `max_retries` extra attempts. Delay between attempts:
+
+```
+delay = retry_delay_base × 2^(attempt − 1)
+```
+
+e.g. `AIAnalysisSkill` (base=2s): attempt 1 → 2s wait, attempt 2 → 4s wait.
+
+A `type:"retry"` SSE event is emitted before each retry so the UI can show progress.
+
+### Memory (prior context)
+
+After every agent run the **MemoryLayer** writes a row to `ticker_memory` (DB UPSERT). On the next run it injects a `PRIOR CONTEXT` block into the AI prompt:
+
+```
+PRIOR CONTEXT (from last scan 4h ago):
+  Last signal: LONG, confidence 72
+  RSI oversold streak: 2 consecutive scans
+  Price since last scan: −1.4%
+```
+
+Memory expires after 48 hours (rows older than TTL are ignored). The `type:"memory"` SSE event is emitted when prior context is loaded.
 
 ---
 
@@ -79,26 +122,42 @@ Adjustments are bounded to 0–100. Only signals at or above `CONFIDENCE_FLOOR` 
 
 ## SSE streaming
 
-The `POST /analyze/stream` endpoint exposes the same pipeline as an async SSE stream.
+The `POST /analyze/stream` endpoint runs the full **TickerAgent** and streams events as they are emitted.
 
 ```
-Client                                  Backend
-  |                                        |
-  |-- POST /analyze/stream --------------->|
-  |                                        |-- fetch_yfinance()
-  |<-- data: {step:fetch, status:running} -|
-  |                                        |   (completes)
-  |<-- data: {step:fetch, status:done}  ---|
-  |                                        |-- call_ollama()
-  |<-- data: {step:analyze,status:running}-|
-  |                                        |   (completes ~14s)
-  |<-- data: {step:analyze, status:done} --|
-  |                                        |-- detect_opportunities()
-  |<-- data: {step:detect, status:running}-|
-  |<-- data: {step:detect, status:done}  --|
-  |                                        |-- save_analysis() + save_signal()
-  |<-- data: {type:result, ...full payload}|
+Client                                     Backend
+  |                                           |
+  |-- POST /analyze/stream ------------------>|
+  |                                           |  MemoryLayer.load()
+  |<-- data: {type:"memory", ticker, context}-|     (if prior context found)
+  |                                           |  FetchDataSkill.run()
+  |<-- data: {type:"step", step:"fetch",      |
+  |            status:"running"}          ----|
+  |<-- data: {type:"step", step:"fetch",      |
+  |            status:"done", elapsed_ms} ----|
+  |                                           |  AIAnalysisSkill.run()  (may retry)
+  |<-- data: {type:"step", step:"analyze",    |
+  |            status:"running"}          ----|
+  |<-- data: {type:"retry", skill:"ai_analysis",   (if Ollama timeout)
+  |            attempt:1, delay_s:2}      ----|
+  |<-- data: {type:"step", step:"analyze",    |
+  |            status:"done", elapsed_ms} ----|
+  |<-- data: {type:"step", step:"detect", ...}-|
+  |<-- data: {type:"step", step:"persist", ...}-|
+  |<-- data: {type:"step", step:"alert",  ...}-|
+  |<-- data: {type:"result", ticker, analysis, |
+  |            opportunities, actionable,  ...}|
 ```
+
+### Event types
+
+| `type` | When emitted | Key fields |
+|---|---|---|
+| `step` | Before and after each skill | `step`, `status` (`running`/`done`/`error`), `elapsed_ms` |
+| `retry` | Before a skill retry sleep | `skill`, `attempt`, `delay_s` |
+| `memory` | After loading prior context | `ticker`, `context` (last signal, RSI streak, price trend) |
+| `skill_error` | Non-critical skill failed | `skill`, `error` |
+| `result` | After all skills complete | Full payload: `ticker`, `analysis`, `opportunities`, `actionable`, `elapsed_s` |
 
 nginx must have `proxy_buffering off` on the `/api/` location block — without this,
 nginx buffers the response and the client sees nothing until the stream ends.
@@ -106,6 +165,17 @@ nginx buffers the response and the client sees nothing until the stream ends.
 ---
 
 ## Docker services
+
+All Docker files live in [`infra/`](https://github.com/AlexandrosPlessias/offgrid-trader/tree/main/infra). Use the `Makefile` at the project root:
+
+```bash
+make infra    # start shared Ollama + Portainer (auto-detects GPU)
+make build    # build and start the MarketSage stack
+make up       # start without rebuilding
+make down     # stop the MarketSage stack
+make logs     # follow backend + frontend logs
+make smoke    # run smoke tests inside the backend container
+```
 
 ```
 ┌─────────────────── ai-shared network ──────────────────────┐
@@ -136,7 +206,7 @@ nginx buffers the response and the client sees nothing until the stream ends.
 
 Both networks connect to `ollama` — the backend talks to it at `http://ollama:11434`.
 
-### Shared infrastructure (`docker-compose.infra.yml`)
+### Shared infrastructure (`infra/docker-compose.infra.yml`)
 
 | Service | Purpose | Port |
 |---|---|---|
@@ -144,7 +214,7 @@ Both networks connect to `ollama` — the backend talks to it at `http://ollama:
 | `portainer` | Container management UI | 9000 |
 | `ollama-pull` | One-shot model download on first run | — |
 
-### App stack (`docker-compose.yml`)
+### App stack (`infra/docker-compose.yml`)
 
 | Service | Purpose | Port |
 |---|---|---|
@@ -158,12 +228,40 @@ Both networks connect to `ollama` — the backend talks to it at `http://ollama:
 
 | What | Path | Notes |
 |---|---|---|
-| Signals + analysis log | `./data/offgrid_trader.db` | SQLite; bind-mounted; survives `docker compose down` |
-| App settings (watchlist overrides, alerts toggle, Ollama overrides) | same DB, `app_settings` table | Key-value store; runtime-mutable without restart |
+| Signals | `./data/offgrid_trader.db` — `signals` table | SQLite; bind-mounted; survives `make down` |
+| Analysis log | same DB, `analysis_log` table | Columns: `analysis_json`, `market_snapshot`, `opportunities_json` (all rule-based scores), `actionable_json` (above-floor scores). Old rows have `NULL` for the opportunities columns. |
+| App settings | same DB, `app_settings` table | Key-value; runtime-mutable without restart (scheduler state, alerts toggle, Ollama overrides) |
 | Balance sheet cache | same DB, `app_settings` table | Key `bs_cache:{ticker}`; refreshed daily |
 | Macro cache | same DB, `app_settings` table | Key `macro_cache`; refreshed every 6 hours; global (shared across all tickers) |
+| **Ticker memory** | same DB, **`ticker_memory` table** | One row per ticker (`TEXT PRIMARY KEY`); columns: `last_scan`, `last_signal`, `last_confidence`, `consecutive_oversold`, `consecutive_overbought`, `last_price`, `price_trend_pct`; UPSERT on every agent run; expires after 48 hours |
 | Ollama model weights | `ollama_models` Docker volume | Shared with other AI projects; never re-downloaded |
 | Portainer config | `portainer_data` Docker volume | Shared |
+
+---
+
+## Observability
+
+Every analysis run is fully traced and metered. See [observability.md](observability.md) for the complete span hierarchy and Aspire usage guide.
+
+### OTEL spans
+
+| Span | Scope | Key attributes |
+|---|---|---|
+| `agent.run` | One per `TickerAgent.run()` call | `ticker`, `skills.count`, `agent.success`, `agent.actionable`, `agent.elapsed_ms`, `agent.errors` |
+| `skill.<name>` | One per skill attempt (e.g. `skill.ai_analysis`) | `skill.name`, `skill.critical`, `skill.can_retry`, `ticker`, `skill.attempt`, `skill.elapsed_ms`, `skill.success`, `skill.error` |
+| `data.fetch_*`, `llm.chat` | Inside `FetchDataSkill` / `AIAnalysisSkill` | See [observability.md](observability.md) |
+
+### OTEL metric instruments (`marketsage.agent` meter)
+
+| Instrument | Type | Dimensions | What it measures |
+|---|---|---|---|
+| `marketsage.agent.runs` | Counter | `ticker`, `success` | Completed pipeline runs |
+| `marketsage.agent.duration` | Histogram | `ticker`, `success` | Total pipeline wall-clock time (ms) |
+| `marketsage.skill.calls` | Counter | `skill`, `success`, `attempt` | Individual skill executions (each retry is a separate call) |
+| `marketsage.skill.duration` | Histogram | `skill`, `success` | Per-skill wall-clock time (ms) |
+| `marketsage.skill.retries` | Counter | `skill`, `ticker` | Retry events triggered by transient failures |
+
+All instruments are visible in Aspire's **Metrics** tab at http://localhost:18889.
 
 ---
 
