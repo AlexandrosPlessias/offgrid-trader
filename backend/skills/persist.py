@@ -26,12 +26,18 @@ class PersistSkill(Skill):
         saved_ids: list[int] = []
         errors: list[str] = []
 
-        # Persist analysis log.
+        # Persist analysis log (include full opportunity list so history can replay scores).
         if ctx.analysis and ctx.market_data:
             try:
-                save_analysis(ctx.ticker, ctx.analysis, ctx.market_data)
+                save_analysis(
+                    ctx.ticker,
+                    ctx.analysis,
+                    ctx.market_data,
+                    opportunities=ctx.opportunities or [],
+                    actionable=ctx.actionable or [],
+                )
                 _log.debug("persist: saved analysis for %s", ctx.ticker)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _log.exception("persist: save_analysis failed for %s", ctx.ticker)
                 errors.append("save_analysis failed — check server logs")
 
@@ -41,7 +47,7 @@ class PersistSkill(Skill):
                 signal_id = save_signal(opp)
                 saved_ids.append(signal_id)
                 _log.debug("persist: saved signal %d for %s", signal_id, ctx.ticker)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _log.exception("persist: save_signal failed for %s", ctx.ticker)
                 errors.append("save_signal failed — check server logs")
 

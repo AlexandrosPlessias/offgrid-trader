@@ -32,10 +32,8 @@ class FetchDataSkill(Skill):
             market_data = get_market_data(ctx.ticker)
             ctx.market_data = market_data
             errors = market_data.get("errors") or []
-            _log.info(
-                "fetch_data ◀ %s — %d source error(s)", ctx.ticker, len(errors)
-            )
+            _log.info("fetch_data ◀ %s — %d source error(s)", ctx.ticker, len(errors))
             return SkillResult(success=True, data=market_data)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _log.exception("fetch_data failed for %s", ctx.ticker)
             return SkillResult(success=False, error=str(exc))

@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .config import MarketHours, get_settings
 from .database import get_effective_watchlist, get_setting, init_db
@@ -37,8 +37,8 @@ _orchestrator: Orchestrator = Orchestrator(memory=_memory, max_concurrent=3)
 # Market-hours helpers
 # --------------------------------------------------------------------------- #
 def is_market_open(
-    now: Optional[datetime] = None,
-    hours: Optional[MarketHours] = None,
+    now: datetime | None = None,
+    hours: MarketHours | None = None,
 ) -> bool:
     """Return True if *now* falls within the regular US trading session."""
 
@@ -65,7 +65,7 @@ async def scan_ticker_async(
     ticker: str,
     *,
     send_alerts: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Run the full agent pipeline for one ticker and return a result dict.
 
     Delegates to :meth:`Orchestrator.run_ticker` which uses the module-level
@@ -75,7 +75,7 @@ async def scan_ticker_async(
     return await _orchestrator.run_ticker(ticker, send_alerts=send_alerts)
 
 
-async def scan_watchlist(*, send_alerts: bool = True) -> List[Dict[str, Any]]:
+async def scan_watchlist(*, send_alerts: bool = True) -> list[dict[str, Any]]:
     """Scan every ticker in the effective watchlist via the Orchestrator.
 
     Tickers are sorted by scan staleness and run concurrently up to the
@@ -88,7 +88,7 @@ async def scan_watchlist(*, send_alerts: bool = True) -> List[Dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # Backward-compatible sync wrapper (kept for tests / __main__ use)
 # --------------------------------------------------------------------------- #
-def scan_ticker(ticker: str, *, send_alerts: bool = True) -> Dict[str, Any]:
+def scan_ticker(ticker: str, *, send_alerts: bool = True) -> dict[str, Any]:
     """Synchronous wrapper around :func:`scan_ticker_async`.
 
     Preserved for backward compatibility with any callers that cannot easily
@@ -106,9 +106,9 @@ class MonitorScheduler:
     """Owns the background scan loop lifecycle."""
 
     def __init__(self) -> None:
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
-        self.last_run: Optional[str] = None
+        self.last_run: str | None = None
         self.running = False
 
     async def _loop(self) -> None:
@@ -123,9 +123,7 @@ class MonitorScheduler:
                     _log.info("market open — scanning %d tickers", len(tickers))
                     try:
                         results = await scan_watchlist(send_alerts=True)
-                        self.last_run = datetime.now(
-                            settings.market_hours.tzinfo
-                        ).isoformat()
+                        self.last_run = datetime.now(settings.market_hours.tzinfo).isoformat()
                         total = sum(len(r.get("actionable", [])) for r in results)
                         _log.info("scan complete — %d actionable signal(s)", total)
                     except Exception as exc:  # pragma: no cover - defensive
@@ -141,12 +139,11 @@ class MonitorScheduler:
                         int(db_interval)
                         if db_interval and db_interval.isdigit()
                         else settings.scan_interval_minutes
-                    ) * 60,
+                    )
+                    * 60,
                 )
                 try:
-                    await asyncio.wait_for(
-                        self._stop.wait(), timeout=interval_seconds
-                    )
+                    await asyncio.wait_for(self._stop.wait(), timeout=interval_seconds)
                 except asyncio.TimeoutError:
                     pass
         finally:
@@ -169,7 +166,7 @@ class MonitorScheduler:
             except asyncio.CancelledError:  # pragma: no cover
                 pass
 
-    def status(self) -> Dict[str, Any]:
+    def status(self) -> dict[str, Any]:
         settings = get_settings()
         db_interval = get_setting("scan_interval_minutes", "")
         effective_interval = (

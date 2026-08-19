@@ -39,8 +39,7 @@ class AIAnalysisSkill(Skill):
                 # Treat connection/timeout OllamaErrors as retryable.
                 err = analysis["error"]
                 retryable = any(
-                    kw in err.lower()
-                    for kw in ("cannot reach", "timed out", "connection")
+                    kw in err.lower() for kw in ("cannot reach", "timed out", "connection")
                 )
                 if retryable:
                     raise OllamaError(err)
@@ -55,6 +54,6 @@ class AIAnalysisSkill(Skill):
         except OllamaError as exc:
             _log.warning("ai_analysis transient error for %s: %s", ctx.ticker, exc)
             return SkillResult(success=False, error=str(exc))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _log.exception("ai_analysis unexpected error for %s", ctx.ticker)
             return SkillResult(success=False, error=str(exc))

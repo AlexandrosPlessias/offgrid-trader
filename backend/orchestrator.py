@@ -27,12 +27,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from backend.memory import MemoryLayer
 
 _log = logging.getLogger(__name__)
 
 
-def _age_hours(last_scan_iso: Optional[str]) -> float:
+def _age_hours(last_scan_iso: str | None) -> float:
     """Return hours since *last_scan_iso*, or ∞ if absent/unparseable."""
     if not last_scan_iso:
         return float("inf")
@@ -54,7 +57,7 @@ class Orchestrator:
                         balances throughput with Ollama VRAM pressure.
     """
 
-    def __init__(self, *, memory: "backend.memory.MemoryLayer", max_concurrent: int = 3) -> None:  # type: ignore[name-defined]
+    def __init__(self, *, memory: "MemoryLayer", max_concurrent: int = 3) -> None:
         self._memory = memory
         self._sem = asyncio.Semaphore(max_concurrent)
 
@@ -69,10 +72,10 @@ class Orchestrator:
 
     async def scan_watchlist(
         self,
-        tickers: List[str],
+        tickers: list[str],
         *,
         send_alerts: bool = True,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Scan all *tickers*, stalest first, with concurrency limited by semaphore.
 
         Returns a list of result dicts in the order tickers completed
@@ -87,8 +90,8 @@ class Orchestrator:
         tasks = [self._run_bounded(t, send_alerts=send_alerts) for t in ordered]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        out: List[Dict[str, Any]] = []
-        for ticker, res in zip(ordered, results):
+        out: list[dict[str, Any]] = []
+        for ticker, res in zip(ordered, results, strict=True):
             if isinstance(res, Exception):
                 _log.error("orchestrator: unhandled error for %s: %s", ticker, res)
                 out.append({"ticker": ticker, "errors": [str(res)]})
@@ -101,7 +104,7 @@ class Orchestrator:
         ticker: str,
         *,
         send_alerts: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Run a single ticker through the agent pipeline.
 
         Convenience wrapper used by the SSE endpoint and ``POST /analyze``.
@@ -110,24 +113,18 @@ class Orchestrator:
         """
         from backend.agent import TickerAgent
 
-        result = await TickerAgent(
-            ticker, memory=self._memory, send_alerts=send_alerts
-        ).run()
+        result = await TickerAgent(ticker, memory=self._memory, send_alerts=send_alerts).run()
         return result.to_dict()
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    async def _run_bounded(self, ticker: str, *, send_alerts: bool) -> Dict[str, Any]:
+    async def _run_bounded(self, ticker: str, *, send_alerts: bool) -> dict[str, Any]:
         """Acquire the semaphore then run the agent."""
         from backend.agent import TickerAgent
 
         async with self._sem:
             _log.debug("orchestrator: slot acquired for %s", ticker)
-            result = await TickerAgent(
-                ticker, memory=self._memory, send_alerts=send_alerts
-            ).run()
+            result = await TickerAgent(ticker, memory=self._memory, send_alerts=send_alerts).run()
             return result.to_dict()
-
-

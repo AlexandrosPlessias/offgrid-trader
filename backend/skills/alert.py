@@ -38,7 +38,7 @@ class AlertSkill(Skill):
                     ctx.ticker,
                     result.get("channels"),
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _log.exception("alert: send_alert failed for %s", ctx.ticker)
                 errors.append("send_alert failed — check server logs")
 

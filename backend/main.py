@@ -26,9 +26,10 @@ import asyncio
 import json
 import logging
 import os
-import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict, Optional
+from datetime import date, datetime
+from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,8 +41,14 @@ from .config import get_settings
 from .data import get_market_data as _get_market_data
 from .database import (
     clear_all_data as _clear_all_data,
+)
+from .database import (
     delete_analysis as _delete_analysis,
+)
+from .database import (
     delete_signal as _delete_signal_row,
+)
+from .database import (
     get_analysis_history,
     get_effective_watchlist,
     get_recent_analyses,
@@ -51,6 +58,8 @@ from .database import (
     set_setting,
 )
 from .scheduler import scan_ticker_async, scheduler
+
+_log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -86,18 +95,14 @@ def _setup_otel(app: FastAPI) -> None:
         resource = Resource({SERVICE_NAME: "offgrid-trader"})
 
         tracer = TracerProvider(resource=resource)
-        tracer.add_span_processor(
-            BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
-        )
+        tracer.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
         trace.set_tracer_provider(tracer)
 
         metrics.set_meter_provider(
             MeterProvider(
                 resource=resource,
                 metric_readers=[
-                    PeriodicExportingMetricReader(
-                        OTLPMetricExporter(endpoint=endpoint)
-                    )
+                    PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=endpoint))
                 ],
             )
         )
@@ -113,9 +118,7 @@ def _setup_otel(app: FastAPI) -> None:
 
         logging.getLogger().setLevel(logging.INFO)
 
-        FastAPIInstrumentor.instrument_app(
-            app, excluded_urls="health"
-        )
+        FastAPIInstrumentor.instrument_app(app, excluded_urls="health")
         RequestsInstrumentor().instrument()
         logging.getLogger(__name__).info("telemetry → %s", endpoint)
     except ImportError:
@@ -127,9 +130,7 @@ def _setup_otel(app: FastAPI) -> None:
 # --------------------------------------------------------------------------- #
 class AnalyzeRequest(BaseModel):
     ticker: str = Field(..., description="Ticker symbol, e.g. AAPL")
-    send_alerts: bool = Field(
-        False, description="Also dispatch alerts for actionable signals"
-    )
+    send_alerts: bool = Field(False, description="Also dispatch alerts for actionable signals")
 
 
 class AddTickerRequest(BaseModel):
@@ -141,10 +142,9 @@ class AlertsSettingRequest(BaseModel):
 
 
 class OllamaSettingRequest(BaseModel):
-    model: Optional[str] = Field(None, description="Ollama model tag, e.g. qwen2.5:7b")
-    timeout: Optional[int] = Field(
-        None, ge=10, le=3600,
-        description="Request timeout in seconds (10–3600)"
+    model: str | None = Field(None, description="Ollama model tag, e.g. qwen2.5:7b")
+    timeout: int | None = Field(
+        None, ge=10, le=3600, description="Request timeout in seconds (10–3600)"  # noqa: RUF001
     )
 
 
@@ -153,7 +153,7 @@ class SchedulerSettingRequest(BaseModel):
 
 
 class ScanIntervalRequest(BaseModel):
-    minutes: int = Field(..., ge=1, le=1440, description="Scan interval in minutes (1–1440)")
+    minutes: int = Field(..., ge=1, le=1440, description="Scan interval in minutes (1-1440)")
 
 
 class TradingViewWebhook(BaseModel):
@@ -163,13 +163,13 @@ class TradingViewWebhook(BaseModel):
     ``symbol``) is required; everything else is captured for logging.
     """
 
-    ticker: Optional[str] = None
-    symbol: Optional[str] = None
-    action: Optional[str] = None
-    price: Optional[float] = None
-    message: Optional[str] = None
+    ticker: str | None = None
+    symbol: str | None = None
+    action: str | None = None
+    price: float | None = None
+    message: str | None = None
 
-    def resolved_ticker(self) -> Optional[str]:
+    def resolved_ticker(self) -> str | None:
         value = self.ticker or self.symbol
         return value.strip().upper() if value else None
 
@@ -232,7 +232,7 @@ def _background_analyze(ticker: str, send_alerts: bool = True) -> None:
 # Endpoints
 # --------------------------------------------------------------------------- #
 @app.get("/health")
-def health() -> Dict[str, Any]:
+def health() -> dict[str, Any]:
     settings = get_settings()
     db_model = get_setting("ollama_model", "")
     return {
@@ -254,7 +254,7 @@ def _alerts_enabled() -> bool:
 
 
 @app.get("/watchlist")
-def watchlist() -> Dict[str, Any]:
+def watchlist() -> dict[str, Any]:
     settings = get_settings()
     return {
         "watchlist": get_effective_watchlist(),
@@ -265,7 +265,7 @@ def watchlist() -> Dict[str, Any]:
 
 
 @app.post("/watchlist")
-def add_ticker(request: AddTickerRequest) -> Dict[str, Any]:
+def add_ticker(request: AddTickerRequest) -> dict[str, Any]:
     ticker = request.ticker.strip().upper()
     if not ticker:
         raise HTTPException(status_code=400, detail="ticker required")
@@ -286,7 +286,7 @@ def add_ticker(request: AddTickerRequest) -> Dict[str, Any]:
 
 
 @app.delete("/watchlist/{ticker}")
-def remove_ticker(ticker: str) -> Dict[str, Any]:
+def remove_ticker(ticker: str) -> dict[str, Any]:
     ticker = ticker.strip().upper()
 
     added: list = json.loads(get_setting("watchlist_added", "[]"))
@@ -304,13 +304,13 @@ def remove_ticker(ticker: str) -> Dict[str, Any]:
 
 
 @app.post("/settings/alerts")
-def set_alerts(request: AlertsSettingRequest) -> Dict[str, Any]:
+def set_alerts(request: AlertsSettingRequest) -> dict[str, Any]:
     set_setting("alerts_enabled", "true" if request.enabled else "false")
     return {"alerts_enabled": request.enabled}
 
 
 @app.post("/settings/scheduler")
-async def set_scheduler(request: SchedulerSettingRequest) -> Dict[str, Any]:
+async def set_scheduler(request: SchedulerSettingRequest) -> dict[str, Any]:
     """Start or stop the background scheduler at runtime.
 
     State is persisted to the DB so it survives container restarts.
@@ -324,54 +324,53 @@ async def set_scheduler(request: SchedulerSettingRequest) -> Dict[str, Any]:
 
 
 @app.post("/settings/scan-interval")
-def set_scan_interval(request: ScanIntervalRequest) -> Dict[str, Any]:
+def set_scan_interval(request: ScanIntervalRequest) -> dict[str, Any]:
     """Update the scan interval (persisted to DB; takes effect on next loop cycle)."""
     set_setting("scan_interval_minutes", str(request.minutes))
     return scheduler.status()
 
 
 @app.get("/settings")
-def get_all_settings() -> Dict[str, Any]:
+def get_all_settings() -> dict[str, Any]:
     """Return current effective settings (env defaults overridden by DB values)."""
     cfg = get_settings()
-    db_model   = get_setting("ollama_model",   "")
+    db_model = get_setting("ollama_model", "")
     db_timeout = get_setting("ollama_timeout", "")
     return {
-        "ollama_model":         db_model   or cfg.ollama.model,
-        "ollama_timeout":       int(db_timeout) if db_timeout else cfg.ollama.timeout,
-        "alerts_enabled":       _alerts_enabled(),
-        "env_model":            cfg.ollama.model,
-        "env_timeout":          cfg.ollama.timeout,
+        "ollama_model": db_model or cfg.ollama.model,
+        "ollama_timeout": int(db_timeout) if db_timeout else cfg.ollama.timeout,
+        "alerts_enabled": _alerts_enabled(),
+        "env_model": cfg.ollama.model,
+        "env_timeout": cfg.ollama.timeout,
         "scan_interval_minutes": scheduler.status()["scan_interval_minutes"],
-        "scheduler_running":    scheduler.status()["running"],
+        "scheduler_running": scheduler.status()["running"],
     }
 
 
 @app.post("/settings/ollama")
-def set_ollama_settings(request: OllamaSettingRequest) -> Dict[str, Any]:
+def set_ollama_settings(request: OllamaSettingRequest) -> dict[str, Any]:
     """Persist Ollama model and/or timeout to the DB (no restart required)."""
     cfg = get_settings()
     if request.model is not None:
         set_setting("ollama_model", request.model)
     if request.timeout is not None:
         set_setting("ollama_timeout", str(request.timeout))
-    db_model   = get_setting("ollama_model",   "")
+    db_model = get_setting("ollama_model", "")
     db_timeout = get_setting("ollama_timeout", "")
     return {
-        "ollama_model":   db_model   or cfg.ollama.model,
+        "ollama_model": db_model or cfg.ollama.model,
         "ollama_timeout": int(db_timeout) if db_timeout else cfg.ollama.timeout,
     }
 
 
 @app.get("/settings/models")
-def list_ollama_models() -> Dict[str, Any]:
+def list_ollama_models() -> dict[str, Any]:
     """Return models currently pulled in the local Ollama instance."""
     import requests as _req
+
     cfg = get_settings()
     try:
-        resp = _req.get(
-            f"{cfg.ollama.host}/api/tags", timeout=5
-        )
+        resp = _req.get(f"{cfg.ollama.host}/api/tags", timeout=5)
         resp.raise_for_status()
         models = [m["name"] for m in resp.json().get("models", [])]
     except Exception as exc:
@@ -381,7 +380,7 @@ def list_ollama_models() -> Dict[str, Any]:
 
 
 @app.post("/analyze")
-async def analyze_ticker(request: AnalyzeRequest) -> Dict[str, Any]:
+async def analyze_ticker(request: AnalyzeRequest) -> dict[str, Any]:
     """On-demand analysis for a single ticker."""
     ticker = request.ticker.strip().upper()
     if not ticker:
@@ -400,7 +399,7 @@ async def analyze_ticker(request: AnalyzeRequest) -> Dict[str, Any]:
 
 
 @app.post("/analyze/stream")
-async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
+async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:  # noqa: C901
     """On-demand analysis streamed as Server-Sent Events.
 
     Yields ``data: <json>`` lines for each pipeline step, then a final
@@ -411,28 +410,16 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
     if not ticker:
         raise HTTPException(status_code=400, detail="ticker is required")
 
-    settings = get_settings()
     # Capture before entering generator (request not in scope inside async gen)
     send_alerts = request.send_alerts
 
-    async def _event(payload: Dict[str, Any]) -> str:
+    async def _event(payload: dict[str, Any]) -> str:
         return f"data: {json.dumps(payload)}\n\n"
 
     async def _stream_body() -> AsyncGenerator[str, None]:
         from backend.agent import TickerAgent
         from backend.scheduler import _memory
 
-        agent = TickerAgent(ticker, memory=_memory, send_alerts=send_alerts)
-
-        # Run skill by skill, draining ctx.events after each one completes.
-        # We run the whole agent in one shot and stream its accumulated events,
-        # because asyncio.to_thread cannot yield mid-execution. The agent
-        # collects all events in ctx.events; we forward them here.
-        result = await agent.run()
-        ctx = result.context
-
-        # Forward every event the agent emitted, translating skill names to
-        # the step names the frontend already understands.
         _SKILL_TO_STEP = {
             "fetch_data": "fetch",
             "ai_analysis": "analyze",
@@ -440,18 +427,33 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
             "persist": "persist",
             "alert": "alert",
         }
-        for ev in ctx.events:
-            ev_type = ev.get("type")
-            if ev_type == "step":
-                step = _SKILL_TO_STEP.get(ev.get("step", ""), ev.get("step", ""))
-                out = dict(ev)
-                out["step"] = step
-                yield await _event(out)
-            elif ev_type in ("retry", "memory", "skill_error"):
-                yield await _event(ev)
-            # agent_start events are internal — skip
 
-        # ── Final result ───────────────────────────────────────────────────
+        queue: asyncio.Queue = asyncio.Queue()
+        agent = TickerAgent(ticker, memory=_memory, send_alerts=send_alerts)
+
+        # Run the agent as a background task that pushes events to the queue
+        # as each skill starts and finishes — true real-time streaming.
+        task = asyncio.create_task(agent.run(event_queue=queue))
+
+        try:
+            while True:
+                ev = await queue.get()
+                if ev is None:  # sentinel — agent finished
+                    break
+                ev_type = ev.get("type")
+                if ev_type == "step":
+                    out = dict(ev)
+                    out["step"] = _SKILL_TO_STEP.get(ev.get("step", ""), ev.get("step", ""))
+                    yield await _event(out)
+                elif ev_type in ("retry", "memory", "skill_error"):
+                    yield await _event(ev)
+        except Exception:
+            task.cancel()
+            raise
+
+        # Await the completed task and emit the final result.
+        result = await task
+        ctx = result.context
         yield await _event(
             {
                 "type": "result",
@@ -474,10 +476,12 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
                 yield chunk
         except Exception:
             _log.exception("unhandled error in SSE stream for %s", ticker)
-            yield await _event({
-                "type": "error",
-                "msg": "An internal error occurred. Check server logs.",
-            })
+            yield await _event(
+                {
+                    "type": "error",
+                    "msg": "An internal error occurred. Check server logs.",
+                }
+            )
 
     return StreamingResponse(
         _stream(),
@@ -490,7 +494,7 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
 
 
 @app.get("/market-data/{ticker}")
-async def market_data(ticker: str) -> Dict[str, Any]:
+async def market_data(ticker: str) -> dict[str, Any]:
     """Return the raw market data dict for *ticker* (price, fundamentals, indicators)."""
     ticker = ticker.strip().upper()
     if not ticker:
@@ -504,7 +508,7 @@ async def market_data_history(
     ticker: str,
     period: str = Query("3mo", description="yfinance period, e.g. 1mo 3mo 6mo 1y"),
     interval: str = Query("1d", description="yfinance interval, e.g. 1d 1wk"),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Return OHLCV history for *ticker* from yfinance.
 
     Each entry: ``{date, open, high, low, close, volume}``.
@@ -524,10 +528,14 @@ async def market_data_history(
         rows = []
         prev_close = None
         for ts, row in hist.iterrows():
+            if isinstance(ts, (datetime, date)):
+                date_str = ts.strftime("%Y-%m-%d")
+            else:
+                date_str = str(ts)
             close = float(row["Close"]) if row["Close"] == row["Close"] else None
             rows.append(
                 {
-                    "date": ts.strftime("%Y-%m-%d"),
+                    "date": date_str,
                     "open": float(row["Open"]) if row["Open"] == row["Open"] else None,
                     "high": float(row["High"]) if row["High"] == row["High"] else None,
                     "low": float(row["Low"]) if row["Low"] == row["Low"] else None,
@@ -541,9 +549,11 @@ async def market_data_history(
 
     try:
         rows = await asyncio.to_thread(_fetch)
-    except Exception:
+    except Exception as exc:
         _log.exception("candles fetch failed for %s", ticker)
-        raise HTTPException(status_code=502, detail="Failed to fetch candle data — check server logs")
+        raise HTTPException(
+            status_code=502, detail="Failed to fetch candle data — check server logs"
+        ) from exc
 
     return {"ticker": ticker, "period": period, "interval": interval, "candles": rows}
 
@@ -552,7 +562,7 @@ async def market_data_history(
 async def tradingview_webhook(
     payload: TradingViewWebhook,
     background_tasks: BackgroundTasks,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Receive a TradingView Pro alert and trigger background analysis."""
     ticker = payload.resolved_ticker()
     if not ticker:
@@ -572,47 +582,46 @@ async def tradingview_webhook(
 @app.get("/signals")
 def signals(
     limit: int = Query(50, ge=1, le=500),
-    ticker: Optional[str] = Query(None),
-) -> Dict[str, Any]:
+    ticker: str | None = Query(None),
+) -> dict[str, Any]:
     """Return recent stored signals, optionally filtered by ticker."""
     rows = get_recent_signals(limit=limit, ticker=ticker)
     return {"count": len(rows), "signals": rows}
 
 
 @app.delete("/signals/{signal_id}")
-def delete_signal(signal_id: int) -> Dict[str, Any]:
+def delete_signal(signal_id: int) -> dict[str, Any]:
     """Delete a stored signal by id."""
     deleted = _delete_signal_row(signal_id)
     if not deleted:
-        raise HTTPException(
-            status_code=404, detail=f"signal {signal_id} not found"
-        )
+        raise HTTPException(status_code=404, detail=f"signal {signal_id} not found")
     return {"deleted": True, "id": signal_id}
 
 
 @app.get("/analysis")
 def all_analysis_history(
     limit: int = Query(25, ge=1, le=100),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Return recent analysis-log entries across all tickers, newest first."""
     rows = get_recent_analyses(limit=limit)
     return {"count": len(rows), "history": rows}
 
 
 @app.delete("/analysis/{entry_id}")
-def delete_analysis_entry(entry_id: int) -> Dict[str, Any]:
+def delete_analysis_entry(entry_id: int) -> dict[str, Any]:
     """Delete an analysis-log entry by id."""
     deleted = _delete_analysis(entry_id)
     if not deleted:
-        raise HTTPException(
-            status_code=404, detail=f"analysis entry {entry_id} not found"
-        )
+        raise HTTPException(status_code=404, detail=f"analysis entry {entry_id} not found")
     return {"deleted": True, "id": entry_id}
 
 
 @app.post("/data/reset")
-def reset_data() -> Dict[str, Any]:
-    """Clear all signals and analysis history. app_settings (watchlist, model, etc.) is preserved."""
+def reset_data() -> dict[str, Any]:
+    """Clear all signals and analysis history.
+
+    app_settings (watchlist, model, etc.) is preserved.
+    """
     counts = _clear_all_data()
     return {"cleared": ["signals", "analysis_log"], **counts}
 
@@ -621,7 +630,7 @@ def reset_data() -> Dict[str, Any]:
 def analysis_history(
     ticker: str,
     limit: int = Query(20, ge=1, le=200),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Return the analysis-log history for *ticker*."""
     rows = get_analysis_history(ticker=ticker, limit=limit)
     return {"ticker": ticker.upper(), "count": len(rows), "history": rows}

@@ -43,7 +43,7 @@ class OpportunityDetectSkill(Skill):
                 success=True,
                 data={"opportunities": opportunities, "actionable": actionable},
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _log.exception("opportunity_detect failed for %s", ctx.ticker)
             ctx.opportunities = []
             ctx.actionable = []

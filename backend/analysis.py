@@ -18,7 +18,8 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from pathlib import Path as _Path
+from typing import Any
 
 import requests
 from opentelemetry import trace as _otel_trace
@@ -40,28 +41,15 @@ _EXPECTED_KEYS = (
     "risk_factors",
 )
 
-_SYSTEM_PROMPT = (
-    "You are a disciplined technical-analysis assistant for equities. "
-    "You are given a snapshot of price action and multi-timeframe indicators. "
-    "Respond ONLY with a single valid JSON object (no markdown, no prose) using "
-    "exactly this schema:\n"
-    "{\n"
-    '  "trend": "bullish|bearish|neutral",\n'
-    '  "momentum": "strong|weak|building|fading|neutral",\n'
-    '  "key_levels": {"support": [numbers], "resistance": [numbers]},\n'
-    '  "signals": ["short strings describing notable signals"],\n'
-    '  "opportunity": {\n'
-    '    "type": "long|short|none",\n'
-    '    "confidence": 0-100,\n'
-    '    "entry": number|null,\n'
-    '    "stop": number|null,\n'
-    '    "target": number|null\n'
-    "  },\n"
-    '  "risk_factors": ["short strings"]\n'
-    "}\n"
-    "Base every conclusion strictly on the supplied data. If the setup is "
-    "unclear, use type \"none\" and a low confidence. This is not financial advice."
-)
+_PROMPTS_DIR = _Path(__file__).parent / "prompts"
+
+
+def _load_prompt(filename: str) -> str:
+    """Load a prompt file from the prompts/ directory at the project root."""
+    return (_PROMPTS_DIR / filename).read_text(encoding="utf-8").strip()
+
+
+_SYSTEM_PROMPT = _load_prompt("system_prompt.md")
 
 
 class OllamaError(RuntimeError):
@@ -75,7 +63,9 @@ def _fmt(value: Any) -> str:
     return "n/a" if value is None else str(value)
 
 
-def build_prompt(market_data: Dict[str, Any], memory: Optional[Dict[str, Any]] = None) -> str:
+def build_prompt(  # noqa: C901
+    market_data: dict[str, Any], memory: dict[str, Any] | None = None
+) -> str:
     """Render *market_data* into a compact, readable prompt for the model.
 
     Optional ``news`` key in *market_data* (a list of headline strings from
@@ -89,18 +79,19 @@ def build_prompt(market_data: Dict[str, Any], memory: Optional[Dict[str, Any]] =
     price = market_data.get("price", {}) or {}
     fundamentals = market_data.get("fundamentals", {}) or {}
     technicals = market_data.get("technicals", {}) or {}
-    news: List[Dict[str, Any]] = market_data.get("news") or []
+    news: list[dict[str, Any]] = market_data.get("news") or []
 
-    def _v(d: Dict[str, Any], key: str) -> Any:
+    def _v(d: dict[str, Any], key: str) -> Any:
         """Extract .value from a nested {value, date} dict."""
         sub = (d or {}).get(key) or {}
         return sub.get("value") if isinstance(sub, dict) else None
 
-    lines: List[str] = []
+    lines: list[str] = []
 
     # Inject prior-scan context at the top when memory is available.
     if memory:
         from backend.memory import MemoryLayer as _ML
+
         prior = _ML().format_prompt_section(memory)
         if prior:
             lines.append(prior)
@@ -126,9 +117,7 @@ def build_prompt(market_data: Dict[str, Any], memory: Optional[Dict[str, Any]] =
         f"Avg(20d): {_fmt(price.get('avg_volume'))} | "
         f"Ratio: {_fmt(price.get('volume_ratio'))}x"
     )
-    lines.append(
-        f"  MA5: {_fmt(price.get('ma5'))} | MA20: {_fmt(price.get('ma20'))}"
-    )
+    lines.append(f"  MA5: {_fmt(price.get('ma5'))} | MA20: {_fmt(price.get('ma20'))}")
     lines.append(
         f"  52w High: {_fmt(price.get('week52_high'))} | "
         f"52w Low: {_fmt(price.get('week52_low'))} | "
@@ -147,8 +136,10 @@ def build_prompt(market_data: Dict[str, Any], memory: Optional[Dict[str, Any]] =
         stoch = tdata.get("Stochastic", {}) or {}
         lines.append(
             f"  {tf}: RSI={_fmt(tdata.get('RSI'))} | "
-            f"MACD={_fmt(macd.get('macd'))}/sig={_fmt(macd.get('signal'))}/hist={_fmt(macd.get('histogram'))} | "
-            f"EMA20={_fmt(tdata.get('EMA20'))} EMA50={_fmt(tdata.get('EMA50'))} EMA200={_fmt(tdata.get('EMA200'))} | "
+            f"MACD={_fmt(macd.get('macd'))}/sig={_fmt(macd.get('signal'))}"
+            f"/hist={_fmt(macd.get('histogram'))} | "
+            f"EMA20={_fmt(tdata.get('EMA20'))} EMA50={_fmt(tdata.get('EMA50'))}"
+            f" EMA200={_fmt(tdata.get('EMA200'))} | "
             f"BB=[{_fmt(bb.get('lower'))}, {_fmt(bb.get('middle'))}, {_fmt(bb.get('upper'))}] | "
             f"Stoch K/D={_fmt(stoch.get('k'))}/{_fmt(stoch.get('d'))} | "
             f"Rec={_fmt(tdata.get('recommendation'))}"
@@ -161,8 +152,10 @@ def build_prompt(market_data: Dict[str, Any], memory: Optional[Dict[str, Any]] =
     # Balance sheet block (skipped when all values are None)
     bs = market_data.get("balance_sheet") or {}
     bs_vals = [
-        bs.get("total_assets"), bs.get("total_liabilities"),
-        bs.get("stockholders_equity"), bs.get("cash"),
+        bs.get("total_assets"),
+        bs.get("total_liabilities"),
+        bs.get("stockholders_equity"),
+        bs.get("cash"),
     ]
     if any(v is not None for v in bs_vals):
         lines.append("")
@@ -179,8 +172,8 @@ def build_prompt(market_data: Dict[str, Any], memory: Optional[Dict[str, Any]] =
     macro = market_data.get("macro") or {}
     if macro:
         spread = macro.get("yield_spread") or {}
-        cape  = macro.get("shiller_cape") or {}
-        inv   = " [INVERTED]" if spread.get("inverted") else ""
+        cape = macro.get("shiller_cape") or {}
+        inv = " [INVERTED]" if spread.get("inverted") else ""
         lines.append("")
         lines.append("MACRO CONTEXT (US)")
         lines.append(
@@ -193,13 +186,11 @@ def build_prompt(market_data: Dict[str, Any], memory: Optional[Dict[str, Any]] =
 
     # Fundamentals P/E in prompt
     pe_trailing = fundamentals.get("trailing_pe") or fundamentals.get("pe_ratio")
-    pe_forward  = fundamentals.get("forward_pe")
+    pe_forward = fundamentals.get("forward_pe")
     if pe_trailing is not None or pe_forward is not None:
         lines.append("")
         lines.append("VALUATION")
-        lines.append(
-            f"  P/E (TTM)={_fmt(pe_trailing)} | P/E (Fwd)={_fmt(pe_forward)}"
-        )
+        lines.append(f"  P/E (TTM)={_fmt(pe_trailing)} | P/E (Fwd)={_fmt(pe_forward)}")
 
     if news:
         lines.append("")
@@ -215,9 +206,7 @@ def build_prompt(market_data: Dict[str, Any], memory: Optional[Dict[str, Any]] =
                 lines.append(f"  - {item}")
 
     lines.append("")
-    lines.append(
-        "Analyse the above and return the JSON object described in the system prompt."
-    )
+    lines.append("Analyse the above and return the JSON object described in the system prompt.")
     return "\n".join(lines)
 
 
@@ -228,8 +217,8 @@ def call_ollama(
     user_prompt: str,
     system_prompt: str = _SYSTEM_PROMPT,
     *,
-    model: Optional[str] = None,
-    ticker: Optional[str] = None,
+    model: str | None = None,
+    ticker: str | None = None,
 ) -> str:
     """Send a chat request to the local Ollama server and return raw content.
 
@@ -239,9 +228,9 @@ def call_ollama(
     settings = get_settings()
 
     # DB overrides let the UI change model/timeout without a container restart.
-    _db_model   = _get_db_setting("ollama_model", "")
+    _db_model = _get_db_setting("ollama_model", "")
     _db_timeout = _get_db_setting("ollama_timeout", "")
-    _model   = model or _db_model or settings.ollama.model
+    _model = model or _db_model or settings.ollama.model
     _timeout = int(_db_timeout) if _db_timeout else settings.ollama.timeout
 
     payload = {
@@ -268,31 +257,37 @@ def call_ollama(
         span.set_attribute("gen_ai.request.model", _model)
         span.set_attribute("llm.ticker", ticker or "")
         span.set_attribute("gen_ai.system_prompt_chars", len(system_prompt))
-        span.set_attribute("gen_ai.user_prompt_chars",   len(user_prompt))
+        span.set_attribute("gen_ai.user_prompt_chars", len(user_prompt))
         span.set_attribute("llm.prompt_chars", len(user_prompt))  # backward compat
 
         # Message sequence — always emit role+size events so the call structure
         # is visible in Aspire even when full text is suppressed.
-        span.add_event("gen_ai.system.message", {
-            "role": "system",
-            "chars": len(system_prompt),
-        })
-        span.add_event("gen_ai.user.message", {
-            "role": "user",
-            "chars": len(user_prompt),
-        })
+        span.add_event(
+            "gen_ai.system.message",
+            {
+                "role": "system",
+                "chars": len(system_prompt),
+            },
+        )
+        span.add_event(
+            "gen_ai.user.message",
+            {
+                "role": "user",
+                "chars": len(user_prompt),
+            },
+        )
         # Full text as child spans — visible as distinct bars in Aspire waterfall.
         # Gated behind OTEL_INCLUDE_LLM_CONTENT (default true in .env.example;
         # set false in production to prevent prompt storage in trace backends).
         if settings.otel.include_llm_content:
             with _tracer.start_as_current_span("llm.system_prompt") as _s:
-                _s.set_attribute("role",    "system")
+                _s.set_attribute("role", "system")
                 _s.set_attribute("content", system_prompt)
-                _s.set_attribute("chars",   len(system_prompt))
+                _s.set_attribute("chars", len(system_prompt))
             with _tracer.start_as_current_span("llm.user_prompt") as _u:
-                _u.set_attribute("role",    "user")
+                _u.set_attribute("role", "user")
                 _u.set_attribute("content", user_prompt)
-                _u.set_attribute("chars",   len(user_prompt))
+                _u.set_attribute("chars", len(user_prompt))
 
         t0 = time.monotonic()
         try:
@@ -310,9 +305,7 @@ def call_ollama(
             ) from exc
         except requests.exceptions.Timeout as exc:
             span.set_attribute("error", f"timeout after {_timeout}s")
-            raise OllamaError(
-                f"Ollama request timed out after {_timeout}s."
-            ) from exc
+            raise OllamaError(f"Ollama request timed out after {_timeout}s.") from exc
         except requests.exceptions.RequestException as exc:  # pragma: no cover
             span.set_attribute("error", str(exc))
             raise OllamaError(f"Ollama request failed: {exc}") from exc
@@ -322,17 +315,14 @@ def call_ollama(
         if response.status_code != 200:
             span.set_attribute("error", f"HTTP {response.status_code}")
             raise OllamaError(
-                f"Ollama returned HTTP {response.status_code}: "
-                f"{response.text[:300]}"
+                f"Ollama returned HTTP {response.status_code}: " f"{response.text[:300]}"
             )
 
         try:
             body = response.json()
         except ValueError as exc:
             span.set_attribute("error", "invalid JSON envelope")
-            raise OllamaError(
-                "Ollama response was not valid JSON envelope."
-            ) from exc
+            raise OllamaError("Ollama response was not valid JSON envelope.") from exc
 
         content = (body.get("message") or {}).get("content", "")
         if not content:
@@ -340,39 +330,37 @@ def call_ollama(
             raise OllamaError("Ollama response contained no message content.")
 
         # Token counts and timing from Ollama response body.
-        input_tokens  = body.get("prompt_eval_count") or 0
+        input_tokens = body.get("prompt_eval_count") or 0
         output_tokens = body.get("eval_count") or 0
         ttft_s = round(
-            (
-                body.get("load_duration", 0)
-                + body.get("prompt_eval_duration", 0)
-            ) / 1e9,
+            (body.get("load_duration", 0) + body.get("prompt_eval_duration", 0)) / 1e9,
             3,
         )
-        total_latency_s = round(
-            body.get("total_duration", 0) / 1e9, 3
-        ) or round(latency, 2)
+        total_latency_s = round(body.get("total_duration", 0) / 1e9, 3) or round(latency, 2)
 
-        span.set_attribute("llm.input_tokens",    input_tokens)
-        span.set_attribute("llm.output_tokens",   output_tokens)
-        span.set_attribute("llm.ttft_s",          ttft_s)
+        span.set_attribute("llm.input_tokens", input_tokens)
+        span.set_attribute("llm.output_tokens", output_tokens)
+        span.set_attribute("llm.ttft_s", ttft_s)
         span.set_attribute("llm.total_latency_s", total_latency_s)
-        span.set_attribute("llm.response_chars",  len(content))
+        span.set_attribute("llm.response_chars", len(content))
 
         # Always record the completion message structure as a span event.
-        span.add_event("gen_ai.assistant.message", {
-            "role": "assistant",
-            "chars": len(content),
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        })
+        span.add_event(
+            "gen_ai.assistant.message",
+            {
+                "role": "assistant",
+                "chars": len(content),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            },
+        )
         # Full response as a child span for easy inspection in Aspire.
         if settings.otel.include_llm_content:
             with _tracer.start_as_current_span("llm.assistant_response") as _a:
-                _a.set_attribute("role",          "assistant")
-                _a.set_attribute("content",       content)
-                _a.set_attribute("chars",         len(content))
-                _a.set_attribute("input_tokens",  input_tokens)
+                _a.set_attribute("role", "assistant")
+                _a.set_attribute("content", content)
+                _a.set_attribute("chars", len(content))
+                _a.set_attribute("input_tokens", input_tokens)
                 _a.set_attribute("output_tokens", output_tokens)
 
         _log.info(
@@ -393,14 +381,14 @@ def call_ollama(
 # --------------------------------------------------------------------------- #
 # Response parsing / normalisation
 # --------------------------------------------------------------------------- #
-def _coerce_float(value: Any) -> Optional[float]:
+def _coerce_float(value: Any) -> float | None:
     try:
         return None if value is None else float(value)
     except (TypeError, ValueError):
         return None
 
 
-def parse_ai_response(content: str) -> Dict[str, Any]:
+def parse_ai_response(content: str) -> dict[str, Any]:
     """Parse and normalise the model's JSON string into our analysis schema."""
 
     text = content.strip()
@@ -415,7 +403,7 @@ def parse_ai_response(content: str) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("AI response JSON was not an object.")
 
-    normalised: Dict[str, Any] = {key: data.get(key) for key in _EXPECTED_KEYS}
+    normalised: dict[str, Any] = {key: data.get(key) for key in _EXPECTED_KEYS}
 
     # Normalise the opportunity sub-object.
     opp = normalised.get("opportunity") or {}
@@ -432,7 +420,9 @@ def parse_ai_response(content: str) -> Dict[str, Any]:
     # Ensure list-shaped fields are lists.
     for list_key in ("signals", "risk_factors"):
         if not isinstance(normalised.get(list_key), list):
-            normalised[list_key] = [] if normalised.get(list_key) is None else [normalised[list_key]]
+            normalised[list_key] = (
+                [] if normalised.get(list_key) is None else [normalised[list_key]]
+            )
 
     if not isinstance(normalised.get("key_levels"), dict):
         normalised["key_levels"] = {"support": [], "resistance": []}
@@ -441,9 +431,9 @@ def parse_ai_response(content: str) -> Dict[str, Any]:
 
 
 def analyze(
-    market_data: Dict[str, Any],
-    memory: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    market_data: dict[str, Any],
+    memory: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Full pipeline: prompt -> Ollama -> parsed analysis.
 
     Always returns a dict. On failure the dict contains ``error`` (and, when

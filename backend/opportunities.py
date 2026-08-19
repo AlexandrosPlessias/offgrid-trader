@@ -27,7 +27,7 @@ Run standalone (uses live data + Ollama)::
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .config import Thresholds, get_settings
 
@@ -44,12 +44,12 @@ def _new_candidate(
     confidence: float,
     source: str,
     reason: str,
-    price: Optional[float],
+    price: float | None,
     *,
-    entry: Optional[float] = None,
-    stop: Optional[float] = None,
-    target: Optional[float] = None,
-) -> Dict[str, Any]:
+    entry: float | None = None,
+    stop: float | None = None,
+    target: float | None = None,
+) -> dict[str, Any]:
     return {
         "ticker": ticker,
         "type": side,
@@ -67,8 +67,9 @@ def _new_candidate(
 # --------------------------------------------------------------------------- #
 # Individual rule checks
 # --------------------------------------------------------------------------- #
-def _check_ai(ticker: str, analysis: Dict[str, Any], price: Optional[float],
-              thresholds: Thresholds) -> List[Dict[str, Any]]:
+def _check_ai(
+    ticker: str, analysis: dict[str, Any], price: float | None, thresholds: Thresholds
+) -> list[dict[str, Any]]:
     opp = analysis.get("opportunity")
     if not isinstance(opp, dict):
         return []
@@ -82,16 +83,24 @@ def _check_ai(ticker: str, analysis: Dict[str, Any], price: Optional[float],
         reason += "; " + "; ".join(str(s) for s in signals[:3])
     return [
         _new_candidate(
-            ticker, side, confidence, "ai", reason, price,
-            entry=opp.get("entry"), stop=opp.get("stop"), target=opp.get("target"),
+            ticker,
+            side,
+            confidence,
+            "ai",
+            reason,
+            price,
+            entry=opp.get("entry"),
+            stop=opp.get("stop"),
+            target=opp.get("target"),
         )
     ]
 
 
-def _check_rsi(ticker: str, technicals: Dict[str, Any], price: Optional[float],
-               thresholds: Thresholds) -> List[Dict[str, Any]]:
-    oversold_tfs: List[str] = []
-    overbought_tfs: List[str] = []
+def _check_rsi(
+    ticker: str, technicals: dict[str, Any], price: float | None, thresholds: Thresholds
+) -> list[dict[str, Any]]:
+    oversold_tfs: list[str] = []
+    overbought_tfs: list[str] = []
     for tf in _TIMEFRAMES:
         tdata = technicals.get(tf) or {}
         rsi = tdata.get("RSI")
@@ -102,33 +111,47 @@ def _check_rsi(ticker: str, technicals: Dict[str, Any], price: Optional[float],
         elif rsi >= thresholds.rsi_overbought:
             overbought_tfs.append(tf)
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     if len(oversold_tfs) >= 2:
         conf = min(85.0, 55.0 + 10.0 * len(oversold_tfs))
         results.append(
             _new_candidate(
-                ticker, "long", conf, "rsi_extreme",
-                f"RSI oversold on {', '.join(oversold_tfs)}", price, entry=price,
+                ticker,
+                "long",
+                conf,
+                "rsi_extreme",
+                f"RSI oversold on {', '.join(oversold_tfs)}",
+                price,
+                entry=price,
             )
         )
     if len(overbought_tfs) >= 2:
         conf = min(85.0, 55.0 + 10.0 * len(overbought_tfs))
         results.append(
             _new_candidate(
-                ticker, "short", conf, "rsi_extreme",
-                f"RSI overbought on {', '.join(overbought_tfs)}", price, entry=price,
+                ticker,
+                "short",
+                conf,
+                "rsi_extreme",
+                f"RSI overbought on {', '.join(overbought_tfs)}",
+                price,
+                entry=price,
             )
         )
     return results
 
 
-def _check_volume_spike(ticker: str, price_data: Dict[str, Any], price: Optional[float],
-                        thresholds: Thresholds) -> List[Dict[str, Any]]:
+def _check_volume_spike(
+    ticker: str, price_data: dict[str, Any], price: float | None, thresholds: Thresholds
+) -> list[dict[str, Any]]:
     ratio = price_data.get("volume_ratio")
     change_pct = price_data.get("change_pct")
     if ratio is None or change_pct is None:
         return []
-    if ratio < thresholds.volume_spike_multiplier or abs(change_pct) < thresholds.significant_move_pct:
+    if (
+        ratio < thresholds.volume_spike_multiplier
+        or abs(change_pct) < thresholds.significant_move_pct
+    ):
         return []
     side = "long" if change_pct > 0 else "short"
     conf = min(80.0, 55.0 + min(ratio, 5.0) * 3.0)
@@ -139,9 +162,10 @@ def _check_volume_spike(ticker: str, price_data: Dict[str, Any], price: Optional
     return [_new_candidate(ticker, side, conf, "volume_spike", reason, price, entry=price)]
 
 
-def _check_macd_crossover(ticker: str, technicals: Dict[str, Any], price: Optional[float],
-                          thresholds: Thresholds) -> List[Dict[str, Any]]:
-    def hist(tf: str) -> Optional[float]:
+def _check_macd_crossover(
+    ticker: str, technicals: dict[str, Any], price: float | None, thresholds: Thresholds
+) -> list[dict[str, Any]]:
+    def hist(tf: str) -> float | None:
         tdata = technicals.get(tf) or {}
         macd = tdata.get("MACD") or {}
         h = macd.get("histogram")
@@ -156,15 +180,25 @@ def _check_macd_crossover(ticker: str, technicals: Dict[str, Any], price: Option
     if h_1d > 0 and h_4h > 0:
         return [
             _new_candidate(
-                ticker, "long", 62.0, "macd_crossover",
-                "MACD bullish (above signal) on 1D and 4H", price, entry=price,
+                ticker,
+                "long",
+                62.0,
+                "macd_crossover",
+                "MACD bullish (above signal) on 1D and 4H",
+                price,
+                entry=price,
             )
         ]
     if h_1d < 0 and h_4h < 0:
         return [
             _new_candidate(
-                ticker, "short", 62.0, "macd_crossover",
-                "MACD bearish (below signal) on 1D and 4H", price, entry=price,
+                ticker,
+                "short",
+                62.0,
+                "macd_crossover",
+                "MACD bearish (below signal) on 1D and 4H",
+                price,
+                entry=price,
             )
         ]
     return []
@@ -172,12 +206,12 @@ def _check_macd_crossover(ticker: str, technicals: Dict[str, Any], price: Option
 
 def _check_valuation(
     ticker: str,
-    fundamentals: Dict[str, Any],
-    price: Optional[float],
-) -> List[Dict[str, Any]]:
+    fundamentals: dict[str, Any],
+    price: float | None,
+) -> list[dict[str, Any]]:
     """Rule 5 — fire a low-confidence flag at extreme P/E valuations only.
 
-    Intentionally low confidence (40–42) so this rule reinforces rather than
+    Intentionally low confidence (40-42) so this rule reinforces rather than
     drives a signal.  Negative P/E (loss-making companies) is skipped.
     """
     try:
@@ -188,24 +222,36 @@ def _check_valuation(
     if pe is None or pe <= 0:
         return []
     if pe > 60:
-        return [_new_candidate(
-            ticker, "short", 40.0, "valuation_extreme",
-            f"TTM P/E {pe:.1f}× — severely overvalued (>60×)",
-            price, entry=price,
-        )]
+        return [
+            _new_candidate(
+                ticker,
+                "short",
+                40.0,
+                "valuation_extreme",
+                f"TTM P/E {pe:.1f}× -- severely overvalued (>60×)",  # noqa: RUF001
+                price,
+                entry=price,
+            )
+        ]
     if pe < 8:
-        return [_new_candidate(
-            ticker, "long", 42.0, "valuation_cheap",
-            f"TTM P/E {pe:.1f}× — deeply discounted (<8×)",
-            price, entry=price,
-        )]
+        return [
+            _new_candidate(
+                ticker,
+                "long",
+                42.0,
+                "valuation_cheap",
+                f"TTM P/E {pe:.1f}× — deeply discounted (<8×)",  # noqa: RUF001
+                price,
+                entry=price,
+            )
+        ]
     return []
 
 
-def _apply_macro_regime_filter(
-    merged: List[Dict[str, Any]],
-    macro: Dict[str, Any],
-) -> List[Dict[str, Any]]:
+def _apply_macro_regime_filter(  # noqa: C901
+    merged: list[dict[str, Any]],
+    macro: dict[str, Any],
+) -> list[dict[str, Any]]:
     """Post-merge confidence adjuster based on the macro regime.
 
     Applied after :func:`_merge` so every rule's output is treated equally.
@@ -214,22 +260,22 @@ def _apply_macro_regime_filter(
 
     Conditions checked (additive, applied in order):
 
-    * Yield curve inverted  → long −8, short +3
-    * CAPE > 35             → long −5, short +3; append reason
-    * CAPE < 15             → long +5, short −3; append reason
-    * CPI YoY > 5%          → long −5; append reason
+    * Yield curve inverted  -> long -8, short +3
+    * CAPE > 35             -> long -5, short +3; append reason
+    * CAPE < 15             -> long +5, short -3; append reason
+    * CPI YoY > 5%          -> long -5; append reason
     """
     if not macro:
         return merged
 
     inverted = bool((macro.get("yield_spread") or {}).get("inverted"))
-    cape_val = ((macro.get("shiller_cape") or {}).get("value"))
-    cpi_val  = ((macro.get("cpi_yoy") or {}).get("value"))
+    cape_val = (macro.get("shiller_cape") or {}).get("value")
+    cpi_val = (macro.get("cpi_yoy") or {}).get("value")
 
-    def _adj(opp: Dict[str, Any]) -> Dict[str, Any]:
+    def _adj(opp: dict[str, Any]) -> dict[str, Any]:  # noqa: C901
         side = opp.get("type", "")
         delta = 0.0
-        extra: List[str] = []
+        extra: list[str] = []
 
         if inverted:
             if side == "long":
@@ -242,14 +288,16 @@ def _apply_macro_regime_filter(
             if cape_val > 35:
                 if side == "long":
                     delta -= 5.0
-                    extra.append(f"⚠ Shiller CAPE {cape_val:.0f}× — market elevated")
+                    extra.append(
+                        f"⚠ Shiller CAPE {cape_val:.0f}× — market elevated"  # noqa: RUF001
+                    )
                 else:
                     delta += 3.0
             elif cape_val < 15:
                 if side == "long":
                     delta += 5.0
                     extra.append(
-                        f"✓ CAPE {cape_val:.0f}× — market historically cheap"
+                        f"✓ CAPE {cape_val:.0f}× — market historically cheap"  # noqa: RUF001
                     )
                 else:
                     delta -= 3.0
@@ -262,9 +310,7 @@ def _apply_macro_regime_filter(
         if delta == 0.0 and not extra:
             return opp
         out = dict(opp)
-        out["confidence"] = round(
-            max(0.0, min(100.0, out["confidence"] + delta)), 2
-        )
+        out["confidence"] = round(max(0.0, min(100.0, out["confidence"] + delta)), 2)
         out["reasons"] = list(out.get("reasons", [])) + extra
         return out
 
@@ -274,14 +320,14 @@ def _apply_macro_regime_filter(
 # --------------------------------------------------------------------------- #
 # De-duplication + scoring
 # --------------------------------------------------------------------------- #
-def _merge(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _merge(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge candidates sharing the same ticker+side.
 
     The merged confidence is the strongest single signal plus a small
     corroboration bonus for each additional agreeing source.
     """
 
-    merged: Dict[tuple, Dict[str, Any]] = {}
+    merged: dict[tuple, dict[str, Any]] = {}
     for cand in candidates:
         key = (cand["ticker"], cand["type"])
         if key not in merged:
@@ -304,9 +350,9 @@ def _merge(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def detect_opportunities(
-    market_data: Dict[str, Any],
-    analysis: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
+    market_data: dict[str, Any],
+    analysis: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Return scored, de-duplicated, sorted opportunities for one ticker.
 
     ``analysis`` is the dict from :func:`backend.analysis.analyze`. If omitted,
@@ -323,16 +369,16 @@ def detect_opportunities(
     fundamentals = market_data.get("fundamentals", {}) or {}
     macro = market_data.get("macro", {}) or {}
 
-    candidates: List[Dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
     if analysis and not analysis.get("error"):
         candidates.extend(_check_ai(ticker, analysis, price, thresholds))
     candidates.extend(_check_rsi(ticker, technicals, price, thresholds))
     candidates.extend(_check_volume_spike(ticker, price_data, price, thresholds))
     candidates.extend(_check_macd_crossover(ticker, technicals, price, thresholds))
-    candidates.extend(_check_valuation(ticker, fundamentals, price))   # Rule 5
+    candidates.extend(_check_valuation(ticker, fundamentals, price))  # Rule 5
 
     merged = _merge(candidates)
-    merged = _apply_macro_regime_filter(merged, macro)                  # Rule 6
+    merged = _apply_macro_regime_filter(merged, macro)  # Rule 6
 
     # Finalise the joined ``source`` string for storage.
     for opp in merged:
@@ -342,9 +388,9 @@ def detect_opportunities(
 
 
 def filter_by_confidence(
-    opportunities: List[Dict[str, Any]],
-    floor: Optional[float] = None,
-) -> List[Dict[str, Any]]:
+    opportunities: list[dict[str, Any]],
+    floor: float | None = None,
+) -> list[dict[str, Any]]:
     """Return only opportunities at or above the confidence *floor*."""
 
     if floor is None:

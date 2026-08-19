@@ -16,17 +16,14 @@ Usage::
 
 from __future__ import annotations
 
-import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-
-_log = logging.getLogger(__name__)
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Data structures shared across all skills
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class SkillResult:
@@ -34,7 +31,7 @@ class SkillResult:
 
     success: bool
     data: Any = None
-    error: Optional[str] = None
+    error: str | None = None
     attempts: int = 1
 
 
@@ -48,16 +45,16 @@ class AgentContext:
     """
 
     ticker: str
-    market_data: Optional[Dict[str, Any]] = None
-    analysis: Optional[Dict[str, Any]] = None
-    opportunities: Optional[List[Dict[str, Any]]] = None
-    actionable: Optional[List[Dict[str, Any]]] = None
-    saved_signal_ids: List[int] = field(default_factory=list)
-    alerts_sent: List[Dict[str, Any]] = field(default_factory=list)
-    memory: Dict[str, Any] = field(default_factory=dict)
-    errors: List[str] = field(default_factory=list)
+    market_data: dict[str, Any] | None = None
+    analysis: dict[str, Any] | None = None
+    opportunities: list[dict[str, Any]] | None = None
+    actionable: list[dict[str, Any]] | None = None
+    saved_signal_ids: list[int] = field(default_factory=list)
+    alerts_sent: list[dict[str, Any]] = field(default_factory=list)
+    memory: dict[str, Any] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
     # Structured events emitted during the run; drained by the SSE generator.
-    events: List[Dict[str, Any]] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
     # Controls whether the alert skill fires.
     send_alerts: bool = True
 
@@ -65,6 +62,7 @@ class AgentContext:
 # ---------------------------------------------------------------------------
 # Skill base class
 # ---------------------------------------------------------------------------
+
 
 class Skill(ABC):
     """Abstract base for a single pipeline step.
@@ -96,7 +94,7 @@ class Skill(ABC):
         Must never raise — surface errors through ``SkillResult(success=False,
         error=...)``.
         """
-        ...
+        raise NotImplementedError
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} critical={self.critical} retries={self.max_retries}>"
