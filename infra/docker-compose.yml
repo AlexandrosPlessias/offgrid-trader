@@ -3,24 +3,30 @@
 # Ollama and Portainer are provided by the shared infra stack.
 # Start it first (safe to re-run — idempotent):
 #
-#   docker compose -f docker-compose.infra.yml up -d
+#   make infra                    (recommended — auto-detects GPU)
+#   bash infra/start-infra.sh     (same thing)
 #
-# Then start this project:
+# Then start this project (from the project root):
 #
-#   docker compose up --build                                        (GPU)
-#   docker compose -f docker-compose.yml \
-#                  -f docker-compose.override.cpu.yml up --build    (CPU-only)
+#   make up                       (recommended)
+#   docker compose -f infra/docker-compose.yml up --build
+
+# Explicit project name prevents Docker Compose from using the directory
+# name ("infra") as the prefix — networks and containers stay under
+# "offgrid-trader" regardless of where the compose file lives.
+name: offgrid-trader
 
 services:
 
   # ── Backend API (FastAPI) ────────────────────────────────────────────────────
   backend:
     build:
-      context: .
-      dockerfile: docker/backend/Dockerfile
+      context: ..
+      dockerfile: infra/backend/Dockerfile
+    image: offgrid-trader-backend:latest
     restart: unless-stopped
     env_file:
-      - .env
+      - ../.env
     environment:
       OLLAMA_HOST: http://ollama:11434
       DATABASE_PATH: /app/data/offgrid_trader.db
@@ -28,7 +34,7 @@ services:
     ports:
       - "8010:8000"
     volumes:
-      - ./data:/app/data
+      - ../data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3)"]
       interval: 15s
@@ -42,7 +48,6 @@ services:
   # ── Aspire dashboard (OpenTelemetry traces + logs UI) ───────────────────────
   aspire:
     image: mcr.microsoft.com/dotnet/aspire-dashboard:9.0
-    container_name: aspire-offgrid
     restart: unless-stopped
     ports:
       - "18889:18888"
@@ -56,8 +61,9 @@ services:
   # ── Frontend UI (React / Vite → nginx) ──────────────────────────────────────
   frontend:
     build:
-      context: .
-      dockerfile: docker/frontend/Dockerfile
+      context: ..
+      dockerfile: infra/frontend/Dockerfile
+    image: offgrid-trader-frontend:latest
     restart: unless-stopped
     ports:
       - "5174:5173"

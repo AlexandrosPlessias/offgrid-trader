@@ -38,10 +38,8 @@ Captured with headless Chromium via [Playwright](https://playwright.dev).
 
 1. **Full stack running:**
    ```bash
-   # WSL2 — start Docker first
-   sudo service docker start
-   ./start-infra.sh
-   docker compose up -d
+   make infra    # start Docker (WSL2) + Ollama + Portainer
+   make up       # start MarketSage (or `make build` on first run)
    ```
 
 2. **At least one saved analysis** in the history (needed for the Explorer
@@ -97,5 +95,5 @@ Existing files are overwritten — safe to re-run any time.
 |---|---|
 | `Error: browserType.launch` | Run `npx playwright install chromium` |
 | `⚠ No saved analysis rows found` | Create an analysis first: `curl -X POST http://localhost:8010/analyze -H 'Content-Type: application/json' -d '{"ticker":"AAPL"}'` |
-| Frontend returns 404 | Stack is not running — `docker compose up -d` |
-| Screenshots are blank / very small | Check that the frontend built successfully: `docker compose logs frontend` |
+| Frontend returns 404 | Stack is not running — `make up` |
+| Screenshots are blank / very small | Check that the frontend built successfully: `make logs` |

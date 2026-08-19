@@ -701,6 +701,108 @@ tbody td {
   border-radius: 10px;
   padding: 1px 7px;
 }
+.step-elapsed-live {
+  color: var(--accent, #f59e0b);
+  font-weight: 600;
+}
+.step-retry-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 9999px;
+  padding: 1px 7px;
+  margin-left: 4px;
+}
+.step-subs-pending li {
+  opacity: 0.4;
+}
+
+/* ── Detect step — inline opportunity pills ──────────────────────────────── */
+.step-opp-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.opp-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 9999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border: 1px solid;
+}
+.opp-pill-ok {
+  background: rgba(74, 222, 128, 0.08);
+  border-color: rgba(74, 222, 128, 0.35);
+  color: #4ade80;
+}
+.opp-pill-sub {
+  background: rgba(156, 163, 175, 0.06);
+  border-color: rgba(156, 163, 175, 0.2);
+  color: #6b7280;
+}
+.opp-pill-type {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.opp-pill-conf {
+  font-size: 0.85rem;
+}
+.opp-pill-src {
+  font-size: 0.68rem;
+  opacity: 0.7;
+}
+.opp-pill-status {
+  font-size: 0.75rem;
+}
+.step-opp-none {
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: var(--text-dim, #6b7280);
+  font-style: italic;
+}
+
+/* ── Signals section ─────────────────────────────────────────────────────── */
+.signals-summary {
+  font-size: 0.85rem;
+  margin-bottom: 0.75rem;
+}
+.signals-ok {
+  color: #4ade80;
+  font-weight: 600;
+}
+.signals-subfloor {
+  color: var(--text-dim, #6b7280);
+}
+.row-subfloor {
+  opacity: 0.5;
+}
+.conf-value {
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+.conf-ok {
+  color: #4ade80;
+}
+.conf-sub {
+  color: var(--text-dim, #9ca3af);
+}
+.subfloor-tag {
+  display: inline-block;
+  font-size: 0.68rem;
+  color: #9ca3af;
+  border: 1px solid #374151;
+  border-radius: 9999px;
+  padding: 1px 6px;
+  margin-left: 5px;
+  vertical-align: middle;
+}
 
 .step-badge {
   font-size: 10px;
@@ -1521,6 +1623,7 @@ details.edu-section[open] .edu-chevron {
 /* ── Glossary table ───────────────────────────────────────────────────────────── */
 .edu-glossary-table {
   width: 100%;
+  table-layout: fixed;       /* honour explicit column widths; force wrap */
   border-collapse: collapse;
   font-size: 12px;
   margin-top: 12px;
@@ -1535,15 +1638,18 @@ details.edu-section[open] .edu-chevron {
   font-weight: 700;
   color: var(--text);
   padding: 7px 14px 7px 0;
-  white-space: nowrap;
+  white-space: normal;
   vertical-align: top;
-  width: 160px;
+  width: 22%;
   font-family: var(--font-ui);
+  overflow-wrap: break-word;
 }
 .gls-def {
   color: var(--dim);
   padding: 7px 0;
   line-height: 1.6;
+  overflow-wrap: break-word;  /* wrap long definitions instead of overflowing */
+  white-space: normal;
 }
 
 /* ── Disclaimer + links ───────────────────────────────────────────────────────── */

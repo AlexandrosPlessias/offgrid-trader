@@ -47,7 +47,7 @@ docker exec ollama ollama pull qwen2.5:14b
 | `SIGNIFICANT_MOVE_PCT` | `2.0` | Day price move (%) required alongside a volume spike |
 | `CONFIDENCE_FLOOR` | `65` | Minimum 0–100 confidence for a signal to be stored and alerted |
 
-These are read-only from the UI — edit `.env` then `docker compose up -d backend`.
+These are read-only from the UI — edit `.env` then `make up` to recreate the container.
 
 ---
 
@@ -99,8 +99,8 @@ Outside these hours it sleeps until the next interval.
 
 | Variable | Default | Description |
 |---|---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset)* | OTLP gRPC endpoint for traces, metrics, and logs. In Docker this is set automatically to `http://aspire:18889`. Leave empty to disable telemetry. |
-| `OTEL_INCLUDE_LLM_CONTENT` | `true` | When `true`, full LLM prompt and response text are added as span events in Aspire. Set `false` in shared environments — prompts contain financial context. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset)* | OTLP gRPC endpoint for traces, metrics, and logs. In Docker this is set automatically to `http://aspire-offgrid:18889`. Leave empty to disable telemetry. |
+| `OTEL_INCLUDE_LLM_CONTENT` | `false` | When `true`, full LLM prompt and response text are added as span events in Aspire. Default `false` — prompts contain financial context (balance sheet figures, news). Enable only in development. |
 
 See [observability.md](observability.md) for the full span hierarchy and how to read traces in Aspire.
 
@@ -112,8 +112,8 @@ See [observability.md](observability.md) for the full span hierarchy and how to 
 |---|---|
 | Runtime-mutable (Settings page) | Instant — no restart |
 | Runtime-mutable (API `POST`) | Instant — no restart |
-| `.env` change (non-runtime) | `docker compose up -d backend` — recreates the container so new env is read. **`docker compose restart` alone does NOT work** — it reuses the old environment. |
-| `.env` change to `WATCHLIST` | `docker compose up -d backend` — note any runtime add/remove overrides survive in the DB |
+| `.env` change (non-runtime) | `make up` — recreates containers so new env is read. **`docker compose restart` alone does NOT work** — it reuses the old environment. |
+| `.env` change to `WATCHLIST` | `make up` — note any runtime add/remove overrides survive in the DB |
 
 ---
 

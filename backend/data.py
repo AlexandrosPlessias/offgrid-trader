@@ -31,17 +31,17 @@ import json
 import logging
 import math
 import re
-import requests
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
+import requests
 from opentelemetry import trace as _otel_trace
 
 _log = logging.getLogger(__name__)
 _tracer = _otel_trace.get_tracer("marketsage.data")
 
 # Exchange display mapping: yfinance exchange code → readable name.
-_YF_TO_EXCHANGE: Dict[str, str] = {
+_YF_TO_EXCHANGE: dict[str, str] = {
     "NMS": "NASDAQ",
     "NGM": "NASDAQ",
     "NCM": "NASDAQ",
@@ -75,7 +75,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _safe_float(value: Any) -> Optional[float]:
+def _safe_float(value: Any) -> float | None:
     try:
         if value is None:
             return None
@@ -90,13 +90,14 @@ def _safe_float(value: Any) -> Optional[float]:
 # --------------------------------------------------------------------------- #
 # DB-backed cache helpers (JSON blobs in app_settings KV table)
 # --------------------------------------------------------------------------- #
-def _cached_json(key: str) -> Optional[Dict[str, Any]]:
+def _cached_json(key: str) -> dict[str, Any] | None:
     """Return the stored JSON blob for *key*, or None if not found.
 
     Swallows all errors — a DB read failure must never block analysis.
     """
     try:
         from .database import get_setting
+
         raw = get_setting(key, "")
         if not raw:
             return None
@@ -113,6 +114,7 @@ def _store_json(key: str, obj: Any) -> None:
     """
     try:
         from .database import set_setting
+
         set_setting(key, json.dumps(obj, default=str))
     except Exception as exc:
         _log.warning("cache write failed key=%s: %s", key, exc)
@@ -121,7 +123,7 @@ def _store_json(key: str, obj: Any) -> None:
 # --------------------------------------------------------------------------- #
 # yfinance — price / fundamentals
 # --------------------------------------------------------------------------- #
-def fetch_yfinance(ticker: str) -> Dict[str, Any]:
+def fetch_yfinance(ticker: str) -> dict[str, Any]:
     """Fetch price/volume/fundamentals for *ticker* from yfinance.
 
     Returns a dict with ``price``, ``fundamentals`` and an ``exchange_hint``
@@ -134,8 +136,10 @@ def fetch_yfinance(ticker: str) -> Dict[str, Any]:
         span.set_attribute("ticker", ticker)
         span.set_attribute("data_source", "yfinance")
 
-        result: Dict[str, Any] = {
-            "price": {}, "fundamentals": {}, "exchange_hint": None,
+        result: dict[str, Any] = {
+            "price": {},
+            "fundamentals": {},
+            "exchange_hint": None,
         }
         _log.info("yfinance ▶ %s", ticker)
         try:
@@ -145,30 +149,25 @@ def fetch_yfinance(ticker: str) -> Dict[str, Any]:
             history = yf_ticker.history(period="3mo", interval="1d")
             closes = (
                 [c for c in history["Close"].tolist() if not math.isnan(c)]
-                if not history.empty else []
+                if not history.empty
+                else []
             )
             volumes = (
                 [v for v in history["Volume"].tolist() if not math.isnan(v)]
-                if not history.empty else []
+                if not history.empty
+                else []
             )
 
-            ma5 = (
-                round(sum(closes[-5:]) / len(closes[-5:]), 4)
-                if len(closes) >= 5 else None
-            )
-            ma20 = (
-                round(sum(closes[-20:]) / len(closes[-20:]), 4)
-                if len(closes) >= 20 else None
-            )
+            ma5 = round(sum(closes[-5:]) / len(closes[-5:]), 4) if len(closes) >= 5 else None
+            ma20 = round(sum(closes[-20:]) / len(closes[-20:]), 4) if len(closes) >= 20 else None
             avg_volume = (
-                round(sum(volumes[-20:]) / len(volumes[-20:]), 2)
-                if len(volumes) >= 1 else None
+                round(sum(volumes[-20:]) / len(volumes[-20:]), 2) if len(volumes) >= 1 else None
             )
 
             # Prefer the lightweight fast_info accessor, fall back to history.
             fast = getattr(yf_ticker, "fast_info", None)
 
-            def _fi(key: str) -> Optional[float]:
+            def _fi(key: str) -> float | None:
                 if fast is None:
                     return None
                 try:
@@ -177,18 +176,14 @@ def fetch_yfinance(ticker: str) -> Dict[str, Any]:
                     return _safe_float(getattr(fast, key, None))
 
             current = _fi("last_price") or (closes[-1] if closes else None)
-            previous_close = (
-                _fi("previous_close") or (closes[-2] if len(closes) >= 2 else None)
-            )
+            previous_close = _fi("previous_close") or (closes[-2] if len(closes) >= 2 else None)
             volume = _fi("last_volume") or (volumes[-1] if volumes else None)
 
             change = None
             change_pct = None
             if current is not None and previous_close:
                 change = round(current - previous_close, 4)
-                change_pct = round(
-                    (current - previous_close) / previous_close * 100, 4
-                )
+                change_pct = round((current - previous_close) / previous_close * 100, 4)
 
             volume_ratio = None
             if volume and avg_volume:
@@ -211,15 +206,15 @@ def fetch_yfinance(ticker: str) -> Dict[str, Any]:
             }
 
             # Fundamentals: guard the (slow, sometimes-flaky) .info call.
-            info: Dict[str, Any] = {}
+            info: dict[str, Any] = {}
             try:
                 info = yf_ticker.info or {}
             except Exception:  # pragma: no cover - network/parse issues
                 info = {}
 
             pe_trailing = _safe_float(info.get("trailingPE"))
-            pe_forward  = _safe_float(info.get("forwardPE"))
-            mkt_cap     = _safe_float(info.get("marketCap"))
+            pe_forward = _safe_float(info.get("forwardPE"))
+            mkt_cap = _safe_float(info.get("marketCap"))
 
             result["fundamentals"] = {
                 "name": info.get("shortName") or info.get("longName") or ticker,
@@ -233,9 +228,7 @@ def fetch_yfinance(ticker: str) -> Dict[str, Any]:
             }
 
             # Resolve a human-readable exchange name for display.
-            yf_exchange = (
-                info.get("exchange") or getattr(fast, "exchange", None) or ""
-            ).upper()
+            yf_exchange = (info.get("exchange") or getattr(fast, "exchange", None) or "").upper()
             result["exchange_hint"] = _YF_TO_EXCHANGE.get(yf_exchange)
 
         except Exception as exc:  # pragma: no cover - network dependent
@@ -245,7 +238,7 @@ def fetch_yfinance(ticker: str) -> Dict[str, Any]:
             return result
 
         price = result.get("price", {})
-        fund  = result.get("fundamentals", {})
+        fund = result.get("fundamentals", {})
         _log.info(
             "yfinance ◀ %s price=%s change_pct=%s vol_ratio=%s",
             ticker,
@@ -253,9 +246,9 @@ def fetch_yfinance(ticker: str) -> Dict[str, Any]:
             price.get("change_pct"),
             price.get("volume_ratio"),
         )
-        span.set_attribute("market_cap",  str(fund.get("market_cap", "")))
+        span.set_attribute("market_cap", str(fund.get("market_cap", "")))
         span.set_attribute("pe_trailing", str(fund.get("trailing_pe", "")))
-        span.set_attribute("pe_forward",  str(fund.get("forward_pe", "")))
+        span.set_attribute("pe_forward", str(fund.get("forward_pe", "")))
         return result
 
 
@@ -268,9 +261,8 @@ def _fetch_ohlcv(ticker: str, period: str, interval: str):
     import yfinance as yf
 
     try:
-        df = yf.download(ticker, period=period, interval=interval,
-                         auto_adjust=True, progress=False)
-        if df.empty:
+        df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
+        if df is None or df.empty:
             return pd.DataFrame()
         # yfinance may return MultiIndex columns — flatten to simple names.
         if isinstance(df.columns, pd.MultiIndex):
@@ -283,7 +275,7 @@ def _fetch_ohlcv(ticker: str, period: str, interval: str):
         return pd.DataFrame()
 
 
-def _safe_last(series) -> Optional[float]:
+def _safe_last(series) -> float | None:
     """Return the last finite float from a pandas Series, or None."""
     try:
         val = series.dropna().iloc[-1]
@@ -317,16 +309,18 @@ def _recommendation(rsi, macd_hist, ema20, ema50, close) -> str:
     return "NEUTRAL"
 
 
-def _indicators_from_df(df) -> Dict[str, Any]:
+def _indicators_from_df(df) -> dict[str, Any]:
     """Compute RSI, MACD, EMA, Bollinger Bands and Stochastic from OHLCV.
 
     Returns a per-timeframe dict. All values are None when df is too short.
     """
-    _empty: Dict[str, Any] = {
+    _empty: dict[str, Any] = {
         "close": None,
         "RSI": None,
         "MACD": {"macd": None, "signal": None, "histogram": None},
-        "EMA20": None, "EMA50": None, "EMA200": None,
+        "EMA20": None,
+        "EMA50": None,
+        "EMA200": None,
         "BollingerBands": {"upper": None, "middle": None, "lower": None},
         "Stochastic": {"k": None, "d": None},
         "recommendation": None,
@@ -335,18 +329,18 @@ def _indicators_from_df(df) -> Dict[str, Any]:
     if df is None or df.empty or len(df) < 14:
         return _empty
 
-    import ta as ta_lib
+    from ta import momentum as ta_momentum
+    from ta import trend as ta_trend
+    from ta import volatility as ta_volatility
 
     close = df["Close"]
     high = df["High"]
     low = df["Low"]
     n = len(df)
 
-    rsi = _safe_last(ta_lib.momentum.RSIIndicator(close, window=14).rsi())
+    rsi = _safe_last(ta_momentum.RSIIndicator(close, window=14).rsi())
 
-    macd_ind = ta_lib.trend.MACD(
-        close, window_slow=26, window_fast=12, window_sign=9
-    )
+    macd_ind = ta_trend.MACD(close, window_slow=26, window_fast=12, window_sign=9)
     macd_val = _safe_last(macd_ind.macd())
     macd_sig = _safe_last(macd_ind.macd_signal())
     macd_hist = _safe_last(macd_ind.macd_diff())
@@ -354,23 +348,21 @@ def _indicators_from_df(df) -> Dict[str, Any]:
     def _ema(w: int):
         if n < w:
             return None
-        return _safe_last(
-            ta_lib.trend.EMAIndicator(close, window=w).ema_indicator()
-        )
+        return _safe_last(ta_trend.EMAIndicator(close, window=w).ema_indicator())
 
     ema20 = _ema(20)
     ema50 = _ema(50)
     ema200 = _ema(200)
 
     if n >= 20:
-        bb = ta_lib.volatility.BollingerBands(close, window=20)
+        bb = ta_volatility.BollingerBands(close, window=20)
         bb_upper = _safe_last(bb.bollinger_hband())
         bb_mid = _safe_last(bb.bollinger_mavg())
         bb_lower = _safe_last(bb.bollinger_lband())
     else:
         bb_upper = bb_mid = bb_lower = None
 
-    stoch = ta_lib.momentum.StochasticOscillator(high, low, close, window=14)
+    stoch = ta_momentum.StochasticOscillator(high, low, close, window=14)
     stoch_k = _safe_last(stoch.stoch())
     stoch_d = _safe_last(stoch.stoch_signal())
 
@@ -385,14 +377,16 @@ def _indicators_from_df(df) -> Dict[str, Any]:
         "EMA50": ema50,
         "EMA200": ema200,
         "BollingerBands": {
-            "upper": bb_upper, "middle": bb_mid, "lower": bb_lower,
+            "upper": bb_upper,
+            "middle": bb_mid,
+            "lower": bb_lower,
         },
         "Stochastic": {"k": stoch_k, "d": stoch_d},
         "recommendation": rec,
     }
 
 
-def compute_indicators(ticker: str) -> Dict[str, Any]:
+def compute_indicators(ticker: str) -> dict[str, Any]:
     """Compute multi-timeframe technicals using yfinance OHLCV + ta library.
 
     Drop-in replacement for the removed fetch_tradingview(). Returns the same
@@ -405,8 +399,8 @@ def compute_indicators(ticker: str) -> Dict[str, Any]:
       ~1 638 1H bars → ~410 4H bars after resampling. Both fully cover EMA200.
     * 1D — ``period="2y", interval="1d"`` → ~504 bars (covers EMA200 on 1D).
     """
-    errors: List[str] = []
-    technicals: Dict[str, Any] = {}
+    errors: list[str] = []
+    technicals: dict[str, Any] = {}
 
     with _tracer.start_as_current_span("data.compute_indicators") as span:
         span.set_attribute("ticker", ticker)
@@ -421,11 +415,14 @@ def compute_indicators(ticker: str) -> Dict[str, Any]:
             errors.append(f"indicators 1H/4H: no hourly OHLCV data for {ticker}")
         else:
             technicals["1H"] = _indicators_from_df(df_1h)
-            span.add_event("timeframe_done", {
-                "timeframe": "1H",
-                "rsi": str(technicals["1H"].get("RSI", "")),
-                "rec": technicals["1H"].get("recommendation", ""),
-            })
+            span.add_event(
+                "timeframe_done",
+                {
+                    "timeframe": "1H",
+                    "rsi": str(technicals["1H"].get("RSI", "")),
+                    "rec": technicals["1H"].get("recommendation", ""),
+                },
+            )
             _log.info(
                 "indicators ◀ 1H %s rsi=%s rec=%s",
                 ticker,
@@ -434,22 +431,30 @@ def compute_indicators(ticker: str) -> Dict[str, Any]:
             )
 
             try:
-                df_4h = df_1h.resample("4h").agg(
-                    Open=("Open", "first"),
-                    High=("High", "max"),
-                    Low=("Low", "min"),
-                    Close=("Close", "last"),
-                    Volume=("Volume", "sum"),
-                ).dropna(subset=["Close"])
+                df_4h = (
+                    df_1h.resample("4h")
+                    .agg(
+                        Open=("Open", "first"),
+                        High=("High", "max"),
+                        Low=("Low", "min"),
+                        Close=("Close", "last"),
+                        Volume=("Volume", "sum"),
+                    )
+                    .dropna(subset=["Close"])
+                )
                 technicals["4H"] = _indicators_from_df(df_4h)
-                span.add_event("timeframe_done", {
-                    "timeframe": "4H",
-                    "rsi": str(technicals["4H"].get("RSI", "")),
-                    "rec": technicals["4H"].get("recommendation", ""),
-                })
+                span.add_event(
+                    "timeframe_done",
+                    {
+                        "timeframe": "4H",
+                        "rsi": str(technicals["4H"].get("RSI", "")),
+                        "rec": technicals["4H"].get("recommendation", ""),
+                    },
+                )
                 _log.info(
                     "indicators ◀ 4H %s bars=%d rsi=%s rec=%s",
-                    ticker, len(df_4h),
+                    ticker,
+                    len(df_4h),
                     technicals["4H"].get("RSI"),
                     technicals["4H"].get("recommendation"),
                 )
@@ -465,11 +470,14 @@ def compute_indicators(ticker: str) -> Dict[str, Any]:
             errors.append(f"indicators 1D: no daily OHLCV data for {ticker}")
         else:
             technicals["1D"] = _indicators_from_df(df_1d)
-            span.add_event("timeframe_done", {
-                "timeframe": "1D",
-                "rsi": str(technicals["1D"].get("RSI", "")),
-                "rec": technicals["1D"].get("recommendation", ""),
-            })
+            span.add_event(
+                "timeframe_done",
+                {
+                    "timeframe": "1D",
+                    "rsi": str(technicals["1D"].get("RSI", "")),
+                    "rec": technicals["1D"].get("recommendation", ""),
+                },
+            )
             _log.info(
                 "indicators ◀ 1D %s rsi=%s rec=%s",
                 ticker,
@@ -485,36 +493,36 @@ def compute_indicators(ticker: str) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # FRED — US macro indicators (key-free CSV endpoints)
 # --------------------------------------------------------------------------- #
-def _parse_fred_csv(text: str) -> List[tuple]:
+def _parse_fred_csv(text: str) -> list[tuple]:
     """Parse a FRED CSV response; return list of (date_str, float) for
     non-null rows.  FRED uses "." to denote missing values."""
-    rows: List[tuple] = []
+    rows: list[tuple] = []
     try:
         reader = csv.DictReader(io.StringIO(text))
         for row in reader:
             date_str = (row.get("DATE") or "").strip()
-            val_str  = (row.get("VALUE") or "").strip()
+            val_str = (row.get("VALUE") or "").strip()
             if not date_str or val_str in (".", ""):
                 continue
             try:
                 rows.append((date_str, float(val_str)))
             except ValueError:
                 pass
-    except Exception:  # noqa: BLE001
+    except Exception:
         _log.debug("_parse_fred_csv: unexpected parse error", exc_info=True)
     return rows
 
 
-def _parse_fred_api(payload: dict) -> List[tuple]:
+def _parse_fred_api(payload: dict) -> list[tuple]:
     """Parse a FRED REST API JSON response into [(date_str, float), …].
 
     The API returns observations newest-first (sort_order=desc), so the
     caller should reverse when chronological order matters (e.g. CPI YoY).
     """
-    rows: List[tuple] = []
+    rows: list[tuple] = []
     for obs in payload.get("observations", []):
         date_str = (obs.get("date") or "").strip()
-        val_str  = (obs.get("value") or "").strip()
+        val_str = (obs.get("value") or "").strip()
         if not date_str or val_str in (".", ""):
             continue
         try:
@@ -524,7 +532,7 @@ def _parse_fred_api(payload: dict) -> List[tuple]:
     return rows
 
 
-def _last_fred(series: str, *, limit: int = 1) -> Optional[Dict[str, Any]]:
+def _last_fred(series: str, *, limit: int = 1) -> dict[str, Any] | None:
     """Fetch a single FRED series and return the last non-null {value, date}.
 
     Prefers the FRED REST API (api.stlouisfed.org) when ``FRED_API_KEY`` is
@@ -533,6 +541,7 @@ def _last_fred(series: str, *, limit: int = 1) -> Optional[Dict[str, Any]]:
     key-free CSV endpoint when no key is set.
     """
     from .config import get_settings
+
     api_key = get_settings().fred_api_key
 
     try:
@@ -556,7 +565,7 @@ def _last_fred(series: str, *, limit: int = 1) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _cape_from_multpl() -> Optional[Dict[str, Any]]:
+def _cape_from_multpl() -> dict[str, Any] | None:
     """Scrape the most recent Shiller CAPE (P/E 10) value from multpl.com.
 
     Returns ``{"value": float, "date": "YYYY-MM-01"}`` or None on any failure.
@@ -572,6 +581,7 @@ def _cape_from_multpl() -> Optional[Dict[str, Any]]:
         # Value cell may contain HTML entities (&#x2002; en-space) before the
         # number, so extract the two <td> texts separately then find the float.
         import html as _html
+
         m = re.search(
             r"<tr[^>]*>\s*<td[^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>",
             r.text,
@@ -601,7 +611,7 @@ def _cape_from_multpl() -> Optional[Dict[str, Any]]:
         return None
 
 
-def fetch_fred_macro() -> Dict[str, Any]:
+def fetch_fred_macro() -> dict[str, Any]:  # noqa: C901
     """Fetch US macro indicators from FRED (key-free CSV) + Shiller CAPE.
 
     Global 6h DB cache shared across all tickers in a scan.  A FRED/scrape
@@ -617,19 +627,17 @@ def fetch_fred_macro() -> Dict[str, Any]:
             fetched_at = datetime.fromisoformat(fetched_at_str)
             if fetched_at.tzinfo is None:
                 fetched_at = fetched_at.replace(tzinfo=timezone.utc)
-            age_h = (
-                datetime.now(timezone.utc) - fetched_at
-            ).total_seconds() / 3600
+            age_h = (datetime.now(timezone.utc) - fetched_at).total_seconds() / 3600
             if age_h < _CACHE_TTL_H:
                 _log.info("macro ◀ (cache hit, age=%.1fh)", age_h)
                 return cached.get("data", {})
-        except Exception:  # noqa: BLE001
+        except Exception:
             _log.debug("fetch_fred_macro: cache parse error, re-fetching", exc_info=True)
 
     with _tracer.start_as_current_span("data.fetch_macro") as span:
         span.set_attribute("data_source", "fred+multpl")
         _log.info("macro ▶ fetching from FRED + multpl.com")
-        data: Dict[str, Any] = {}
+        data: dict[str, Any] = {}
 
         # Fed funds rate
         data["fed_funds_rate"] = _last_fred("FEDFUNDS")
@@ -638,6 +646,7 @@ def fetch_fred_macro() -> Dict[str, Any]:
         # to handle gaps in FRED's monthly release schedule.
         try:
             from .config import get_settings
+
             api_key = get_settings().fred_api_key
             if api_key:
                 url = _FRED_API_URL.format(series="CPIAUCSL", key=api_key, limit=24)
@@ -646,9 +655,7 @@ def fetch_fred_macro() -> Dict[str, Any]:
                 # API returns newest-first; reverse to chronological order
                 cpi_rows = list(reversed(_parse_fred_api(r.json())))
             else:
-                r = requests.get(
-                    _FRED_CSV_URL.format(series="CPIAUCSL"), timeout=(5, 15)
-                )
+                r = requests.get(_FRED_CSV_URL.format(series="CPIAUCSL"), timeout=(5, 15))
                 r.raise_for_status()
                 cpi_rows = _parse_fred_csv(r.text)
 
@@ -657,6 +664,7 @@ def fetch_fred_macro() -> Dict[str, Any]:
                 # Find the value closest to 12 months prior by date matching
                 try:
                     from datetime import date
+
                     ld = date.fromisoformat(latest_date)
                     target_year = ld.year - 1
                     # Build a dict for fast lookup, fall back to index -13
@@ -700,24 +708,26 @@ def fetch_fred_macro() -> Dict[str, Any]:
         if failed:
             data["_fetch_errors"] = failed
 
-        fetched_count = sum(1 for k, v in data.items()
-                            if not k.startswith("_") and v is not None)
+        fetched_count = sum(1 for k, v in data.items() if not k.startswith("_") and v is not None)
         total = sum(1 for k in data if not k.startswith("_"))
         span.set_attribute("series_fetched", fetched_count)
         span.set_attribute("cache_hit", False)
         _log.info("macro ◀ fetched=%d/%d series", fetched_count, total)
 
-        _store_json(_CACHE_KEY, {
-            "fetched_at": _now_iso(),
-            "data": data,
-        })
+        _store_json(
+            _CACHE_KEY,
+            {
+                "fetched_at": _now_iso(),
+                "data": data,
+            },
+        )
         return data
 
 
 # --------------------------------------------------------------------------- #
 # yfinance — balance sheet
 # --------------------------------------------------------------------------- #
-def fetch_balance_sheet(ticker: str) -> Dict[str, Any]:
+def fetch_balance_sheet(ticker: str) -> dict[str, Any]:
     """Fetch the most recent annual balance sheet for *ticker* from yfinance.
 
     Daily DB cache per ticker.  Returns a dict with None values when the data
@@ -731,7 +741,7 @@ def fetch_balance_sheet(ticker: str) -> Dict[str, Any]:
         _log.info("balance_sheet ◀ %s (cache hit)", ticker)
         return cached.get("data", {})
 
-    _empty: Dict[str, Any] = {
+    _empty: dict[str, Any] = {
         "period": None,
         "total_assets": None,
         "total_liabilities": None,
@@ -756,36 +766,26 @@ def fetch_balance_sheet(ticker: str) -> Dict[str, Any]:
 
             col = bs.columns[0]  # most recent period-end Timestamp
 
-            def _row(name: str) -> Optional[float]:
-                return (
-                    _safe_float(bs.loc[name, col]) if name in bs.index else None
-                )
+            def _row(name: str) -> float | None:
+                return _safe_float(bs.loc[name, col]) if name in bs.index else None
 
             # Guard with fallback label names across yfinance versions.
-            liabilities = (
-                _row("Total Liabilities Net Minority Interest")
-                or _row("Total Liabilities")
+            liabilities = _row("Total Liabilities Net Minority Interest") or _row(
+                "Total Liabilities"
             )
-            equity = (
-                _row("Stockholders Equity")
-                or _row("Total Stockholder Equity")
-            )
+            equity = _row("Stockholders Equity") or _row("Total Stockholder Equity")
             debt = _row("Total Debt") or _row("Long Term Debt")
-            cash = (
-                _row("Cash And Cash Equivalents")
-                or _row("Cash")
-            )
+            cash = _row("Cash And Cash Equivalents") or _row("Cash")
 
             # Convert pandas Timestamp to ISO string for JSON safety.
-            period_str = (
-                str(col.date()) if hasattr(col, "date") else str(col)
-            )
+            col_date = getattr(col, "date", None)
+            period_str = str(col_date()) if callable(col_date) else str(col)
 
             d_over_e = None
             if debt is not None and equity and equity != 0:
                 d_over_e = round(debt / equity, 3)
 
-            result: Dict[str, Any] = {
+            result: dict[str, Any] = {
                 "period": period_str,
                 "total_assets": _row("Total Assets"),
                 "total_liabilities": liabilities,
@@ -813,9 +813,7 @@ def fetch_balance_sheet(ticker: str) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Finnhub — optional news (returns List[Dict] with full article metadata)
 # --------------------------------------------------------------------------- #
-def fetch_finnhub_news(
-    ticker: str, api_key: str, n: int = 5
-) -> List[Dict[str, Any]]:
+def fetch_finnhub_news(ticker: str, api_key: str, n: int = 5) -> list[dict[str, Any]]:
     """Return up to *n* recent news articles via the Finnhub API.
 
     Each article dict has: ``headline``, ``source``, ``url``, ``datetime``
@@ -832,6 +830,7 @@ def fetch_finnhub_news(
             return []
         try:
             import finnhub
+
             today = date.today().isoformat()
             week_ago = (date.today() - timedelta(days=7)).isoformat()
             client = finnhub.Client(api_key=api_key)
@@ -839,8 +838,8 @@ def fetch_finnhub_news(
             result = [
                 {
                     "headline": a.get("headline"),
-                    "source":   a.get("source"),
-                    "url":      a.get("url"),
+                    "source": a.get("source"),
+                    "url": a.get("url"),
                     "datetime": a.get("datetime"),  # Unix epoch int
                 }
                 for a in (articles or [])[:n]
@@ -858,7 +857,7 @@ def fetch_finnhub_news(
 # --------------------------------------------------------------------------- #
 # Unified market-data assembler
 # --------------------------------------------------------------------------- #
-def get_market_data(ticker: str) -> Dict[str, Any]:
+def get_market_data(ticker: str) -> dict[str, Any]:
     """Return the unified market-data dict for *ticker*.
 
     The shape is stable even when data sources fail; missing values are
@@ -868,7 +867,7 @@ def get_market_data(ticker: str) -> Dict[str, Any]:
 
     ticker = ticker.strip().upper()
     _log.info("market_data ▶ %s", ticker)
-    errors: List[str] = []
+    errors: list[str] = []
 
     yf_data = fetch_yfinance(ticker)
     if "error" in yf_data:
@@ -882,14 +881,14 @@ def get_market_data(ticker: str) -> Dict[str, Any]:
     news = fetch_finnhub_news(ticker, settings.finnhub_api_key)
 
     # Balance sheet — daily-cached per ticker.
-    balance_sheet: Dict[str, Any] = {}
+    balance_sheet: dict[str, Any] = {}
     try:
         balance_sheet = fetch_balance_sheet(ticker)
     except Exception as exc:  # pragma: no cover
         errors.append(f"balance_sheet error: {exc}")
 
     # US macro — global 6h cache.
-    macro: Dict[str, Any] = {}
+    macro: dict[str, Any] = {}
     try:
         macro = fetch_fred_macro()
     except Exception as exc:  # pragma: no cover
@@ -911,9 +910,7 @@ def get_market_data(ticker: str) -> Dict[str, Any]:
         "price": yf_data.get("price", {}),
         "fundamentals": yf_data.get("fundamentals", {}),
         "exchange": yf_data.get("exchange_hint"),
-        "technicals": ind_data.get(
-            "technicals", {tf: None for tf in _TIMEFRAMES}
-        ),
+        "technicals": ind_data.get("technicals", {tf: None for tf in _TIMEFRAMES}),
         "news": news,
         "balance_sheet": balance_sheet,
         "macro": macro,
@@ -933,7 +930,7 @@ if __name__ == "__main__":
     _output = _json.dumps(get_market_data(symbol), indent=2, default=str)
     _output = _re.sub(
         r'(?i)(api_key|apikey|api-key|token)=([^&"\s]{4})[^&"\s]*',
-        r'\1=\2***',
+        r"\1=\2***",
         _output,
     )
     sys.stdout.write(_output + "\n")

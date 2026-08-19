@@ -59,15 +59,20 @@ backend/
 ├── data.py           # yfinance OHLCV + ta library -> indicators + market dict
 ├── analysis.py       # prompt -> local Ollama /api/chat -> parsed JSON
 ├── opportunities.py  # AI output + rule-based checks -> scored signals
-├── database.py       # SQLite: signals + analysis_log + app_settings
+├── database.py       # SQLite: signals + analysis_log + app_settings + ticker_memory
 ├── alerts.py         # Gmail SMTP + Slack webhook (confidence-gated)
-├── scheduler.py      # async, market-hours-aware scan loop
+├── memory.py         # per-ticker MemoryLayer — persists prior scan context to DB
+├── skills/           # five pipeline skills (fetch, ai, detect, persist, alert)
+├── agent.py          # TickerAgent — runs skills with retry + memory
+├── orchestrator.py   # Orchestrator — prioritised watchlist dispatch, concurrency cap
+├── scheduler.py      # async, market-hours-aware scan loop (uses Orchestrator)
 └── main.py           # FastAPI app (endpoints + CORS + lifespan + SSE streaming)
 ```
 
-Pipeline per ticker: **fetch data → AI analysis → detect opportunities → save → alert**.
-The **Analysis Explorer** UI page shows this pipeline live via Server-Sent Events, with
-per-step timing and charts for every indicator.
+Pipeline per ticker: **TickerAgent → FetchDataSkill → AIAnalysisSkill (retries) → OpportunityDetectSkill → PersistSkill → AlertSkill**.  
+The **Orchestrator** sorts tickers by scan staleness and caps concurrency at 3.  
+The **MemoryLayer** injects prior-scan context (`PRIOR CONTEXT`) into the AI prompt so RSI streaks and signal history inform each analysis.  
+The **Analysis Explorer** UI page shows this pipeline live via Server-Sent Events, including `retry` and `memory` events.
 
 See [docs/wiki/architecture.md](docs/wiki/architecture.md) for a full pipeline diagram and service map.
 
@@ -87,16 +92,14 @@ sudo service docker start
 # macOS — open Docker Desktop first:
 open -a Docker
 
-./start-infra.sh              # start shared Ollama + Portainer
-docker compose up --build     # build and start MarketSage
+make infra                    # start shared Ollama + Portainer (auto-detects GPU)
+make build                    # build and start MarketSage
 ```
 
 **When you are done — stop everything to free RAM/GPU:**
 
 ```bash
-docker compose down
-docker compose -f docker-compose.infra.yml down
-sudo service docker stop      # WSL2 only
+make down     # stops MarketSage; prompts whether to also stop Ollama + Portainer + Docker service (WSL2)
 ```
 
 Then open the services:
@@ -178,7 +181,7 @@ The background scheduler starts automatically and scans the watchlist every
 | Method | Path                          | Description                                        |
 |--------|-------------------------------|----------------------------------------------------|
 | POST   | `/analyze`                    | On-demand analysis for any ticker.                 |
-| POST   | `/analyze/stream`             | Same pipeline, streamed via SSE (step events + result). |
+| POST   | `/analyze/stream`             | Same pipeline, streamed via SSE (`step` · `retry` · `memory` · `skill_error` · `result` events). |
 | GET    | `/market-data/{ticker}`       | Raw market-data dict (price, fundamentals, indicators, balance sheet, macro, news). |
 | GET    | `/market-data/{ticker}/history` | OHLCV + volume history (`?period=3mo&interval=1d`). |
 | POST   | `/webhook/tradingview`        | Receive a TradingView Pro alert → background scan. |
@@ -289,6 +292,7 @@ See [docs/wiki/indicators.md](docs/wiki/indicators.md) for a full indicator refe
 | [Settings Reference](docs/wiki/settings.md) | Every `.env` variable, defaults, runtime-mutable column |
 | [Glossary](docs/wiki/glossary.md) | Alphabetical trading and macro terminology |
 | [Observability](docs/wiki/observability.md) | OTEL span hierarchy, Aspire usage, log reference |
+| [Development](docs/wiki/development.md) | VS Code setup, `make lint`, test layout, Docker naming, PR/CI notes |
 
 ---
 

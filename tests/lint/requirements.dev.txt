@@ -1,0 +1,14 @@
+# Dev-only tooling — installed locally into .venv by tests/lint/dev_check.sh
+# Also includes backend runtime deps so the smoke tests can import the backend.
+-r ../../requirements/backend.txt
+
+pytest>=8.0
+pytest-asyncio>=0.23
+httpx2>=2.6             # starlette.testclient prefers httpx2 over httpx (avoids DeprecationWarning)
+
+# Linting & formatting
+ruff>=0.4               # fast all-in-one linter (E/W/F/B/S/I/C90/UP rules)
+flake8>=7.0             # classic linter — runs alongside ruff in VS Code
+flake8-bugbear>=24.0    # B rules: B018 → py/ineffectual-statement, B007 → unused loop var
+flake8-bandit>=4.1      # S rules: S110 → py/empty-except, S105/S106 → hardcoded creds
+black>=24.0             # formatter (must match VS Code black-formatter extension)

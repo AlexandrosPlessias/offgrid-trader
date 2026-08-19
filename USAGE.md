@@ -16,126 +16,93 @@ bash scripts/setup_wsl.sh     # WSL2 / Ubuntu
 bash scripts/setup_macos.sh   # macOS
 ```
 
-**Subsequent runs** (model already downloaded, image already built):
+**Subsequent runs** (model already downloaded, images already built):
 
 ```bash
-# ── Step 1: start Docker ────────────────────────────────────────────────────
-# Docker is not auto-started. Run once per session before anything else.
-#
-# WSL2:
-sudo service docker start
-#
-# macOS:
-open -a Docker          # wait for the menu-bar icon to stop animating (~10 s)
-
-# ── Step 2: start shared infra + MarketSage ─────────────────────────────────
-# macOS only: ensure native Ollama is running first (Metal GPU)
-ollama serve &          # skip if already running
-
-./start-infra.sh        # start shared Ollama proxy + Portainer (idempotent)
-docker compose up -d    # start MarketSage in the background
+make infra    # start Docker (WSL2) + Ollama + Portainer
+make up       # start MarketSage
 ```
 
-**When you are done — free up resources:**
+`make infra` detects WSL2 automatically — it starts the Docker service, waits
+until the daemon is ready, then launches the shared Ollama + Portainer stack.
+On macOS it skips the service step and goes straight to the containers.
+
+**When you are done:**
 
 ```bash
-# Stop MarketSage only (Ollama and Portainer keep running):
-docker compose down
-
-# Stop everything (MarketSage + Ollama + Portainer):
-docker compose down
-docker compose -f docker-compose.infra.yml down
-
-# WSL2 — stop Docker entirely (frees RAM until next session):
-sudo service docker stop
-
-# macOS — quit Docker Desktop from the menu-bar icon (or):
-osascript -e 'quit app "Docker Desktop"'
+make down     # stop MarketSage + Ollama + Portainer + Docker service (WSL2)
 ```
 
-**Other common commands:**
-
-```bash
-docker compose up          # start in foreground — see live logs (Ctrl+C stops)
-docker compose up -d       # start detached — runs in background, prompt returns
-docker compose up --build  # rebuild images after a code change, then start
-docker compose down        # stop MarketSage (Ollama/Portainer keep running)
-```
-
-Subsequent runs skip the ~9 GB model download because the weights persist in
-the `ollama_models` named volume, so the stack is ready in under a minute.
+On WSL2 `make down` gracefully stops all containers and then calls
+`sudo service docker stop` so Docker's RAM footprint is freed until the next
+session.
 
 ---
 
-## 2. Service URLs
+## 2. Makefile reference
+
+Every interaction goes through `make`. The compose files live in `infra/`; the
+Makefile handles the path so you never have to type `-f infra/docker-compose.yml`.
+
+| Command | What it does |
+|---|---|
+| `make infra` | Start Docker service (WSL2) → Ollama + Portainer (auto-detects GPU) |
+| `make up` | Start MarketSage in the background (requires `make infra` first) |
+| `make build` | Rebuild images then start — use after any code change |
+| `make down` | Stop MarketSage + shared infra + Docker service (WSL2) |
+| `make logs` | Tail logs for all MarketSage services |
+| `make smoke` | Run offline smoke tests inside the backend container |
+| `make lint` | Local quality gate on the host: ruff → flake8 → black → smoke (no Docker needed) |
+| `make shell-backend` | Open a bash shell inside the running backend container |
+
+`make up` and `make build` both print a URL table when the stack is ready:
+
+```
+  ┌─────────────────────────────────────────────────────────────┐
+  │  MarketSage — running                                       │
+  ├──────────────────┬──────────────────────────────────────────┤
+  │  Frontend (UI)   │  http://localhost:5174                   │
+  │  Backend API     │  http://localhost:8010                   │
+  │  API Docs        │  http://localhost:8010/docs              │
+  │  Aspire          │  http://localhost:18889                  │
+  │  Portainer       │  http://localhost:9000                   │
+  └──────────────────┴──────────────────────────────────────────┘
+```
+
+### After editing `.env`
+
+```bash
+make up      # recreates the backend container so new env values are read
+             # (a plain `restart` keeps the old environment)
+```
+
+### After a code change
+
+```bash
+make build   # rebuilds images and restarts all services
+```
+
+### Check container status
+
+```bash
+docker compose -f infra/docker-compose.yml ps
+# Containers are named: offgrid-trader-backend-1, offgrid-trader-frontend-1, offgrid-trader-aspire-1
+```
+
+---
+
+## 3. Service URLs
 
 | URL | Service | Purpose |
 |---|---|---|
-| http://localhost:5174 | React UI | Dashboard · Analysis Explorer · Learn (glossary + education) |
-| http://localhost:8010/docs | Backend API | OpenAPI docs — try all endpoints interactively |
+| http://localhost:5174 | React UI | Dashboard · Explorer · Learn · Settings |
+| http://localhost:8010 | Backend API | REST API root |
+| http://localhost:8010/docs | Backend API | OpenAPI interactive docs |
 | http://localhost:8010/health | Backend API | Liveness + scheduler status |
-| http://localhost:18889 | Aspire | Traces, metrics, structured logs (MarketSage only) |
-| http://localhost:9000 | Portainer | Container management UI — logs, stats, console |
+| http://localhost:18889 | Aspire | Traces, metrics, structured logs |
+| http://localhost:9000 | Portainer | Container management UI |
 
-The `ollama` container is internal-only (not published to the host); the backend
-reaches it at `http://ollama:11434` on the `ai-shared` network.
-
----
-
-## 3. Day-to-day commands
-
-### Stopping the stack
-
-```bash
-# Stop MarketSage only (Ollama and Portainer keep running):
-docker compose down
-
-# Stop the shared infra (Ollama + Portainer + ai-shared network):
-docker compose -f docker-compose.infra.yml down
-
-# Stop everything on the machine at once:
-docker stop $(docker ps -q)
-```
-
-> `docker compose down` removes the MarketSage containers but **not** the
-> `ollama_models` volume — model weights are preserved.
-
-### Restarting
-
-```bash
-# Start shared infra first, then the app:
-./start-infra.sh
-docker compose up -d
-```
-
-### Other useful commands
-
-```bash
-# Stream logs for all services:
-docker compose logs -f
-
-# Stream logs for one service:
-docker compose logs -f backend
-docker compose logs -f ollama
-
-# Apply an .env change (recreates the container so new env is read):
-docker compose up -d backend
-
-# Restart the backend process without re-reading .env (e.g. to clear state):
-docker compose restart backend
-
-# Rebuild and restart the backend (after a code change):
-docker compose up --build backend
-
-# Check container health / status:
-docker compose ps
-```
-
-> ⚠️ **`.env` changes need `docker compose up -d backend`, not `restart`.**
-> Values from `env_file` are injected only when the container is **created**.
-> `docker compose restart` reuses the existing container, so it keeps the old
-> environment — your edit won't take effect until you recreate it with
-> `docker compose up -d backend`.
+`ollama` is internal-only — the backend reaches it at `http://ollama:11434`.
 
 ---
 
@@ -144,109 +111,95 @@ docker compose ps
 | Method | Path | Description |
 |---|---|---|
 | POST | `/analyze` | On-demand analysis for any ticker |
-| POST | `/analyze/stream` | Same pipeline, streamed via SSE (step events + final result) |
+| POST | `/analyze/stream` | Same pipeline via SSE (step · retry · memory · skill_error · result events) |
 | GET | `/market-data/{ticker}` | Raw market-data dict (price, fundamentals, balance sheet, macro, indicators, news) |
 | GET | `/market-data/{ticker}/history` | OHLCV + volume history (`?period=3mo&interval=1d`) |
 | POST | `/webhook/tradingview` | Receive a TradingView Pro alert → background scan |
 | GET | `/signals` | Recent stored signals (`?ticker=&limit=`) |
 | DELETE | `/signals/{id}` | Delete a stored signal by id |
-| GET | `/analysis` | Recent analysis-log entries across all tickers (`?limit=`) |
+| GET | `/analysis` | Recent analysis-log entries (`?limit=`) |
 | DELETE | `/analysis/{id}` | Delete an analysis-log entry by id |
 | GET | `/analysis/{ticker}` | Analysis-log history for a single ticker |
 | GET | `/watchlist` | Watchlist + scheduler status + alerts toggle |
-| POST | `/watchlist` | Add ticker (`{"ticker": "GOOGL"}`) — persisted in SQLite |
-| DELETE | `/watchlist/{ticker}` | Remove ticker — persisted in SQLite |
+| POST | `/watchlist` | Add ticker (`{"ticker": "GOOGL"}`) |
+| DELETE | `/watchlist/{ticker}` | Remove ticker |
 | GET | `/settings` | Current effective settings (env + DB overrides) |
 | POST | `/settings/alerts` | Toggle alert dispatch (`{"enabled": true/false}`) |
-| POST | `/settings/scheduler` | Start/stop auto-scan (`{"running": true/false}`); state persists across restarts |
+| POST | `/settings/scheduler` | Start/stop auto-scan (`{"running": true/false}`); persists across restarts |
 | POST | `/settings/scan-interval` | Change scan cadence (`{"minutes": 60}`) |
 | POST | `/settings/ollama` | Override Ollama model and/or timeout at runtime |
-| POST | `/data/reset` | Clear all signals and analysis history (app settings preserved) |
+| POST | `/data/reset` | Clear all signals and analysis history (settings preserved) |
 | GET | `/health` | Liveness + config summary |
 
 Full reference with request/response shapes: [docs/wiki/api.md](docs/wiki/api.md).
 
 ### UI pages
 
-The React UI has four tabs (Dashboard, Explorer, Learn) plus a Settings panel (⚙ gear icon in the header):
+- **Dashboard** — watchlist management, recent signals table with filters (side, confidence, ticker), per-row delete
+- **Explorer** — ad-hoc analysis: live pipeline stepper, price snapshot, 3-month chart, RSI/MACD/EMA charts, AI reasoning, raw indicator table, collapsible Analysis History panel
+- **Learn** — in-app wiki: pipeline, indicators, fundamentals/macro/balance sheet, opportunity rules, trading glossary, further reading
+- **Settings** (⚙) — scheduler toggle + interval, alerts toggle, Ollama model/timeout override, data-reset button
 
-- **Dashboard** — watchlist management and recent signals table (collapsible filters: side, confidence, ticker; per-row delete)
-- **Explorer** — ad-hoc analysis as a full-page walkthrough: live pipeline stepper, price snapshot, 3-month history chart, RSI/MACD/EMA charts, AI reasoning, raw indicator table, and a collapsible **Analysis History** panel (re-open any saved run; per-row delete)
-- **Learn** — in-app wiki: pipeline overview, technical indicators, fundamentals/macro/balance-sheet context, opportunity detection rules, trading glossary, and further reading links. All sections are collapsible; click a title in the sidebar to expand it.
-- **Settings** (⚙) — Scheduler toggle + scan interval, alerts toggle, Ollama model/timeout override, and a data-reset button (clears signals + analysis history; preserves settings)
-
-### Examples
+### curl examples
 
 ```bash
-# Analyse a single ticker on demand:
+# On-demand analysis:
 curl -X POST http://localhost:8010/analyze \
   -H "Content-Type: application/json" \
   -d '{"ticker": "NVDA"}'
 
-# Analyse and also fire alerts for actionable signals:
+# With alerts:
 curl -X POST http://localhost:8010/analyze \
   -H "Content-Type: application/json" \
   -d '{"ticker": "NVDA", "send_alerts": true}'
 
-# Recent signals (all tickers):
+# Recent signals:
 curl "http://localhost:8010/signals?limit=20"
-
-# Recent signals for one ticker:
 curl "http://localhost:8010/signals?ticker=AAPL&limit=10"
 
-# Analysis history for a ticker:
+# Analysis history:
 curl http://localhost:8010/analysis/AAPL
 
-# Watchlist + scheduler status:
+# Watchlist + scheduler state:
 curl http://localhost:8010/watchlist
 ```
 
 ### TradingView webhook
 
-Point a TradingView Pro alert at `http://<your-host>:8010/webhook/tradingview`
-with a JSON message body:
+Point a TradingView Pro alert at `http://<your-host>:8010/webhook/tradingview`:
 
 ```json
 { "ticker": "{{ticker}}", "action": "buy", "price": {{close}} }
 ```
 
-The backend accepts the payload and runs the analysis in the background.
-
 ---
 
 ## 5. The scheduler
 
-The backend runs an async, **market-hours-aware** loop (Mon–Fri, 9:30–16:00 ET).
-While the market is open it scans every ticker in `WATCHLIST` every
-`SCAN_INTERVAL_MINUTES`: fetch data → AI analysis → detect opportunities → save
-→ alert. Outside market hours it sleeps.
+The backend runs an async, **market-hours-aware** scan loop (Mon–Fri 9:30–16:00 ET)
+via the **Orchestrator** — it sorts tickers by scan staleness and caps concurrency
+at 3 to avoid overloading Ollama.
 
-**Auto-scan is off by default.** Enable it from the Settings page (⚙ gear in the header) or via the API:
+**Auto-scan is off by default.** Enable from the Settings page (⚙) or via API:
 
 ```bash
-# Turn on auto-scan:
 curl -X POST http://localhost:8010/settings/scheduler \
   -H "Content-Type: application/json" \
   -d '{"running": true}'
-
-# Turn off auto-scan:
-curl -X POST http://localhost:8010/settings/scheduler \
-  -H "Content-Type: application/json" \
-  -d '{"running": false}'
 ```
 
-The on/off state is **persisted to SQLite** and survives container restarts — you don't need to touch `.env`.
+State is persisted to SQLite and survives `make down` + `make up`.
 
 ```bash
-# See what the scheduler is doing:
-docker compose logs -f backend | grep scheduler
+# Watch scheduler activity:
+make logs 2>&1 | grep scheduler
 
-# Confirm state (running / market_open / last_run):
+# Confirm current state (running / market_open / last_run):
 curl http://localhost:8010/watchlist
 ```
 
-To change the watchlist, edit `WATCHLIST` in `.env` and run `docker compose up -d backend`.
-To change the scan interval without restarting, use the Settings page or:
+To change the watchlist, edit `WATCHLIST` in `.env` then `make up`.
+To change scan interval without restarting:
 
 ```bash
 curl -X POST http://localhost:8010/settings/scan-interval \
@@ -258,14 +211,10 @@ curl -X POST http://localhost:8010/settings/scan-interval \
 
 ## 6. Container management (Portainer)
 
-Open **http://localhost:9000**. On first visit Portainer asks you to set an
-admin password.
+Open **http://localhost:9000**. On first visit, set an admin password.
 
-From the Portainer UI you can:
-- View live logs for any container (Containers → select → Logs)
-- Inspect CPU / memory stats per container (Containers → select → Stats)
-- Open a shell inside a container (Containers → select → Console)
-- Start / stop / restart containers without the CLI
+From Portainer: view live logs, CPU/memory stats, open a shell, start/stop
+containers — without the CLI.
 
 ---
 
@@ -273,35 +222,42 @@ From the Portainer UI you can:
 
 | What | Where | Notes |
 |---|---|---|
-| Signals + analysis log | `./data/offgrid_trader.db` (SQLite) | Bind-mounted into the backend; survives `docker compose down` |
-| Ollama model weights | `ollama_models` named volume (shared) | Pulled once; survives restarts; shared with other AI projects |
-| Portainer config | `portainer_data` named volume (shared) | |
-
-Inspect the database directly:
+| Signals | `./data/offgrid_trader.db` — `signals` table | Bind-mounted; survives `make down` |
+| Analysis log | same DB, `analysis_log` table | Includes `analysis_json`, `market_snapshot`, `opportunities_json` (all detected scores), `actionable_json` (above-floor scores) |
+| Ticker memory | same DB, `ticker_memory` table | Per-ticker prior context (signal, confidence, RSI streak, price trend); 48h TTL |
+| Ollama model weights | `ollama_models` named volume | Pulled once; shared with other AI projects |
+| Portainer config | `portainer_data` named volume | |
 
 ```bash
-# Row counts:
-docker compose exec backend python -m backend.database
+# Inspect row counts — open a container shell then run:
+make shell-backend
+python -m backend.database
+exit
 
-# Query signals with sqlite3 from the host (repo root):
-sqlite3 data/offgrid_trader.db "SELECT ticker, type, confidence, source, timestamp FROM signals ORDER BY id DESC LIMIT 10;"
+# Or query SQLite directly from the host:
+sqlite3 data/offgrid_trader.db \
+  "SELECT ticker, type, confidence, source, timestamp FROM signals ORDER BY id DESC LIMIT 10;"
 ```
 
 ---
 
 ## 8. Running modules manually
 
-Each module is runnable inside the backend container for quick checks:
+Open a shell in the backend container, then run any module without the Docker prefix:
 
 ```bash
-docker compose exec backend python -m backend.config          # resolved config (secrets masked)
-docker compose exec backend python -m backend.data AAPL       # unified market data
-docker compose exec backend python -m backend.analysis AAPL   # data -> Ollama -> parsed analysis
-docker compose exec backend python -m backend.opportunities AAPL  # full detection for one ticker
-docker compose exec backend python -m backend.scheduler       # one-shot watchlist scan (no alerts)
+make shell-backend
+
+# Inside the container:
+python -m backend.config                  # resolved config (secrets masked)
+python -m backend.data AAPL               # fetch unified market data
+python -m backend.analysis AAPL           # data → Ollama → parsed analysis
+python -m backend.opportunities AAPL      # full detection for one ticker
+python -m backend.scheduler               # one-shot watchlist scan (no alerts)
+exit
 ```
 
-Verify Ollama has the model (Ollama is in the shared infra stack):
+Verify Ollama has the model (shared infra stack):
 
 ```bash
 docker exec ollama ollama list
@@ -311,11 +267,10 @@ docker exec ollama ollama list
 
 ## 9. Smoke test
 
-Run the offline smoke test to verify all backend logic is wired correctly
-(no live Ollama, yfinance, or SMTP calls — everything is mocked):
+Run the offline smoke test — no live Ollama, yfinance, or SMTP calls:
 
 ```bash
-docker compose exec backend python tests/smoke_test.py
+make smoke
 ```
 
 Expected output ends with:
@@ -325,8 +280,8 @@ Expected output ends with:
 SMOKE TEST PASSED — all checks green
 ```
 
-Run after every significant change to catch regressions before they hit the
-scheduler. To run locally without Docker:
+Run after every significant code change to catch regressions. To run locally
+without Docker:
 
 ```bash
 pip install -r requirements/dev.txt
@@ -339,96 +294,77 @@ python tests/smoke_test.py
 
 ### Clear signals and analysis history (keep settings)
 
-From the **Settings page** (⚙ gear in the header), use the **Clear all data** button. Or via API:
+From the **Settings page** (⚙), use **Clear all data**. Or via API:
 
 ```bash
 curl -X POST http://localhost:8010/data/reset
 ```
 
-This removes all rows from `signals` and `analysis_log`. Watchlist overrides, scheduler state, scan interval, and Ollama model settings are preserved.
-
 ### Wipe the entire database
 
 ```bash
-docker compose down
+make down
 rm -f data/offgrid_trader.db
-docker compose up -d
+make infra && make up
 ```
 
-The backend recreates the schema on the next start. Use this only when you also want to wipe app settings (watchlist, scheduler state, etc.).
+The backend recreates the schema on startup.
 
-### Re-pull / reset the model weights
+### Re-pull model weights
 
-Only if you want a completely clean slate (re-downloads ~9 GB). The volume is
-shared — this also affects other projects using the same Ollama instance:
+Only if you need a completely clean slate (~9 GB re-download):
 
 ```bash
-docker compose -f docker-compose.infra.yml down
+make down
 docker volume rm ollama_models
-./start-infra.sh
+make infra
 ```
 
 ---
 
 ## 11. Logs and telemetry
 
-The backend logs to stdout. Follow them with:
-
 ```bash
-docker compose logs -f backend
+make logs                       # tail all services
+make logs 2>&1 | grep backend   # backend only
 ```
-
-Structured log lines are emitted for every stage of the pipeline:
 
 | Logger | What it logs |
 |---|---|
-| `backend.data` | `yfinance ▶/◀` fetch (price, change%, vol ratio) and `indicators ▶/◀` per timeframe (RSI, MACD, EMA, recommendation) |
-| `backend.analysis` | `ollama ▶/◀` prompt text, response text, and latency |
-| `backend.scheduler` | Scan loop events (start, market open/closed, scan results) |
+| `backend.data` | `yfinance ▶/◀` fetch, `indicators ▶/◀` per timeframe |
+| `backend.analysis` | `ollama ▶/◀` prompt, response, latency |
+| `backend.agent` | Skill start/done/retry, memory load/update |
+| `backend.scheduler` | Scan loop events, orchestrator dispatch |
 
-When `OTEL_EXPORTER_OTLP_ENDPOINT` is set (set automatically in Docker), all log lines are
-forwarded to **Aspire** at http://localhost:18889. Filter by logger name to trace the full
-data-fetch pipeline for any ticker.
+All logs forward to **Aspire** at http://localhost:18889 when the OTEL endpoint
+is set (automatic in Docker).
 
-To reduce Ollama request timeouts on slow CPU inference, raise `OLLAMA_TIMEOUT`
-in `.env`, then `docker compose up -d backend` (recreates the container so the
-new value is applied).
+To raise the Ollama timeout:
+
+```bash
+# Edit .env: OLLAMA_TIMEOUT=300
+make up   # recreates the container so the new value is applied
+```
 
 ---
 
 ## 12. Re-capturing documentation screenshots
 
-The `docs/screenshots/` directory contains 15 viewport screenshots (1440 × 900 px)
-captured by a [Playwright](https://playwright.dev) script. Re-run any time the UI
-changes:
-
-### One-time setup (per machine)
-
 ```bash
-cd docs/screenshots
-npm install                      # installs playwright npm wrapper (~2 packages)
-npx playwright install chromium  # downloads headless Chromium browser (~200 MB)
-```
+# One-time setup:
+cd docs/screenshots && npm install && npx playwright install chromium
 
-### Capture
-
-```bash
-# Requirements: full stack running + at least one saved analysis
-
-# Create a saved analysis if you don't have one yet:
+# Ensure at least one saved analysis exists:
 curl -X POST http://localhost:8010/analyze \
   -H "Content-Type: application/json" \
   -d '{"ticker": "AAPL"}'
 
-# Run the capture script:
+# Capture all 15 screenshots:
 node docs/screenshots/capture.mjs
 ```
 
-All 15 PNGs are written to `docs/screenshots/`, existing files are overwritten.
-The script prints `✓ <filename>` for each successful shot.
-
-See [docs/screenshots/README.md](docs/screenshots/README.md) for the full file
-inventory, script internals, and troubleshooting.
+See [docs/screenshots/README.md](docs/screenshots/README.md) for the full
+file inventory and troubleshooting.
 
 ---
 
@@ -436,14 +372,17 @@ inventory, script internals, and troubleshooting.
 
 | Symptom | Fix |
 |---|---|
-| `backend` unhealthy / restarting | `docker compose logs backend`. Most often it's still waiting on `ollama-pull` to finish the model download |
-| `/analyze` returns an Ollama error | Model not ready yet, or Ollama container down. Check `docker compose exec ollama ollama list` and `docker compose ps` |
-| `Ollama request timed out after 120s` | The model is running (partly) on **CPU**. Two common causes: **(a)** GPU not reaching the container — verify with `docker exec ollama nvidia-smi` (*"GPU access blocked by the operating system"* = no GPU); register the runtime with `sudo nvidia-ctk runtime configure --runtime=docker && sudo service docker restart`, then check `docker info \| grep -i runtime` lists `nvidia`. **(b)** The model is too big for your VRAM — `docker exec ollama ollama ps` shows a `CPU/GPU` split (e.g. `70%/30%`); pick a model that fits (see next row). Then set `OLLAMA_MODEL` / `OLLAMA_TIMEOUT` in `.env` and `docker compose up -d backend`. See [SETUP.md §GPU support](SETUP.md#gpu-support-in-wsl2-recommended) |
-| Model splits across CPU/GPU (`ollama ps` shows e.g. `70%/30%`) | The model doesn't fit in your VRAM. Check total VRAM with `docker exec ollama nvidia-smi --query-gpu=memory.total --format=csv,noheader` and pick a model that fits: `qwen2.5:14b` (~10 GB) needs ≥12 GB; `qwen2.5:7b` (~4.7 GB) needs ~6 GB; `qwen2.5:3b` (~3 GB loaded) fits in 4 GB for **100% GPU**. Set `OLLAMA_MODEL` in `.env`, then `docker compose up -d backend`; confirm with `docker exec ollama ollama ps` (should read `100% GPU`) |
-| Analysis is very slow | On CPU the 14b model is slow — first call also pays a cold-start cost. Use a smaller `OLLAMA_MODEL` in `.env`, or run with a GPU |
-| No signals ever stored | Expected outside market hours, or when confidence is below `CONFIDENCE_FLOOR`. Lower the floor in `.env` to see more |
-| Alerts not sending | Confirm `EMAIL_ENABLED`/`SLACK_ENABLED=true` and credentials are set; only signals ≥ `CONFIDENCE_FLOOR` fire. Check `docker compose logs backend` for send errors |
-| Port already in use (8010 / 5174 / 9000) | Stop the conflicting process (`ss -tlnp \| grep :<port>`) or change the host port in `docker-compose.yml` |
-| `could not select device driver "nvidia"` | Run `./start-infra.sh --cpu` then `docker compose up --build` |
-| Data changes not persisting | Ensure the `./data` bind mount exists and is writable (`chmod -R 777 data` on WSL2) |
-| yfinance / indicator errors in logs | Transient upstream/network issues — the scan continues; problems are collected in each result's `errors` list |
+| `Cannot connect to Docker daemon` | Docker isn't running. Run `make infra` — it starts the Docker service automatically on WSL2 |
+| `make up` fails immediately | Run `make infra` first — Docker needs to be running before `make up` |
+| `backend` unhealthy / restarting | `make logs` — most often waiting for `ollama-pull` to finish the model download |
+| `/analyze` returns an Ollama error | Model not ready or Ollama down. Check `docker exec ollama ollama list` |
+| `Ollama request timed out after 120s` | Model running partly on CPU. **(a)** GPU not reaching container — `docker exec ollama nvidia-smi`; fix with `sudo nvidia-ctk runtime configure --runtime=docker && sudo service docker restart`. **(b)** Model too big for VRAM — `docker exec ollama ollama ps` shows `CPU/GPU` split; pick a smaller model. Edit `.env`, then `make up`. See [SETUP.md §GPU support](SETUP.md#gpu-support-in-wsl2-recommended) |
+| Model splits CPU/GPU | `docker exec ollama ollama ps` shows e.g. `70%/30%`. Check VRAM: `docker exec ollama nvidia-smi --query-gpu=memory.total --format=csv,noheader`. Sizes: `qwen2.5:14b` ~10 GB → ≥12 GB VRAM; `qwen2.5:7b` ~4.7 GB → ~6 GB; `qwen2.5:3b` ~3 GB → fits 4 GB fully. Set `OLLAMA_MODEL` in `.env`, run `make up`, confirm `100% GPU` with `docker exec ollama ollama ps` |
+| Analysis is very slow | CPU-only + cold start. Use a smaller `OLLAMA_MODEL` or enable GPU passthrough |
+| No signals stored | Expected outside market hours or confidence < `CONFIDENCE_FLOOR`. Lower the floor in `.env` to see more |
+| Alerts not sending | Confirm `EMAIL_ENABLED=true` and credentials set; only signals ≥ `CONFIDENCE_FLOOR` fire. Check `make logs` |
+| Port in use (8010 / 5174 / 9000) | `ss -tlnp \| grep :<port>` to find the owner; change the host port in `infra/docker-compose.yml` |
+| `could not select device driver "nvidia"` | `make infra --cpu` (CPU-only Ollama) then `make build` |
+| Data changes not persisting | `chmod -R 777 data` (WSL2 bind-mount permission issue) |
+| yfinance / indicator errors in logs | Transient network — scan continues; errors in `result.errors` |
+| Blank page at http://localhost:5174 | Hard refresh: **Ctrl+Shift+R** (Windows/Linux) or **Cmd+Shift+R** (macOS) |

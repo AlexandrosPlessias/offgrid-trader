@@ -29,25 +29,27 @@ from pathlib import Path
 # Rule 2 — wiki-internal links (foo.md or foo.md#anchor) → strip .md
 # ---------------------------------------------------------------------------
 
-REPO_LINK_RE = re.compile(
-    r'\]\((?:\.\.\/)*\.\.\/(?P<path>[^)]+\.md(?:#[^)]*)?)\)'
-)
+REPO_LINK_RE = re.compile(r"\]\((?:\.\.\/)*\.\.\/(?P<path>[^)]+\.md(?:#[^)]*)?)\)")
+
+# Non-.md repo-relative links (../../.vscode/foo.json, ../../tests/lint/bar.txt, …)
+# These are valid repo paths but the wiki renderer can't traverse up; convert to BLOB URLs.
+# Require a real file extension ([A-Za-z][A-Za-z0-9]*) so that bare directory paths
+# like ../../infra/ (which have no extension) are NOT matched.
+REPO_NONMD_LINK_RE = re.compile(r"\]\((?:\.\.\/)*\.\.\/(?P<path>[^)]+\.[A-Za-z][A-Za-z0-9]*)\)")
 
 # Images under ../screenshots/ (one level up from docs/wiki) → raw GitHub URL.
 # Matches both plain links ](../screenshots/foo.png) and markdown images
 # ![alt](../screenshots/foo.png) — the ]( token is the same in both.
 SCREENSHOT_LINK_RE = re.compile(
-    r'\]\(\.\./screenshots/(?P<filename>[^)]+\.(?:png|jpg|jpeg|gif|svg|webp))\)'
+    r"\]\(\.\./screenshots/(?P<filename>[^)]+\.(?:png|jpg|jpeg|gif|svg|webp))\)"
 )
 
-WIKI_LINK_RE = re.compile(
-    r'\]\((?P<page>[A-Za-z0-9_\-]+)\.md(?P<anchor>#[^)]*)?\)'
-)
+WIKI_LINK_RE = re.compile(r"\]\((?P<page>[A-Za-z0-9_\-]+)\.md(?P<anchor>#[^)]*)?\)")
 
 
 def transform(text: str, repo: str) -> str:
     blob_base = f"https://github.com/{repo}/blob/main"
-    raw_base  = f"https://raw.githubusercontent.com/{repo}/main"
+    raw_base = f"https://raw.githubusercontent.com/{repo}/main"
 
     # Rule 1: ../../SETUP.md  →  https://github.com/.../blob/main/SETUP.md
     def _repo_link(m: re.Match) -> str:
@@ -55,7 +57,14 @@ def transform(text: str, repo: str) -> str:
 
     text = REPO_LINK_RE.sub(_repo_link, text)
 
-    # Rule 2: ../screenshots/foo.png  →  https://raw.githubusercontent.com/.../docs/screenshots/foo.png
+    # Rule 1b: ../../.vscode/foo.json  →  https://github.com/.../blob/main/.vscode/foo.json
+    # Handles non-.md repo-relative links that the wiki renderer can't traverse.
+    def _repo_nonmd_link(m: re.Match) -> str:
+        return f"]({blob_base}/{m.group('path')})"
+
+    text = REPO_NONMD_LINK_RE.sub(_repo_nonmd_link, text)
+
+    # Rule 2: ../screenshots/foo.png → raw GitHub URL under docs/screenshots/
     def _screenshot_link(m: re.Match) -> str:
         return f"]({raw_base}/docs/screenshots/{m.group('filename')})"
 
@@ -74,10 +83,11 @@ def transform(text: str, repo: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("src",  help="Source wiki directory (docs/wiki)")
-    parser.add_argument("out",  help="Output directory for transformed files")
-    parser.add_argument("--repo", default="AlexandrosPlessias/offgrid-trader",
-                        help="GitHub owner/repo slug")
+    parser.add_argument("src", help="Source wiki directory (docs/wiki)")
+    parser.add_argument("out", help="Output directory for transformed files")
+    parser.add_argument(
+        "--repo", default="AlexandrosPlessias/offgrid-trader", help="GitHub owner/repo slug"
+    )
     args = parser.parse_args()
 
     src = Path(args.src)

@@ -1,0 +1,19 @@
+{
+  "recommendations": [
+    // Python core + Pylance (static analysis, type checking)
+    "ms-python.python",
+    // Black formatter — used by settings.json as the default formatter
+    "ms-python.black-formatter",
+    // Flake8 linter — E/W/F rules + B (bugbear) + S (bandit) via pip plugins
+    "ms-python.flake8",
+    // Ruff — fast all-in-one linter (in tests/lint/requirements.dev.txt)
+    // Covers F/B/S/I/C90/UP/RUF rules without needing pip plugins
+    "charliermarsh.ruff",
+    // TOML syntax (pyproject.toml / ruff.toml)
+    "tamasfe.even-better-toml",
+    // Docker / Compose files
+    "ms-azuretools.vscode-docker",
+    // GitLens — blame + history
+    "eamodio.gitlens"
+  ]
+}

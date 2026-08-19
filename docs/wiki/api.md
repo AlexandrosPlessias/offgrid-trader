@@ -80,31 +80,52 @@ curl -X POST http://localhost:8010/analyze \
 ### `POST /analyze/stream`
 
 Same pipeline as `/analyze`, delivered as a **Server-Sent Events** stream.
-Each event is a `data: <json>\n\n` line. Three step events are emitted in
-sequence, then a single result event.
+Each event is a `data: <json>\n\n` line. The **TickerAgent** runs five skills
+and emits events as each one starts and finishes.
 
 **Request body** — same as `/analyze`
 
-**Step events** (three, one per pipeline stage)
-```json
-{"type": "step", "step": "fetch",   "status": "running", "msg": "Fetching market data for AAPL…"}
-{"type": "step", "step": "fetch",   "status": "done",    "elapsed": 2.8}
-{"type": "step", "step": "analyze", "status": "running", "msg": "Running AI analysis (qwen2.5:14b)…"}
-{"type": "step", "step": "analyze", "status": "done",    "elapsed": 14.2}
-{"type": "step", "step": "detect",  "status": "running", "msg": "Detecting opportunities…"}
-{"type": "step", "step": "detect",  "status": "done",    "elapsed": 0.1}
+**Event types**
+
+| `type` | When emitted | Key fields |
+|---|---|---|
+| `memory` | Prior scan context loaded from DB | `ticker`, `memory` (last signal, RSI streak, price trend) |
+| `step` | Before and after each of the 5 skills | `step` (`fetch`/`analyze`/`detect`/`persist`/`alert`), `status` (`running`/`done`/`error`), `elapsed_ms` |
+| `retry` | Before a skill retry sleep (e.g. Ollama timeout) | `skill`, `attempt`, `delay_s` |
+| `skill_error` | Non-critical skill failed after all retries | `skill`, `error` |
+| `result` | After all skills complete | Full payload (see below) |
+
+**Example event sequence**
+```
+data: {"type":"memory",  "ticker":"AAPL", "memory":{...}}
+
+data: {"type":"step", "step":"fetch",   "status":"running"}
+data: {"type":"step", "step":"fetch",   "status":"done",   "elapsed_ms":2840}
+
+data: {"type":"step", "step":"analyze", "status":"running"}
+data: {"type":"retry", "skill":"ai_analysis", "attempt":1, "delay_s":2}
+data: {"type":"step", "step":"analyze", "status":"running"}
+data: {"type":"step", "step":"analyze", "status":"done",   "elapsed_ms":14210}
+
+data: {"type":"step", "step":"detect",  "status":"running"}
+data: {"type":"step", "step":"detect",  "status":"done",   "elapsed_ms":85}
+
+data: {"type":"step", "step":"persist", "status":"running"}
+data: {"type":"step", "step":"persist", "status":"done",   "elapsed_ms":12}
+
+data: {"type":"step", "step":"alert",   "status":"running"}
+data: {"type":"step", "step":"alert",   "status":"done",   "elapsed_ms":1}
+
+data: {"type":"result", "ticker":"AAPL", "analysis":{...}, ...}
 ```
 
-`status` values: `running` | `done` | `error`  
-On error: `{"type":"step","step":"...","status":"error","msg":"<error message>"}`
-
-**Result event** (final, after persist)
+**Result event** (final)
 ```json
 {
   "type": "result",
   "ticker": "AAPL",
-  "analysis": { ... },
-  "market_data": { ... },
+  "analysis": { "trend": "Bullish", "opportunity": {"type": "long", "confidence": 72}, "..." : "..." },
+  "market_data": { "..." : "..." },
   "opportunities": [...],
   "actionable": [...],
   "saved_signal_ids": [42],
@@ -485,13 +506,30 @@ curl 'http://localhost:8010/analysis?limit=10'
     {
       "id": 18,
       "ticker": "NVDA",
-      "analysis_json": { "trend": "bullish", "confidence": 82, ... },
-      "market_snapshot": { "price": 134.5, ... },
+      "analysis_json": {
+        "trend": "Bullish",
+        "opportunity": { "type": "long", "confidence": 72.0, "entry": 134.5, "stop": 128.0, "target": 148.0 },
+        "signals": [...],
+        "risk_factors": [...],
+        "key_levels": { "support": [128.0], "resistance": [148.0] }
+      },
+      "market_snapshot": { "ticker": "NVDA", "price": { "current": 134.5, ... }, ... },
+      "opportunities": [
+        { "type": "long", "confidence": 72.5, "source": "RSI+EMA", ... }
+      ],
+      "actionable": [
+        { "type": "long", "confidence": 72.5, "source": "RSI+EMA", ... }
+      ],
       "created_at": "2026-08-09T15:10:00Z"
     }
   ]
 }
 ```
+
+`opportunities` is the full list of rule-based scores (all confidence levels).
+`actionable` is the subset that cleared `CONFIDENCE_FLOOR`. Both fields are `null`
+for history entries recorded before this feature was added (open in Explorer → shows
+"opportunity scores not stored — re-run to see").
 
 ---
 

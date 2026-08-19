@@ -11,30 +11,45 @@ Open Aspire at **http://localhost:18889** (Traces tab).
 ## OTEL span hierarchy
 
 Each `/analyze` or `/analyze/stream` HTTP request creates a **root trace** via the
-FastAPI OTEL middleware. All backend child spans nest automatically under it:
+FastAPI OTEL middleware. The **TickerAgent** wraps the entire pipeline in an
+`agent.run` span; each skill gets its own `skill.<name>` child span:
 
 ```
 POST /analyze  (root — FastAPI middleware)
 │
-├── data.fetch_price_fundamentals   ← fetch_yfinance()
-│   └── GET https://query2.finance.yahoo.com/...  (auto by RequestsInstrumentor)
-│
-├── data.compute_indicators         ← compute_indicators()
-│   ├── event: timeframe_done {timeframe:"1H", rsi:"54.2", rec:"BUY"}
-│   ├── event: timeframe_done {timeframe:"4H", ...}
-│   └── event: timeframe_done {timeframe:"1D", ...}
-│
-├── data.fetch_balance_sheet        ← fetch_balance_sheet()
-│
-├── data.fetch_macro                ← fetch_fred_macro()
-│   ├── GET https://fred.stlouisfed.org/...FEDFUNDS  (auto)
-│   ├── GET https://fred.stlouisfed.org/...CPIAUCSL  (auto)
-│   └── GET https://www.multpl.com/shiller-pe/...    (auto)
-│
-├── data.fetch_news                 ← fetch_finnhub_news()
-│
-└── llm.chat                        ← call_ollama()
-    └── POST http://ollama:11434/api/chat  (auto by RequestsInstrumentor)
+└── agent.run                         ← TickerAgent.run()
+    │   ticker, skills.count, agent.success, agent.elapsed_ms
+    │
+    ├── skill.fetch_data              ← FetchDataSkill.run()
+    │   │   skill.name, skill.critical, skill.attempt, skill.elapsed_ms
+    │   │
+    │   ├── data.fetch_price_fundamentals   ← fetch_yfinance()
+    │   │   └── GET https://query2.finance.yahoo.com/...  (auto)
+    │   │
+    │   ├── data.compute_indicators         ← compute_indicators()
+    │   │   ├── event: timeframe_done {timeframe:"1H", rsi:"54.2", rec:"BUY"}
+    │   │   ├── event: timeframe_done {timeframe:"4H", ...}
+    │   │   └── event: timeframe_done {timeframe:"1D", ...}
+    │   │
+    │   ├── data.fetch_balance_sheet        ← fetch_balance_sheet()
+    │   │
+    │   ├── data.fetch_macro                ← fetch_fred_macro()
+    │   │   ├── GET https://fred.stlouisfed.org/...FEDFUNDS  (auto)
+    │   │   └── GET https://www.multpl.com/shiller-pe/...    (auto)
+    │   │
+    │   └── data.fetch_news                 ← fetch_finnhub_news()
+    │
+    ├── skill.ai_analysis             ← AIAnalysisSkill.run()   (may retry)
+    │   │   skill.retries, skill.attempt
+    │   │
+    │   └── llm.chat                        ← call_ollama()
+    │       └── POST http://ollama:11434/api/chat  (auto)
+    │
+    ├── skill.opportunity_detect      ← OpportunityDetectSkill.run()
+    │
+    ├── skill.persist                 ← PersistSkill.run()
+    │
+    └── skill.alert                   ← AlertSkill.run()
 ```
 
 ---
@@ -138,22 +153,50 @@ two events:
 
 ---
 
-## Reading traces in Aspire
+---
+
+## OTEL metrics
+
+The `marketsage.agent` meter emits five instruments, visible in Aspire's **Metrics** tab:
+
+| Instrument | Type | Dimensions | What it measures |
+|---|---|---|---|
+| `marketsage.agent.runs` | Counter | `ticker`, `success` | Completed pipeline runs — track total volume and failure rate per ticker |
+| `marketsage.agent.duration` | Histogram | `ticker`, `success` | Total pipeline wall-clock time in ms — p50/p95/p99 latency |
+| `marketsage.skill.calls` | Counter | `skill`, `success`, `attempt` | Individual skill executions; each retry attempt is counted separately |
+| `marketsage.skill.duration` | Histogram | `skill`, `success` | Per-skill latency — `ai_analysis` will dominate; useful for spotting Ollama degradation |
+| `marketsage.skill.retries` | Counter | `skill`, `ticker` | Retry events — spikes here indicate Ollama instability |
+
+All instruments are no-ops when `OTEL_EXPORTER_OTLP_ENDPOINT` is not set (no metric data outside Docker).
+
+---
+
+## Reading Aspire
+
+### Traces
 
 1. Open **http://localhost:18889** → **Traces** tab
-2. Filter by service: `marketsage.data` or `marketsage.analysis`
-3. Click any `/analyze` trace to expand the waterfall
-4. Click `llm.chat` to see token counts, TTFT, and latency
-5. Click `data.fetch_macro` to see which FRED series were fetched and whether the cache was hit
+2. Filter by service: `offgrid-trader`
+3. Click any `/analyze` trace to expand the waterfall — the root span is `agent.run`
+4. Click `skill.ai_analysis` to see attempt count, elapsed time, and retry count
+5. Click `llm.chat` to see token counts, TTFT, and latency
+
+### Metrics
+
+1. Open **http://localhost:18889** → **Metrics** tab
+2. Select `marketsage.agent.duration` for a latency histogram per ticker
+3. Select `marketsage.skill.calls` to see the per-skill call volume breakdown
+4. Watch `marketsage.skill.retries` to catch Ollama instability early
 
 ### Diagnosing slow analysis
 
 | Symptom | What to look at |
 |---|---|
-| Long `llm.chat` span | `llm.ttft_s` high → model loading from disk; `llm.total_latency_s` high → model too large for VRAM |
-| Long `data.fetch_balance_sheet` | `cache_hit: false` → yfinance balance sheet fetch; check yfinance network availability |
+| Long `skill.ai_analysis` span | `llm.ttft_s` on `llm.chat` high → model loading from disk; `llm.total_latency_s` high → model too large for VRAM |
+| `marketsage.skill.retries` spiking | Ollama is timing out; check `OLLAMA_TIMEOUT` or model size vs. VRAM |
+| Long `data.fetch_balance_sheet` | `cache_hit: false` → yfinance balance sheet fetch; check network |
 | Long `data.fetch_macro` | `cache_hit: false` → first fetch of the day; FRED or multpl.com may be slow |
-| Missing `data.fetch_news` span | No `FINNHUB_API_KEY` set (the span still appears but `article_count: 0`) |
+| Missing `data.fetch_news` span | No `FINNHUB_API_KEY` set (span still appears but `article_count: 0`) |
 
 ---
 

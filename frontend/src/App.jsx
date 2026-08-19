@@ -44,9 +44,9 @@ async function* readSSEStream(url, body) {
 // ─── Shared analysis-stream hook ─────────────────────────────────────────────
 
 const INIT_STEPS = [
-  { id: 'fetch',   label: 'Fetch market data',    status: 'pending', elapsed: null, msg: null },
-  { id: 'analyze', label: 'AI analysis',           status: 'pending', elapsed: null, msg: null },
-  { id: 'detect',  label: 'Detect opportunities',  status: 'pending', elapsed: null, msg: null },
+  { id: 'fetch',   label: 'Fetch market data',   status: 'pending', elapsed: null, msg: null, retries: 0, startedAt: null },
+  { id: 'analyze', label: 'AI analysis',          status: 'pending', elapsed: null, msg: null, retries: 0, startedAt: null },
+  { id: 'detect',  label: 'Detect opportunities', status: 'pending', elapsed: null, msg: null, retries: 0, startedAt: null },
 ]
 
 function useAnalyzeStream() {
@@ -64,15 +64,36 @@ function useAnalyzeStream() {
     setSteps(INIT_STEPS.map(s => ({ ...s })))
 
     try {
+      const SKILL_TO_STEP = { fetch_data: 'fetch', ai_analysis: 'analyze', opportunity_detect: 'detect' }
       for await (const evt of readSSEStream(`${API}/analyze/stream`, { ticker: t, send_alerts: false })) {
         if (evt.type === 'step') {
           setSteps(prev => prev.map(s =>
             s.id === evt.step
-              ? { ...s, status: evt.status, elapsed: evt.elapsed ?? s.elapsed, msg: evt.msg ?? s.msg }
+              ? {
+                  ...s,
+                  status: evt.status,
+                  elapsed: evt.elapsed_ms != null ? (evt.elapsed_ms / 1000).toFixed(1) : s.elapsed,
+                  msg: evt.msg ?? s.msg,
+                  startedAt: evt.status === 'running' ? Date.now() : null,
+                }
               : s
+          ))
+        } else if (evt.type === 'retry') {
+          const stepId = SKILL_TO_STEP[evt.skill] ?? evt.skill
+          setSteps(prev => prev.map(s =>
+            s.id === stepId ? { ...s, retries: (s.retries || 0) + 1 } : s
           ))
         } else if (evt.type === 'result') {
           setResult(evt)
+          // Backfill the detect step with scored opportunities so the stepper
+          // can show them inline — no extra SSE event needed.
+          if (evt.opportunities?.length) {
+            setSteps(prev => prev && prev.map(s =>
+              s.id === 'detect'
+                ? { ...s, opportunities: evt.opportunities, actionable: evt.actionable ?? [] }
+                : s
+            ))
+          }
         }
       }
     } catch (e) {
@@ -85,6 +106,21 @@ function useAnalyzeStream() {
       setStreaming(false)
     }
   }, [])
+
+  // Tick elapsed display for any step that is currently running.
+  useEffect(() => {
+    if (!streaming || !steps) return
+    const hasRunning = steps.some(s => s.status === 'running' && s.startedAt)
+    if (!hasRunning) return
+    const id = setInterval(() => {
+      setSteps(prev => prev && prev.map(s =>
+        s.status === 'running' && s.startedAt
+          ? { ...s, elapsed: ((Date.now() - s.startedAt) / 1000).toFixed(1) }
+          : s
+      ))
+    }, 200)
+    return () => clearInterval(id)
+  }, [streaming, steps])
 
   return { streaming, steps, result, error, run }
 }
@@ -168,17 +204,50 @@ function AnalysisStepper({ steps }) {
               <div className="step-header-row">
                 <span className="step-icon-lg">{meta.icon}</span>
                 <span className="step-label">{meta.label}</span>
-                {step.elapsed != null && step.status !== 'pending' && (
-                  <span className="step-elapsed">{step.elapsed}s</span>
+                {step.elapsed != null && (
+                  <span className={`step-elapsed${step.status === 'running' ? ' step-elapsed-live' : ''}`}>
+                    {step.elapsed}s{step.status === 'running' ? '…' : ''}
+                  </span>
+                )}
+                {step.retries > 0 && (
+                  <span className="step-retry-badge">↺ {step.retries}</span>
                 )}
                 <span className={`step-badge step-badge-${step.status}`}>
-                  {step.status === 'done' ? '✓ done' : step.status === 'running' ? '⟳ running' : step.status === 'error' ? '✕ error' : 'pending'}
+                  {step.status === 'done'    ? '✓ done'
+                 : step.status === 'running' ? '⟳ running'
+                 : step.status === 'error'   ? '✕ error'
+                 :                             'pending'}
                 </span>
               </div>
-              {step.status !== 'pending' && (
-                <ul className="step-subs">
-                  {meta.subs.map(s => <li key={s}>{s}</li>)}
-                </ul>
+              <ul className={`step-subs${step.status === 'pending' ? ' step-subs-pending' : ''}`}>
+                {meta.subs.map(s => <li key={s}>{s}</li>)}
+              </ul>
+              {/* Scored opportunities — shown inline when detect step finishes */}
+              {step.id === 'detect' && step.status === 'done' && step.opportunities === null && (
+                <div className="step-opp-none">opportunity scores not stored — re-run to see</div>
+              )}
+              {step.id === 'detect' && step.status === 'done' && step.opportunities !== null && step.opportunities?.length > 0 && (
+                <div className="step-opp-pills">
+                  {[...step.opportunities]
+                    .sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))
+                    .map((opp, i) => {
+                      const isActionable = (step.actionable ?? []).some(
+                        a => a.type === opp.type && Math.abs((a.confidence ?? 0) - (opp.confidence ?? 0)) < 0.5
+                      )
+                      return (
+                        <span key={i} className={`opp-pill ${isActionable ? 'opp-pill-ok' : 'opp-pill-sub'}`}>
+                          <span className={`opp-pill-type ${opp.type}`}>{opp.type?.toUpperCase() ?? '—'}</span>
+                          <span className="opp-pill-conf">{(opp.confidence ?? 0).toFixed(0)}%</span>
+                          <span className="opp-pill-src">{opp.source ?? (opp.sources ?? []).join('+') ?? ''}</span>
+                          <span className="opp-pill-status">{isActionable ? '✓' : '↓'}</span>
+                        </span>
+                      )
+                    })
+                  }
+                </div>
+              )}
+              {step.id === 'detect' && step.status === 'done' && step.opportunities !== null && !step.opportunities?.length && (
+                <div className="step-opp-none">no rule checks fired</div>
               )}
               {step.status === 'error' && step.msg && (
                 <div className="step-msg">{step.msg}</div>
@@ -1205,7 +1274,7 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
       {(steps || result) && (
         <div className="explorer-section">
           <div className="section-header">
-            <span className="section-badge">Step 1</span>
+            <span className="section-badge">1</span>
             <span className="section-label">Pipeline walkthrough</span>
           </div>
           <p className="section-desc">
@@ -1227,7 +1296,7 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
       {price && (
         <div className="explorer-section">
           <div className="section-header">
-            <span className="section-badge">Step 2</span>
+            <span className="section-badge">2</span>
             <span className="section-label">Price snapshot</span>
           </div>
           <p className="section-desc">
@@ -1319,7 +1388,7 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
       {result && (
         <div className="explorer-section">
           <div className="section-header">
-            <span className="section-badge">Step 3</span>
+            <span className="section-badge">3</span>
             <span className="section-label">Historical chart</span>
           </div>
           <p className="section-desc">
@@ -1334,7 +1403,7 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
       {mkt && (
         <div className="explorer-section">
           <div className="section-header">
-            <span className="section-badge">Step 4</span>
+            <span className="section-badge">4</span>
             <span className="section-label">Technical indicators</span>
           </div>
           <p className="section-desc">
@@ -1489,7 +1558,7 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
       {analysis && !analysis.error && (
         <div className="explorer-section">
           <div className="section-header">
-            <span className="section-badge">Step 5</span>
+            <span className="section-badge">5</span>
             <span className="section-label">AI reasoning {modelName && <span className="text-dim">({modelName})</span>}</span>
           </div>
           <p className="section-desc">
@@ -1505,49 +1574,71 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
       {result && (
         <div className="explorer-section">
           <div className="section-header">
-            <span className="section-badge">Step 6</span>
+            <span className="section-badge">6</span>
             <span className="section-label">Signals detected</span>
           </div>
           <p className="section-desc">
-            Opportunities are scored by merging AI confidence with four rule-based checks
-            (RSI extreme, volume spike, MACD crossover, AI signal). Only entries at or above
-            the confidence floor are marked actionable and trigger alerts.
+            Five rule-based checks run in parallel (RSI extreme, MACD crossover, volume spike,
+            valuation extreme, AI signal). Candidates for the same ticker are merged and their
+            confidence scores are adjusted by a macro regime filter (yield curve, Shiller CAPE,
+            CPI). Only signals at or above the confidence floor are marked actionable and trigger alerts.
           </p>
           {errors.length > 0 && (
             <div className="error-list">{errors.map((e, i) => <div key={i}>⚠ {e}</div>)}</div>
           )}
-          {actionable.length === 0 && opps.length === 0 && (
-            <div className="text-dim">No signals detected.</div>
-          )}
-          {actionable.length === 0 && opps.length > 0 && (
-            <div className="text-dim">{opps.length} signal(s) detected but all below confidence floor.</div>
-          )}
-          {actionable.length > 0 && (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Type</th><th>Conf</th><th>Price</th>
-                    <th>Entry</th><th>Stop</th><th>Target</th><th>Source</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {actionable.map((opp, i) => (
-                    <tr key={i}>
-                      <td><span className={`badge ${opp.type}`}>{opp.type?.toUpperCase() ?? '—'}</span></td>
-                      <td>{(opp.confidence ?? 0).toFixed(0)}%</td>
-                      <td>{opp.price?.toFixed(2) ?? '—'}</td>
-                      <td>{opp.entry?.toFixed(2) ?? '—'}</td>
-                      <td>{opp.stop?.toFixed(2) ?? '—'}</td>
-                      <td>{opp.target?.toFixed(2) ?? '—'}</td>
-                      <td className="text-dim source-cell">
-                        {opp.source ?? (opp.sources ?? []).join('+') ?? '—'}
-                      </td>
+          {opps.length === 0 ? (
+            <div className="text-dim">No signals detected — no rule checks fired for this ticker.</div>
+          ) : (
+            <>
+              <div className="signals-summary">
+                {actionable.length > 0
+                  ? <><span className="signals-ok">✓ {actionable.length} actionable</span>
+                      {opps.length - actionable.length > 0 && (
+                        <span className="signals-subfloor"> · {opps.length - actionable.length} below floor</span>
+                      )}
+                    </>
+                  : <span className="signals-subfloor">All {opps.length} signal(s) below confidence floor</span>
+                }
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Type</th><th>Confidence</th><th>Price</th>
+                      <th>Entry</th><th>Stop</th><th>Target</th><th>Source</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {[...opps]
+                      .sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))
+                      .map((opp, i) => {
+                        const isActionable = actionable.some(
+                          a => a.type === opp.type && Math.abs((a.confidence ?? 0) - (opp.confidence ?? 0)) < 0.5
+                        )
+                        return (
+                          <tr key={i} className={isActionable ? '' : 'row-subfloor'}>
+                            <td><span className={`badge ${opp.type}`}>{opp.type?.toUpperCase() ?? '—'}</span></td>
+                            <td>
+                              <span className={isActionable ? 'conf-value conf-ok' : 'conf-value conf-sub'}>
+                                {(opp.confidence ?? 0).toFixed(0)}%
+                              </span>
+                              {!isActionable && <span className="subfloor-tag">below floor</span>}
+                            </td>
+                            <td>{opp.price?.toFixed(2) ?? '—'}</td>
+                            <td>{opp.entry?.toFixed(2) ?? '—'}</td>
+                            <td>{opp.stop?.toFixed(2) ?? '—'}</td>
+                            <td>{opp.target?.toFixed(2) ?? '—'}</td>
+                            <td className="text-dim source-cell">
+                              {opp.source ?? (opp.sources ?? []).join('+') ?? '—'}
+                            </td>
+                          </tr>
+                        )
+                      })
+                    }
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
       )}
@@ -2207,15 +2298,18 @@ function AnalysisHistoryPanel({ onOpenInExplorer }) {
   useEffect(() => { if (expanded && history === null) load() }, [expanded, history, load])
 
   const openRow = (row) => {
+    // row.opportunities / row.actionable are null for entries recorded before
+    // the opportunities columns were added; the stepper shows a friendly
+    // "not stored" message in that case rather than "no rule checks fired".
     onOpenInExplorer({
-      ticker:       row.ticker,
-      analysis:     row.analysis_json,
-      market_data:  row.market_snapshot,
-      opportunities: [],
-      actionable:   [],
-      errors:       [],
+      ticker:        row.ticker,
+      analysis:      row.analysis_json,
+      market_data:   row.market_snapshot,
+      opportunities: row.opportunities,    // null | Opportunity[]
+      actionable:    row.actionable ?? [], // null → []
+      errors:        [],
       _from_history: true,
-      _history_at:  row.created_at,
+      _history_at:   row.created_at,
     })
   }
 
@@ -2266,12 +2360,12 @@ function AnalysisHistoryPanel({ onOpenInExplorer }) {
                   {history.map(row => {
                     const aj    = row.analysis_json ?? {}
                     const trend = aj.trend ?? '—'
-                    const conf  = aj.confidence
+                    const conf  = aj.opportunity?.confidence
                     return (
                       <tr key={row.id}>
                         <td><span className="badge-ticker">{row.ticker}</span></td>
                         <td><span className={`rbadge trend-${trend}`}>{trend}</span></td>
-                        <td>{conf != null ? `${conf}%` : '—'}</td>
+                        <td>{conf != null && conf > 0 ? `${conf.toFixed(0)}%` : '—'}</td>
                         <td className="ts">{fmtTime(row.created_at)}</td>
                         <td>
                           <button className="btn-open-history" onClick={() => openRow(row)}>

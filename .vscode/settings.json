@@ -1,0 +1,105 @@
+{
+  // ── Python interpreter ─────────────────────────────────────────────────────
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+
+  // ── Formatter: Black ───────────────────────────────────────────────────────
+  // Install extension: ms-python.black-formatter
+  "[python]": {
+    "editor.defaultFormatter": "ms-python.black-formatter",
+    "editor.formatOnSave": true,
+    "editor.formatOnType": false
+  },
+  "black-formatter.args": ["--line-length", "100"],
+
+  // ── Linter 1 — Flake8 (classic style + plugin rules) ──────────────────────
+  // Install extension: ms-python.flake8
+  // Install pip deps:  pip install -r tests/lint/requirements.dev.txt
+  //                    (or just run:  make lint — it does this automatically)
+  //
+  // Rule categories active here and what CodeQL alert they approximate:
+  //
+  //   E / W  (pycodestyle)
+  //     E711/E712  comparison to None/True/False  → py/comparison-of-identical-expressions
+  //     E722       bare except clause              → py/empty-except (bare form)
+  //
+  //   F  (pyflakes — built-in, no plugin needed)
+  //     F401  unused import                        → py/unused-import
+  //     F811  redefinition of unused name          → py/unused-import
+  //     F841  local variable assigned but never used → py/unused-local-variable
+  //
+  //   B  (flake8-bugbear — pip install flake8-bugbear)
+  //     B007  loop variable unused in body         → py/unused-local-variable
+  //     B018  useless expression / stray `...`     → py/ineffectual-statement
+  //     B904  raise inside except w/o `from`       → correctness / CodeQL quality
+  //
+  //   S  (flake8-bandit — pip install flake8-bandit)
+  //     S110  try/except/pass                      → py/empty-except
+  //     S105/S106  hardcoded password literals     → py/clear-text-logging-sensitive-data
+  //     S113  missing request timeout              → security hardening
+  //     S322  use of input() in py2-style code     → security
+  //     S501-S509  SSL/TLS misconfig               → transport security
+  //
+  //  ⚠ py/log-injection has no direct flake8/bandit equivalent — CodeQL's
+  //    taint tracking is unique; the sanitisation pattern in agent.py / memory.py
+  //    is the mitigation.
+  "flake8.enabled": true,
+  "flake8.args": [
+    "--max-line-length=100",
+    // Suppress rules that conflict with Black's formatting choices
+    "--extend-ignore=E203,W503",
+    // Activate Bugbear (B) and Bandit/security (S) categories
+    // (silently ignored if the plugins are not installed)
+    "--extend-select=B,S",
+    // In tests: allow assert statements (S101) and stdlib random (S311)
+    // main.py: FastAPI's Query()/Depends() must be called in argument defaults
+    "--per-file-ignores=tests/*.py:S101,S311,B backend/main.py:B008"
+  ],
+
+  // ── Linter 2 — Ruff (fast all-in-one, in tests/lint/requirements.dev.txt) ──
+  // Install extension: charliermarsh.ruff
+  // Ruff covers E/W/F/B/S/I/C90 rules natively — no plugins needed.
+  // It runs in addition to Flake8 to catch categories Flake8 misses without plugins.
+  "ruff.enable": true,
+  "ruff.organizeImports": true,
+  "ruff.args": [
+    "--select=E,W,F,B,S,I,C90,UP,RUF",
+    "--ignore=E203,W503,S101",
+    "--line-length=100",
+    // Map Ruff rule codes → CodeQL equivalents (documentation only — Ruff reads these):
+    // F401  → py/unused-import
+    // F841  → py/unused-local-variable
+    // B018  → py/ineffectual-statement   (stray `...` outside stubs)
+    // B007  → py/unused-local-variable   (loop var)
+    // S110  → py/empty-except            (try/except/pass)
+    // S105/S106 → py/clear-text-logging-sensitive-data
+    // UP    → use modern Python idioms (avoids some CodeQL quality notes)
+    // RUF   → Ruff-specific rules (shadowed builtins, unused noqa, etc.)
+    "--per-file-ignores=tests/*.py:S101,S311"
+  ],
+
+  // ── Pylance static analysis (bundled with ms-python.python) ───────────────
+  // Covers CodeQL categories that require type-level reasoning:
+  //   reportUnusedImport    → py/unused-import
+  //   reportUnusedVariable  → py/unused-local-variable + py/unused-global-variable
+  //   reportUndefinedVariable → correctness
+  //   typeCheckingMode=basic → catches None-dereferences, wrong arg counts, etc.
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.diagnosticMode": "workspace",
+  "python.analysis.reportUnusedImport": "warning",
+  "python.analysis.reportUnusedVariable": "warning",
+  "python.analysis.reportMissingImports": "error",
+  "python.analysis.reportUndefinedVariable": "error",
+
+  // Disable the legacy linting interface (replaced by the Flake8 + Ruff extensions)
+  "python.linting.enabled": false,
+
+  // ── Editor ─────────────────────────────────────────────────────────────────
+  // Two rulers: 80 = soft PEP-8 guide, 100 = hard Black / Flake8 limit
+  "editor.rulers": [
+    { "column": 80, "color": "#ffffff18" },
+    { "column": 100, "color": "#ff000040" }
+  ],
+  "editor.renderWhitespace": "trailing",
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true
+}

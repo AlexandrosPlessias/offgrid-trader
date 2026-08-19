@@ -1,11 +1,14 @@
-"""SQLite persistence for signals and full analysis logs.
+"""SQLite persistence for signals, analysis logs, and agent memory.
 
-Two tables:
+Three user-facing tables:
 
 * ``signals`` — one row per detected opportunity
   (ticker, type, confidence, source, entry, stop, target, price, timestamp).
 * ``analysis_log`` — the full AI analysis JSON plus the market-data snapshot
   that produced it, for later inspection/backtesting.
+* ``ticker_memory`` — one row per ticker; updated after every agent run.
+  Provides the MemoryLayer with per-ticker scan history so the AI prompt
+  can reference prior signals and RSI streaks.
 
 A fresh connection is opened per call so the module is safe to use from both
 the FastAPI request threads and the async scheduler. Run standalone to create
@@ -19,7 +22,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .config import get_settings
 
@@ -32,7 +35,7 @@ def _db_path() -> str:
     return get_settings().database_path
 
 
-def _connect(db_path: Optional[str] = None) -> sqlite3.Connection:
+def _connect(db_path: str | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path or _db_path())
     conn.row_factory = sqlite3.Row
     return conn
@@ -58,11 +61,13 @@ CREATE INDEX IF NOT EXISTS idx_signals_ticker ON signals(ticker);
 CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at);
 
 CREATE TABLE IF NOT EXISTS analysis_log (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticker          TEXT NOT NULL,
-    analysis_json   TEXT NOT NULL,
-    market_snapshot TEXT NOT NULL,
-    created_at      TEXT NOT NULL
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker             TEXT NOT NULL,
+    analysis_json      TEXT NOT NULL,
+    market_snapshot    TEXT NOT NULL,
+    opportunities_json TEXT,   -- JSON array of ALL detected opportunities (null on old rows)
+    actionable_json    TEXT,   -- JSON array of opportunities that cleared the confidence floor
+    created_at         TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_analysis_ticker ON analysis_log(ticker);
@@ -71,21 +76,41 @@ CREATE TABLE IF NOT EXISTS app_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ticker_memory (
+    ticker                TEXT PRIMARY KEY,
+    last_scan             TEXT,
+    last_signal           TEXT,
+    last_confidence       REAL,
+    consecutive_oversold  INTEGER DEFAULT 0,
+    consecutive_overbought INTEGER DEFAULT 0,
+    last_price            REAL,
+    price_trend_pct       REAL,
+    updated_at            TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
 """
 
 
-def init_db(db_path: Optional[str] = None) -> None:
+def init_db(db_path: str | None = None) -> None:
     """Create tables and indexes if they do not already exist."""
 
     with _connect(db_path) as conn:
         conn.executescript(_SCHEMA)
+        # Migrate analysis_log tables created before opportunities columns were added.
+        existing_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(analysis_log)").fetchall()
+        }
+        if "opportunities_json" not in existing_cols:
+            conn.execute("ALTER TABLE analysis_log ADD COLUMN opportunities_json TEXT")
+        if "actionable_json" not in existing_cols:
+            conn.execute("ALTER TABLE analysis_log ADD COLUMN actionable_json TEXT")
         conn.commit()
 
 
 # --------------------------------------------------------------------------- #
 # Writes
 # --------------------------------------------------------------------------- #
-def save_signal(opportunity: Dict[str, Any], db_path: Optional[str] = None) -> int:
+def save_signal(opportunity: dict[str, Any], db_path: str | None = None) -> int:
     """Persist a single opportunity dict to ``signals``; return the new row id."""
 
     reasons = opportunity.get("reasons")
@@ -114,32 +139,48 @@ def save_signal(opportunity: Dict[str, Any], db_path: Optional[str] = None) -> i
             row,
         )
         conn.commit()
-        return int(cur.lastrowid)
+        if cur.lastrowid is None:
+            raise RuntimeError("insert into signals returned no lastrowid")
+        return cur.lastrowid
 
 
 def save_analysis(
     ticker: str,
-    analysis: Dict[str, Any],
-    market_snapshot: Dict[str, Any],
-    db_path: Optional[str] = None,
+    analysis: dict[str, Any],
+    market_snapshot: dict[str, Any],
+    opportunities: list[dict[str, Any]] | None = None,
+    actionable: list[dict[str, Any]] | None = None,
+    db_path: str | None = None,
 ) -> int:
-    """Persist the full analysis + market snapshot; return the new row id."""
+    """Persist the full analysis + market snapshot; return the new row id.
+
+    ``opportunities`` is the full list of rule-detected scores (all confidence
+    levels).  ``actionable`` is the subset that cleared the confidence floor.
+    Both default to ``None`` which stores SQL NULL so that old rows can be
+    distinguished from rows that ran with zero detected opportunities.
+    """
 
     with _connect(db_path) as conn:
         cur = conn.execute(
             """
-            INSERT INTO analysis_log (ticker, analysis_json, market_snapshot, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO analysis_log
+                (ticker, analysis_json, market_snapshot,
+                 opportunities_json, actionable_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 ticker,
                 json.dumps(analysis, default=str),
                 json.dumps(market_snapshot, default=str),
+                json.dumps(opportunities, default=str) if opportunities is not None else None,
+                json.dumps(actionable, default=str) if actionable is not None else None,
                 _now_iso(),
             ),
         )
         conn.commit()
-        return int(cur.lastrowid)
+        if cur.lastrowid is None:
+            raise RuntimeError("insert into analysis_log returned no lastrowid")
+        return cur.lastrowid
 
 
 # --------------------------------------------------------------------------- #
@@ -147,13 +188,13 @@ def save_analysis(
 # --------------------------------------------------------------------------- #
 def get_recent_signals(
     limit: int = 50,
-    ticker: Optional[str] = None,
-    db_path: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+    ticker: str | None = None,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
     """Return the most recent signals, optionally filtered by ticker."""
 
     query = "SELECT * FROM signals"
-    params: List[Any] = []
+    params: list[Any] = []
     if ticker:
         query += " WHERE ticker = ?"
         params.append(ticker.upper())
@@ -163,7 +204,7 @@ def get_recent_signals(
     with _connect(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for row in rows:
         record = dict(row)
         if record.get("reasons"):
@@ -177,8 +218,8 @@ def get_recent_signals(
 
 def get_recent_analyses(
     limit: int = 25,
-    db_path: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
     """Return recent analysis-log entries across all tickers, newest first."""
 
     with _connect(db_path) as conn:
@@ -187,7 +228,7 @@ def get_recent_analyses(
             (int(limit),),
         ).fetchall()
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for row in rows:
         record = dict(row)
         for json_key in ("analysis_json", "market_snapshot"):
@@ -195,12 +236,26 @@ def get_recent_analyses(
                 try:
                     record[json_key] = json.loads(record[json_key])
                 except (json.JSONDecodeError, TypeError):
-                    pass
+                    pass  # leave raw string in place; caller gets what the DB stored
+        # Expand opportunities columns: keep None (SQL NULL) as None so the
+        # frontend can distinguish "not stored" (old rows) from "empty list".
+        for opp_key, out_key in (
+            ("opportunities_json", "opportunities"),
+            ("actionable_json", "actionable"),
+        ):
+            raw = record.pop(opp_key, None)
+            if raw is not None:
+                try:
+                    record[out_key] = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    record[out_key] = None
+            else:
+                record[out_key] = None
         results.append(record)
     return results
 
 
-def delete_signal(signal_id: int, db_path: Optional[str] = None) -> bool:
+def delete_signal(signal_id: int, db_path: str | None = None) -> bool:
     """Delete a signal by id. Returns True if a row was deleted."""
     with _connect(db_path) as conn:
         cur = conn.execute("DELETE FROM signals WHERE id = ?", (int(signal_id),))
@@ -208,7 +263,7 @@ def delete_signal(signal_id: int, db_path: Optional[str] = None) -> bool:
         return cur.rowcount > 0
 
 
-def delete_analysis(entry_id: int, db_path: Optional[str] = None) -> bool:
+def delete_analysis(entry_id: int, db_path: str | None = None) -> bool:
     """Delete an analysis_log entry by id. Returns True if a row was deleted."""
     with _connect(db_path) as conn:
         cur = conn.execute("DELETE FROM analysis_log WHERE id = ?", (int(entry_id),))
@@ -219,8 +274,8 @@ def delete_analysis(entry_id: int, db_path: Optional[str] = None) -> bool:
 def get_analysis_history(
     ticker: str,
     limit: int = 20,
-    db_path: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
     """Return recent analysis-log entries for *ticker*, newest first."""
 
     with _connect(db_path) as conn:
@@ -229,7 +284,7 @@ def get_analysis_history(
             (ticker.upper(), int(limit)),
         ).fetchall()
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for row in rows:
         record = dict(row)
         for json_key in ("analysis_json", "market_snapshot"):
@@ -237,7 +292,19 @@ def get_analysis_history(
                 try:
                     record[json_key] = json.loads(record[json_key])
                 except (json.JSONDecodeError, TypeError):
-                    pass
+                    pass  # leave raw string in place; caller gets what the DB stored
+        for opp_key, out_key in (
+            ("opportunities_json", "opportunities"),
+            ("actionable_json", "actionable"),
+        ):
+            raw = record.pop(opp_key, None)
+            if raw is not None:
+                try:
+                    record[out_key] = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    record[out_key] = None
+            else:
+                record[out_key] = None
         results.append(record)
     return results
 
@@ -245,19 +312,13 @@ def get_analysis_history(
 # --------------------------------------------------------------------------- #
 # Key-value app settings (runtime toggles persisted across restarts)
 # --------------------------------------------------------------------------- #
-def get_setting(
-    key: str, default: str = "", db_path: Optional[str] = None
-) -> str:
+def get_setting(key: str, default: str = "", db_path: str | None = None) -> str:
     with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT value FROM app_settings WHERE key = ?", (key,)
-        ).fetchone()
+        row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else default
 
 
-def set_setting(
-    key: str, value: str, db_path: Optional[str] = None
-) -> None:
+def set_setting(key: str, value: str, db_path: str | None = None) -> None:
     with _connect(db_path) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
@@ -266,31 +327,91 @@ def set_setting(
         conn.commit()
 
 
-def clear_all_data(db_path: Optional[str] = None) -> Dict[str, int]:
+def clear_all_data(db_path: str | None = None) -> dict[str, int]:
     """Delete all rows from signals and analysis_log. app_settings is preserved."""
     with _connect(db_path) as conn:
-        sig_rows  = conn.execute("DELETE FROM signals").rowcount
-        log_rows  = conn.execute("DELETE FROM analysis_log").rowcount
+        sig_rows = conn.execute("DELETE FROM signals").rowcount
+        log_rows = conn.execute("DELETE FROM analysis_log").rowcount
         conn.commit()
     return {"signals_deleted": sig_rows, "analyses_deleted": log_rows}
 
 
-def get_effective_watchlist(db_path: Optional[str] = None) -> List[str]:
+def get_effective_watchlist(db_path: str | None = None) -> list[str]:
     """Return the watchlist as modified by add/remove overrides stored in DB."""
     from .config import get_settings as _cfg
 
     base = _cfg().watchlist
-    added: List[str] = json.loads(get_setting("watchlist_added", "[]", db_path))
-    removed: set = set(
-        json.loads(get_setting("watchlist_removed", "[]", db_path))
-    )
+    added: list[str] = json.loads(get_setting("watchlist_added", "[]", db_path))
+    removed: set = set(json.loads(get_setting("watchlist_removed", "[]", db_path)))
     seen: set = set()
-    result: List[str] = []
+    result: list[str] = []
     for t in [*base, *added]:
         if t not in seen and t not in removed:
             seen.add(t)
             result.append(t)
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Ticker memory — per-ticker agent context (one row per ticker, UPSERT)
+# --------------------------------------------------------------------------- #
+
+
+def get_ticker_memory(ticker: str, db_path: str | None = None) -> dict[str, Any]:
+    """Return the memory row for *ticker* as a plain dict, or {} if absent."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM ticker_memory WHERE ticker = ?", (ticker.upper(),)
+        ).fetchone()
+    if row is None:
+        return {}
+    return dict(row)
+
+
+def upsert_ticker_memory(
+    ticker: str,
+    *,
+    last_scan: str | None = None,
+    last_signal: str | None = None,
+    last_confidence: float | None = None,
+    consecutive_oversold: int = 0,
+    consecutive_overbought: int = 0,
+    last_price: float | None = None,
+    price_trend_pct: float | None = None,
+    db_path: str | None = None,
+) -> None:
+    """Insert or replace the memory row for *ticker*."""
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO ticker_memory
+                (ticker, last_scan, last_signal, last_confidence,
+                 consecutive_oversold, consecutive_overbought,
+                 last_price, price_trend_pct,
+                 updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            """,
+            (
+                ticker.upper(),
+                last_scan,
+                last_signal,
+                last_confidence,
+                consecutive_oversold,
+                consecutive_overbought,
+                last_price,
+                price_trend_pct,
+            ),
+        )
+        conn.commit()
+
+
+def delete_ticker_memory(ticker: str, db_path: str | None = None) -> bool:
+    """Remove the memory row for *ticker*. Returns True if a row was deleted."""
+    with _connect(db_path) as conn:
+        cur = conn.execute("DELETE FROM ticker_memory WHERE ticker = ?", (ticker.upper(),))
+        conn.commit()
+    return cur.rowcount > 0
 
 
 if __name__ == "__main__":

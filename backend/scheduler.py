@@ -1,14 +1,15 @@
 """Async, market-hours-aware scanning loop.
 
 Every ``scan_interval_minutes`` (while the US market is open) it walks the
-watchlist and, per ticker, runs the full pipeline::
+watchlist and, per ticker, runs the full pipeline through the agentic stack::
 
-    fetch data -> AI analysis -> detect opportunities -> save -> alert
+    TickerAgent → FetchDataSkill → AIAnalysisSkill → OpportunityDetectSkill
+               → PersistSkill → AlertSkill
 
-Blocking work (network I/O to yfinance / tradingview-ta / Ollama, SMTP) is
-pushed to a thread pool via ``asyncio.to_thread`` so the event loop stays
-responsive. The scheduler is designed to be started/stopped from the FastAPI
-lifespan handler but can also be run directly::
+The :class:`Orchestrator` sorts tickers by staleness and caps concurrency
+so Ollama is never overloaded.  The scheduler is designed to be
+started/stopped from the FastAPI lifespan handler but can also be run
+directly::
 
     python -m backend.scheduler
 """
@@ -18,28 +19,27 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from .alerts import send_alert
-from .analysis import analyze
 from .config import MarketHours, get_settings
-from .data import get_market_data
-from .database import (
-    get_effective_watchlist,
-    get_setting,
-    init_db,
-    save_analysis,
-    save_signal,
-)
-from .opportunities import detect_opportunities, filter_by_confidence
+from .database import get_effective_watchlist, get_setting, init_db
+from .memory import MemoryLayer
+from .orchestrator import Orchestrator
 
 _log = logging.getLogger(__name__)
+
+# Module-level singletons shared across the whole process.
+_memory: MemoryLayer = MemoryLayer()
+_orchestrator: Orchestrator = Orchestrator(memory=_memory, max_concurrent=3)
 
 
 # --------------------------------------------------------------------------- #
 # Market-hours helpers
 # --------------------------------------------------------------------------- #
-def is_market_open(now: Optional[datetime] = None, hours: Optional[MarketHours] = None) -> bool:
+def is_market_open(
+    now: datetime | None = None,
+    hours: MarketHours | None = None,
+) -> bool:
     """Return True if *now* falls within the regular US trading session."""
 
     hours = hours or get_settings().market_hours
@@ -59,70 +59,44 @@ def is_market_open(now: Optional[datetime] = None, hours: Optional[MarketHours] 
 
 
 # --------------------------------------------------------------------------- #
-# Single-ticker pipeline (sync; run in a worker thread)
+# Pipeline helpers (used by FastAPI endpoints and the loop)
 # --------------------------------------------------------------------------- #
-def scan_ticker(ticker: str, *, send_alerts: bool = True) -> Dict[str, Any]:
-    """Run the full pipeline for one ticker and persist results.
+async def scan_ticker_async(
+    ticker: str,
+    *,
+    send_alerts: bool = True,
+) -> dict[str, Any]:
+    """Run the full agent pipeline for one ticker and return a result dict.
 
-    Returns a summary dict. Never raises for expected data/Ollama failures —
-    they are captured in the returned ``errors`` list.
+    Delegates to :meth:`Orchestrator.run_ticker` which uses the module-level
+    :class:`MemoryLayer` singleton.  Does not acquire the concurrency semaphore
+    (on-demand single-ticker scans always go through immediately).
     """
-
-    errors: List[str] = []
-    _log.info("scanning %s", ticker)
-
-    market_data = get_market_data(ticker)
-    errors.extend(market_data.get("errors", []))
-
-    analysis = analyze(market_data)
-    if analysis.get("error"):
-        errors.append(analysis["error"])
-        _log.warning("%s analysis error: %s", ticker, analysis["error"])
-
-    # Always log the analysis + snapshot for later inspection.
-    try:
-        save_analysis(ticker, analysis, market_data)
-    except Exception as exc:  # pragma: no cover - disk/db issues
-        errors.append(f"save_analysis failed: {exc}")
-
-    opportunities = detect_opportunities(market_data, analysis)
-    actionable = filter_by_confidence(opportunities)
-
-    saved_ids: List[int] = []
-    alerts: List[Dict[str, Any]] = []
-    for opp in actionable:
-        try:
-            saved_ids.append(save_signal(opp))
-        except Exception as exc:  # pragma: no cover
-            errors.append(f"save_signal failed: {exc}")
-        if send_alerts:
-            alerts.append(send_alert(opp))
-
-    return {
-        "ticker": ticker,
-        "analysis": analysis,
-        "opportunities": opportunities,
-        "actionable": actionable,
-        "saved_signal_ids": saved_ids,
-        "alerts": alerts,
-        "errors": errors,
-    }
+    return await _orchestrator.run_ticker(ticker, send_alerts=send_alerts)
 
 
-async def scan_ticker_async(ticker: str, *, send_alerts: bool = True) -> Dict[str, Any]:
-    """Async wrapper that runs :func:`scan_ticker` in a worker thread."""
+async def scan_watchlist(*, send_alerts: bool = True) -> list[dict[str, Any]]:
+    """Scan every ticker in the effective watchlist via the Orchestrator.
 
-    return await asyncio.to_thread(scan_ticker, ticker, send_alerts=send_alerts)
+    Tickers are sorted by scan staleness and run concurrently up to the
+    orchestrator's ``max_concurrent`` cap.
+    """
+    tickers = get_effective_watchlist()
+    return await _orchestrator.scan_watchlist(tickers, send_alerts=send_alerts)
 
 
-async def scan_watchlist(*, send_alerts: bool = True) -> List[Dict[str, Any]]:
-    """Scan every ticker in the effective watchlist concurrently."""
+# --------------------------------------------------------------------------- #
+# Backward-compatible sync wrapper (kept for tests / __main__ use)
+# --------------------------------------------------------------------------- #
+def scan_ticker(ticker: str, *, send_alerts: bool = True) -> dict[str, Any]:
+    """Synchronous wrapper around :func:`scan_ticker_async`.
 
-    tasks = [
-        scan_ticker_async(t, send_alerts=send_alerts)
-        for t in get_effective_watchlist()
-    ]
-    return await asyncio.gather(*tasks)
+    Preserved for backward compatibility with any callers that cannot easily
+    be made async.  Not used by the main FastAPI app or scheduler loop.
+    """
+    return asyncio.get_event_loop().run_until_complete(
+        scan_ticker_async(ticker, send_alerts=send_alerts)
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -132,9 +106,9 @@ class MonitorScheduler:
     """Owns the background scan loop lifecycle."""
 
     def __init__(self) -> None:
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
-        self.last_run: Optional[str] = None
+        self.last_run: str | None = None
         self.running = False
 
     async def _loop(self) -> None:
@@ -145,30 +119,31 @@ class MonitorScheduler:
         try:
             while not self._stop.is_set():
                 if is_market_open():
-                    n = len(get_effective_watchlist())
-                    _log.info("market open — scanning %d tickers", n)
+                    tickers = get_effective_watchlist()
+                    _log.info("market open — scanning %d tickers", len(tickers))
                     try:
                         results = await scan_watchlist(send_alerts=True)
-                        self.last_run = datetime.now(
-                            settings.market_hours.tzinfo
-                        ).isoformat()
-                        total = sum(len(r["actionable"]) for r in results)
+                        self.last_run = datetime.now(settings.market_hours.tzinfo).isoformat()
+                        total = sum(len(r.get("actionable", [])) for r in results)
                         _log.info("scan complete — %d actionable signal(s)", total)
                     except Exception as exc:  # pragma: no cover - defensive
                         _log.error("scan error: %s", exc)
                 else:
                     _log.info("market closed — sleeping")
 
-                # Re-read interval each cycle so UI changes take effect immediately
+                # Re-read interval each cycle so UI changes take effect immediately.
                 db_interval = get_setting("scan_interval_minutes", "")
                 interval_seconds = max(
                     60,
-                    (int(db_interval) if db_interval and db_interval.isdigit() else settings.scan_interval_minutes) * 60,
+                    (
+                        int(db_interval)
+                        if db_interval and db_interval.isdigit()
+                        else settings.scan_interval_minutes
+                    )
+                    * 60,
                 )
                 try:
-                    await asyncio.wait_for(
-                        self._stop.wait(), timeout=interval_seconds
-                    )
+                    await asyncio.wait_for(self._stop.wait(), timeout=interval_seconds)
                 except asyncio.TimeoutError:
                     pass
         finally:
@@ -177,7 +152,6 @@ class MonitorScheduler:
 
     def start(self) -> None:
         """Start the loop if it is not already running."""
-
         if self._task and not self._task.done():
             return
         self._stop.clear()
@@ -185,7 +159,6 @@ class MonitorScheduler:
 
     async def stop(self) -> None:
         """Signal the loop to stop and wait for it to finish."""
-
         self._stop.set()
         if self._task:
             try:
@@ -193,10 +166,14 @@ class MonitorScheduler:
             except asyncio.CancelledError:  # pragma: no cover
                 pass
 
-    def status(self) -> Dict[str, Any]:
+    def status(self) -> dict[str, Any]:
         settings = get_settings()
         db_interval = get_setting("scan_interval_minutes", "")
-        effective_interval = int(db_interval) if db_interval and db_interval.isdigit() else settings.scan_interval_minutes
+        effective_interval = (
+            int(db_interval)
+            if db_interval and db_interval.isdigit()
+            else settings.scan_interval_minutes
+        )
         return {
             "running": self.running,
             "market_open": is_market_open(),
@@ -215,10 +192,13 @@ if __name__ == "__main__":
 
     async def _main() -> None:
         print(f"market_open={is_market_open()}")
-        # One-shot scan of the watchlist without sending alerts.
         results = await scan_watchlist(send_alerts=False)
         summary = [
-            {"ticker": r["ticker"], "actionable": len(r["actionable"]), "errors": r["errors"]}
+            {
+                "ticker": r["ticker"],
+                "actionable": len(r.get("actionable", [])),
+                "errors": r.get("errors", []),
+            }
             for r in results
         ]
         print(json.dumps(summary, indent=2, default=str))

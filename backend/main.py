@@ -26,9 +26,11 @@ import asyncio
 import json
 import logging
 import os
-import time
+import re
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict, Optional
+from datetime import date, datetime
+from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,26 +38,51 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import __version__
-from .alerts import send_alert as _send_alert
-from .analysis import analyze as _analyze
 from .config import get_settings
 from .data import get_market_data as _get_market_data
 from .database import (
     clear_all_data as _clear_all_data,
+)
+from .database import (
     delete_analysis as _delete_analysis,
+)
+from .database import (
     delete_signal as _delete_signal_row,
+)
+from .database import (
     get_analysis_history,
     get_effective_watchlist,
     get_recent_analyses,
     get_recent_signals,
     get_setting,
     init_db,
-    save_analysis as _save_analysis,
-    save_signal as _save_signal,
     set_setting,
 )
-from .opportunities import detect_opportunities, filter_by_confidence
 from .scheduler import scan_ticker_async, scheduler
+
+_log = logging.getLogger(__name__)
+
+# Tickers are short alphanumeric symbols (optionally with '.' or '-', e.g.
+# "BRK.B"). Enforcing this early rejects any control characters (CR/LF etc.)
+# before a ticker value is ever interpolated into a log message, closing off
+# log-injection via crafted request bodies (CodeQL py/log-injection).
+_TICKER_RE = re.compile(r"^[A-Z0-9.\-]{1,15}$")
+
+
+def _clean_ticker(raw: str) -> str:
+    """Normalise and validate a user-supplied ticker symbol.
+
+    Raises ``HTTPException(400)`` if *raw* doesn't look like a real ticker.
+    """
+    ticker = raw.strip().upper()
+    if not ticker or not _TICKER_RE.match(ticker):
+        raise HTTPException(status_code=400, detail="invalid ticker")
+    return ticker
+
+
+def _log_safe(value: str) -> str:
+    """Strip CR/LF from *value* so it can't forge extra log lines/entries."""
+    return value.replace("\r", "").replace("\n", "")
 
 
 # --------------------------------------------------------------------------- #
@@ -91,18 +118,14 @@ def _setup_otel(app: FastAPI) -> None:
         resource = Resource({SERVICE_NAME: "offgrid-trader"})
 
         tracer = TracerProvider(resource=resource)
-        tracer.add_span_processor(
-            BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
-        )
+        tracer.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
         trace.set_tracer_provider(tracer)
 
         metrics.set_meter_provider(
             MeterProvider(
                 resource=resource,
                 metric_readers=[
-                    PeriodicExportingMetricReader(
-                        OTLPMetricExporter(endpoint=endpoint)
-                    )
+                    PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=endpoint))
                 ],
             )
         )
@@ -118,9 +141,7 @@ def _setup_otel(app: FastAPI) -> None:
 
         logging.getLogger().setLevel(logging.INFO)
 
-        FastAPIInstrumentor.instrument_app(
-            app, excluded_urls="health"
-        )
+        FastAPIInstrumentor.instrument_app(app, excluded_urls="health")
         RequestsInstrumentor().instrument()
         logging.getLogger(__name__).info("telemetry → %s", endpoint)
     except ImportError:
@@ -132,9 +153,7 @@ def _setup_otel(app: FastAPI) -> None:
 # --------------------------------------------------------------------------- #
 class AnalyzeRequest(BaseModel):
     ticker: str = Field(..., description="Ticker symbol, e.g. AAPL")
-    send_alerts: bool = Field(
-        False, description="Also dispatch alerts for actionable signals"
-    )
+    send_alerts: bool = Field(False, description="Also dispatch alerts for actionable signals")
 
 
 class AddTickerRequest(BaseModel):
@@ -146,10 +165,9 @@ class AlertsSettingRequest(BaseModel):
 
 
 class OllamaSettingRequest(BaseModel):
-    model: Optional[str] = Field(None, description="Ollama model tag, e.g. qwen2.5:7b")
-    timeout: Optional[int] = Field(
-        None, ge=10, le=3600,
-        description="Request timeout in seconds (10–3600)"
+    model: str | None = Field(None, description="Ollama model tag, e.g. qwen2.5:7b")
+    timeout: int | None = Field(
+        None, ge=10, le=3600, description="Request timeout in seconds (10–3600)"  # noqa: RUF001
     )
 
 
@@ -158,7 +176,7 @@ class SchedulerSettingRequest(BaseModel):
 
 
 class ScanIntervalRequest(BaseModel):
-    minutes: int = Field(..., ge=1, le=1440, description="Scan interval in minutes (1–1440)")
+    minutes: int = Field(..., ge=1, le=1440, description="Scan interval in minutes (1-1440)")
 
 
 class TradingViewWebhook(BaseModel):
@@ -168,13 +186,13 @@ class TradingViewWebhook(BaseModel):
     ``symbol``) is required; everything else is captured for logging.
     """
 
-    ticker: Optional[str] = None
-    symbol: Optional[str] = None
-    action: Optional[str] = None
-    price: Optional[float] = None
-    message: Optional[str] = None
+    ticker: str | None = None
+    symbol: str | None = None
+    action: str | None = None
+    price: float | None = None
+    message: str | None = None
 
-    def resolved_ticker(self) -> Optional[str]:
+    def resolved_ticker(self) -> str | None:
         value = self.ticker or self.symbol
         return value.strip().upper() if value else None
 
@@ -237,7 +255,7 @@ def _background_analyze(ticker: str, send_alerts: bool = True) -> None:
 # Endpoints
 # --------------------------------------------------------------------------- #
 @app.get("/health")
-def health() -> Dict[str, Any]:
+def health() -> dict[str, Any]:
     settings = get_settings()
     db_model = get_setting("ollama_model", "")
     return {
@@ -259,7 +277,7 @@ def _alerts_enabled() -> bool:
 
 
 @app.get("/watchlist")
-def watchlist() -> Dict[str, Any]:
+def watchlist() -> dict[str, Any]:
     settings = get_settings()
     return {
         "watchlist": get_effective_watchlist(),
@@ -270,7 +288,7 @@ def watchlist() -> Dict[str, Any]:
 
 
 @app.post("/watchlist")
-def add_ticker(request: AddTickerRequest) -> Dict[str, Any]:
+def add_ticker(request: AddTickerRequest) -> dict[str, Any]:
     ticker = request.ticker.strip().upper()
     if not ticker:
         raise HTTPException(status_code=400, detail="ticker required")
@@ -291,7 +309,7 @@ def add_ticker(request: AddTickerRequest) -> Dict[str, Any]:
 
 
 @app.delete("/watchlist/{ticker}")
-def remove_ticker(ticker: str) -> Dict[str, Any]:
+def remove_ticker(ticker: str) -> dict[str, Any]:
     ticker = ticker.strip().upper()
 
     added: list = json.loads(get_setting("watchlist_added", "[]"))
@@ -309,13 +327,13 @@ def remove_ticker(ticker: str) -> Dict[str, Any]:
 
 
 @app.post("/settings/alerts")
-def set_alerts(request: AlertsSettingRequest) -> Dict[str, Any]:
+def set_alerts(request: AlertsSettingRequest) -> dict[str, Any]:
     set_setting("alerts_enabled", "true" if request.enabled else "false")
     return {"alerts_enabled": request.enabled}
 
 
 @app.post("/settings/scheduler")
-async def set_scheduler(request: SchedulerSettingRequest) -> Dict[str, Any]:
+async def set_scheduler(request: SchedulerSettingRequest) -> dict[str, Any]:
     """Start or stop the background scheduler at runtime.
 
     State is persisted to the DB so it survives container restarts.
@@ -329,54 +347,53 @@ async def set_scheduler(request: SchedulerSettingRequest) -> Dict[str, Any]:
 
 
 @app.post("/settings/scan-interval")
-def set_scan_interval(request: ScanIntervalRequest) -> Dict[str, Any]:
+def set_scan_interval(request: ScanIntervalRequest) -> dict[str, Any]:
     """Update the scan interval (persisted to DB; takes effect on next loop cycle)."""
     set_setting("scan_interval_minutes", str(request.minutes))
     return scheduler.status()
 
 
 @app.get("/settings")
-def get_all_settings() -> Dict[str, Any]:
+def get_all_settings() -> dict[str, Any]:
     """Return current effective settings (env defaults overridden by DB values)."""
     cfg = get_settings()
-    db_model   = get_setting("ollama_model",   "")
+    db_model = get_setting("ollama_model", "")
     db_timeout = get_setting("ollama_timeout", "")
     return {
-        "ollama_model":         db_model   or cfg.ollama.model,
-        "ollama_timeout":       int(db_timeout) if db_timeout else cfg.ollama.timeout,
-        "alerts_enabled":       _alerts_enabled(),
-        "env_model":            cfg.ollama.model,
-        "env_timeout":          cfg.ollama.timeout,
+        "ollama_model": db_model or cfg.ollama.model,
+        "ollama_timeout": int(db_timeout) if db_timeout else cfg.ollama.timeout,
+        "alerts_enabled": _alerts_enabled(),
+        "env_model": cfg.ollama.model,
+        "env_timeout": cfg.ollama.timeout,
         "scan_interval_minutes": scheduler.status()["scan_interval_minutes"],
-        "scheduler_running":    scheduler.status()["running"],
+        "scheduler_running": scheduler.status()["running"],
     }
 
 
 @app.post("/settings/ollama")
-def set_ollama_settings(request: OllamaSettingRequest) -> Dict[str, Any]:
+def set_ollama_settings(request: OllamaSettingRequest) -> dict[str, Any]:
     """Persist Ollama model and/or timeout to the DB (no restart required)."""
     cfg = get_settings()
     if request.model is not None:
         set_setting("ollama_model", request.model)
     if request.timeout is not None:
         set_setting("ollama_timeout", str(request.timeout))
-    db_model   = get_setting("ollama_model",   "")
+    db_model = get_setting("ollama_model", "")
     db_timeout = get_setting("ollama_timeout", "")
     return {
-        "ollama_model":   db_model   or cfg.ollama.model,
+        "ollama_model": db_model or cfg.ollama.model,
         "ollama_timeout": int(db_timeout) if db_timeout else cfg.ollama.timeout,
     }
 
 
 @app.get("/settings/models")
-def list_ollama_models() -> Dict[str, Any]:
+def list_ollama_models() -> dict[str, Any]:
     """Return models currently pulled in the local Ollama instance."""
     import requests as _req
+
     cfg = get_settings()
     try:
-        resp = _req.get(
-            f"{cfg.ollama.host}/api/tags", timeout=5
-        )
+        resp = _req.get(f"{cfg.ollama.host}/api/tags", timeout=5)
         resp.raise_for_status()
         models = [m["name"] for m in resp.json().get("models", [])]
     except Exception as exc:
@@ -386,11 +403,9 @@ def list_ollama_models() -> Dict[str, Any]:
 
 
 @app.post("/analyze")
-async def analyze_ticker(request: AnalyzeRequest) -> Dict[str, Any]:
+async def analyze_ticker(request: AnalyzeRequest) -> dict[str, Any]:
     """On-demand analysis for a single ticker."""
-    ticker = request.ticker.strip().upper()
-    if not ticker:
-        raise HTTPException(status_code=400, detail="ticker is required")
+    ticker = _clean_ticker(request.ticker)
 
     result = await scan_ticker_async(ticker, send_alerts=request.send_alerts)
     return {
@@ -405,136 +420,70 @@ async def analyze_ticker(request: AnalyzeRequest) -> Dict[str, Any]:
 
 
 @app.post("/analyze/stream")
-async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
+async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:  # noqa: C901
     """On-demand analysis streamed as Server-Sent Events.
 
     Yields ``data: <json>`` lines for each pipeline step, then a final
     ``type:"result"`` event with the full analysis + market data.
     Results are persisted to the database (analysis_log + signals tables).
     """
-    ticker = request.ticker.strip().upper()
-    if not ticker:
-        raise HTTPException(status_code=400, detail="ticker is required")
+    ticker = _clean_ticker(request.ticker)
 
-    settings = get_settings()
     # Capture before entering generator (request not in scope inside async gen)
     send_alerts = request.send_alerts
 
-    async def _event(payload: Dict[str, Any]) -> str:
+    async def _event(payload: dict[str, Any]) -> str:
         return f"data: {json.dumps(payload)}\n\n"
 
     async def _stream_body() -> AsyncGenerator[str, None]:
-        errors: list = []
+        from backend.agent import TickerAgent
+        from backend.scheduler import _memory
 
-        # ── Step 1: fetch market data ──────────────────────────────────────
-        yield await _event(
-            {"type": "step", "step": "fetch", "status": "running",
-             "msg": f"Fetching market data for {ticker}…"}
-        )
-        t0 = time.monotonic()
+        _SKILL_TO_STEP = {
+            "fetch_data": "fetch",
+            "ai_analysis": "analyze",
+            "opportunity_detect": "detect",
+            "persist": "persist",
+            "alert": "alert",
+        }
+
+        queue: asyncio.Queue = asyncio.Queue()
+        agent = TickerAgent(ticker, memory=_memory, send_alerts=send_alerts)
+
+        # Run the agent as a background task that pushes events to the queue
+        # as each skill starts and finishes — true real-time streaming.
+        task = asyncio.create_task(agent.run(event_queue=queue))
+
         try:
-            market_data = await asyncio.to_thread(_get_market_data, ticker)
-            errors.extend(market_data.get("errors", []))
+            while True:
+                ev = await queue.get()
+                if ev is None:  # sentinel — agent finished
+                    break
+                ev_type = ev.get("type")
+                if ev_type == "step":
+                    out = dict(ev)
+                    out["step"] = _SKILL_TO_STEP.get(ev.get("step", ""), ev.get("step", ""))
+                    yield await _event(out)
+                elif ev_type in ("retry", "memory", "skill_error"):
+                    yield await _event(ev)
         except Exception:
-            _log.exception("fetch failed for %s", ticker)
-            yield await _event(
-                {"type": "step", "step": "fetch", "status": "error",
-                 "msg": f"Failed to fetch market data for {ticker} — check server logs"}
-            )
-            return
-        elapsed_fetch = round(time.monotonic() - t0, 1)
-        yield await _event(
-            {"type": "step", "step": "fetch", "status": "done",
-             "elapsed": elapsed_fetch}
-        )
+            task.cancel()
+            raise
 
-        # ── Step 2: AI analysis ────────────────────────────────────────────
-        yield await _event(
-            {"type": "step", "step": "analyze", "status": "running",
-             "msg": f"Running AI analysis ({settings.ollama.model})…"}
-        )
-        t0 = time.monotonic()
-        try:
-            analysis = await asyncio.to_thread(_analyze, market_data)
-        except Exception:
-            _log.exception("analysis failed for %s", ticker)
-            yield await _event(
-                {"type": "step", "step": "analyze", "status": "error",
-                 "msg": "AI analysis failed — check server logs"}
-            )
-            return
-        if analysis.get("error"):
-            errors.append(analysis["error"])
-            _log.warning("analysis error for %s: %s", ticker, analysis["error"])
-            yield await _event(
-                {"type": "step", "step": "analyze", "status": "error",
-                 "msg": "AI analysis returned an error — check server logs"}
-            )
-            return
-        elapsed_analyze = round(time.monotonic() - t0, 1)
-        yield await _event(
-            {"type": "step", "step": "analyze", "status": "done",
-             "elapsed": elapsed_analyze}
-        )
-
-        # ── Step 3: detect opportunities ───────────────────────────────────
-        yield await _event(
-            {"type": "step", "step": "detect", "status": "running",
-             "msg": "Detecting opportunities…"}
-        )
-        t0 = time.monotonic()
-        try:
-            opportunities = await asyncio.to_thread(
-                detect_opportunities, market_data, analysis
-            )
-            actionable = filter_by_confidence(opportunities)
-        except Exception:
-            _log.exception("detect failed for %s", ticker)
-            yield await _event(
-                {"type": "step", "step": "detect", "status": "error",
-                 "msg": "Opportunity detection failed — check server logs"}
-            )
-            return
-        elapsed_detect = round(time.monotonic() - t0, 1)
-        yield await _event(
-            {"type": "step", "step": "detect", "status": "done",
-             "elapsed": elapsed_detect}
-        )
-
-        # ── Persist to database ────────────────────────────────────────────
-        try:
-            await asyncio.to_thread(_save_analysis, ticker, analysis, market_data)
-        except Exception:
-            _log.exception("save_analysis failed for %s", ticker)
-            errors.append("save_analysis failed — check server logs")
-
-        saved_ids: list = []
-        alerts_sent: list = []
-        for opp in actionable:
-            try:
-                saved_ids.append(await asyncio.to_thread(_save_signal, opp))
-            except Exception:
-                _log.exception("save_signal failed for %s", ticker)
-                errors.append("save_signal failed — check server logs")
-            if send_alerts:
-                try:
-                    alerts_sent.append(await asyncio.to_thread(_send_alert, opp))
-                except Exception:
-                    _log.exception("send_alert failed for %s", ticker)
-                    errors.append("send_alert failed — check server logs")
-
-        # ── Final result ───────────────────────────────────────────────────
+        # Await the completed task and emit the final result.
+        result = await task
+        ctx = result.context
         yield await _event(
             {
                 "type": "result",
                 "ticker": ticker,
-                "analysis": analysis,
-                "market_data": market_data,
-                "opportunities": opportunities,
-                "actionable": actionable,
-                "saved_signal_ids": saved_ids,
-                "alerts": alerts_sent,
-                "errors": errors,
+                "analysis": ctx.analysis,
+                "market_data": ctx.market_data,
+                "opportunities": ctx.opportunities or [],
+                "actionable": ctx.actionable or [],
+                "saved_signal_ids": ctx.saved_signal_ids,
+                "alerts": ctx.alerts_sent,
+                "errors": ctx.errors,
             }
         )
 
@@ -545,11 +494,13 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
             async for chunk in _stream_body():
                 yield chunk
         except Exception:
-            _log.exception("unhandled error in SSE stream for %s", ticker)
-            yield await _event({
-                "type": "error",
-                "msg": "An internal error occurred. Check server logs.",
-            })
+            _log.exception("unhandled error in SSE stream for %s", _log_safe(ticker))
+            yield await _event(
+                {
+                    "type": "error",
+                    "msg": "An internal error occurred. Check server logs.",
+                }
+            )
 
     return StreamingResponse(
         _stream(),
@@ -562,11 +513,9 @@ async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:
 
 
 @app.get("/market-data/{ticker}")
-async def market_data(ticker: str) -> Dict[str, Any]:
+async def market_data(ticker: str) -> dict[str, Any]:
     """Return the raw market data dict for *ticker* (price, fundamentals, indicators)."""
-    ticker = ticker.strip().upper()
-    if not ticker:
-        raise HTTPException(status_code=400, detail="ticker is required")
+    ticker = _clean_ticker(ticker)
     data = await asyncio.to_thread(_get_market_data, ticker)
     return data
 
@@ -576,15 +525,13 @@ async def market_data_history(
     ticker: str,
     period: str = Query("3mo", description="yfinance period, e.g. 1mo 3mo 6mo 1y"),
     interval: str = Query("1d", description="yfinance interval, e.g. 1d 1wk"),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Return OHLCV history for *ticker* from yfinance.
 
     Each entry: ``{date, open, high, low, close, volume}``.
     Used by the price history chart in the Analysis Explorer.
     """
-    ticker = ticker.strip().upper()
-    if not ticker:
-        raise HTTPException(status_code=400, detail="ticker is required")
+    ticker = _clean_ticker(ticker)
 
     def _fetch() -> list:
         import yfinance as yf  # local import — not needed at startup
@@ -596,10 +543,14 @@ async def market_data_history(
         rows = []
         prev_close = None
         for ts, row in hist.iterrows():
+            if isinstance(ts, (datetime, date)):
+                date_str = ts.strftime("%Y-%m-%d")
+            else:
+                date_str = str(ts)
             close = float(row["Close"]) if row["Close"] == row["Close"] else None
             rows.append(
                 {
-                    "date": ts.strftime("%Y-%m-%d"),
+                    "date": date_str,
                     "open": float(row["Open"]) if row["Open"] == row["Open"] else None,
                     "high": float(row["High"]) if row["High"] == row["High"] else None,
                     "low": float(row["Low"]) if row["Low"] == row["Low"] else None,
@@ -613,9 +564,11 @@ async def market_data_history(
 
     try:
         rows = await asyncio.to_thread(_fetch)
-    except Exception:
-        _log.exception("candles fetch failed for %s", ticker)
-        raise HTTPException(status_code=502, detail="Failed to fetch candle data — check server logs")
+    except Exception as exc:
+        _log.exception("candles fetch failed for %s", _log_safe(ticker))
+        raise HTTPException(
+            status_code=502, detail="Failed to fetch candle data — check server logs"
+        ) from exc
 
     return {"ticker": ticker, "period": period, "interval": interval, "candles": rows}
 
@@ -624,7 +577,7 @@ async def market_data_history(
 async def tradingview_webhook(
     payload: TradingViewWebhook,
     background_tasks: BackgroundTasks,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Receive a TradingView Pro alert and trigger background analysis."""
     ticker = payload.resolved_ticker()
     if not ticker:
@@ -644,47 +597,46 @@ async def tradingview_webhook(
 @app.get("/signals")
 def signals(
     limit: int = Query(50, ge=1, le=500),
-    ticker: Optional[str] = Query(None),
-) -> Dict[str, Any]:
+    ticker: str | None = Query(None),
+) -> dict[str, Any]:
     """Return recent stored signals, optionally filtered by ticker."""
     rows = get_recent_signals(limit=limit, ticker=ticker)
     return {"count": len(rows), "signals": rows}
 
 
 @app.delete("/signals/{signal_id}")
-def delete_signal(signal_id: int) -> Dict[str, Any]:
+def delete_signal(signal_id: int) -> dict[str, Any]:
     """Delete a stored signal by id."""
     deleted = _delete_signal_row(signal_id)
     if not deleted:
-        raise HTTPException(
-            status_code=404, detail=f"signal {signal_id} not found"
-        )
+        raise HTTPException(status_code=404, detail=f"signal {signal_id} not found")
     return {"deleted": True, "id": signal_id}
 
 
 @app.get("/analysis")
 def all_analysis_history(
     limit: int = Query(25, ge=1, le=100),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Return recent analysis-log entries across all tickers, newest first."""
     rows = get_recent_analyses(limit=limit)
     return {"count": len(rows), "history": rows}
 
 
 @app.delete("/analysis/{entry_id}")
-def delete_analysis_entry(entry_id: int) -> Dict[str, Any]:
+def delete_analysis_entry(entry_id: int) -> dict[str, Any]:
     """Delete an analysis-log entry by id."""
     deleted = _delete_analysis(entry_id)
     if not deleted:
-        raise HTTPException(
-            status_code=404, detail=f"analysis entry {entry_id} not found"
-        )
+        raise HTTPException(status_code=404, detail=f"analysis entry {entry_id} not found")
     return {"deleted": True, "id": entry_id}
 
 
 @app.post("/data/reset")
-def reset_data() -> Dict[str, Any]:
-    """Clear all signals and analysis history. app_settings (watchlist, model, etc.) is preserved."""
+def reset_data() -> dict[str, Any]:
+    """Clear all signals and analysis history.
+
+    app_settings (watchlist, model, etc.) is preserved.
+    """
     counts = _clear_all_data()
     return {"cleared": ["signals", "analysis_log"], **counts}
 
@@ -693,7 +645,7 @@ def reset_data() -> Dict[str, Any]:
 def analysis_history(
     ticker: str,
     limit: int = Query(20, ge=1, le=200),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Return the analysis-log history for *ticker*."""
     rows = get_analysis_history(ticker=ticker, limit=limit)
     return {"ticker": ticker.upper(), "count": len(rows), "history": rows}

@@ -7,6 +7,8 @@
 | [Home](Home.md) | Project overview, service URLs, key files, quick-nav |
 | [Architecture](architecture.md) | Pipeline diagram, opportunity-detection rules, Docker service map, SSE streaming design, data persistence |
 | [API Reference](api.md) | All endpoints with request/response shapes and `curl` examples |
+| [Settings Reference](settings.md) | Every `.env` variable, defaults, and which ones can be changed at runtime |
+| [Observability](observability.md) | OTEL span hierarchy, metric instruments, Aspire usage guide, log reference |
 | [Indicators](indicators.md) | RSI, MACD, EMA, Bollinger Bands, Stochastic, Volume ratio — definitions, scales, what the system checks |
 | [Glossary](glossary.md) | Alphabetical trading terminology (bullish/bearish, long/short, support/resistance, R-multiple, etc.) |
 
