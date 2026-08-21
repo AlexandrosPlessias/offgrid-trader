@@ -507,7 +507,7 @@ def _parse_fred_csv(text: str) -> list[tuple]:
             try:
                 rows.append((date_str, float(val_str)))
             except ValueError:
-                pass
+                _log.debug("_parse_fred_csv: skipping non-numeric observation (parse error)")
     except Exception:
         _log.debug("_parse_fred_csv: unexpected parse error", exc_info=True)
     return rows
@@ -528,7 +528,7 @@ def _parse_fred_api(payload: dict) -> list[tuple]:
         try:
             rows.append((date_str, float(val_str)))
         except ValueError:
-            pass
+            _log.debug("_parse_fred_api: skipping non-numeric observation (parse error)")
     return rows
 
 
@@ -669,7 +669,7 @@ def fetch_fred_macro() -> dict[str, Any]:  # noqa: C901
                     target_year = ld.year - 1
                     # Build a dict for fast lookup, fall back to index -13
                     date_map = {d: v for d, v in cpi_rows}
-                    for month_delta in range(0, 3):
+                    for month_delta in range(3):
                         candidate = date(
                             target_year,
                             ((ld.month - 1 - month_delta) % 12) + 1,
