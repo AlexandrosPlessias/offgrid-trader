@@ -1,4 +1,4 @@
-"""AIAnalysisSkill — wraps ``analysis.analyze()`` with retry on OllamaError."""
+"""AIAnalysisSkill — wraps ``analysis.analyze()`` with retry on LLMError."""
 
 from __future__ import annotations
 
@@ -10,13 +10,17 @@ _log = logging.getLogger(__name__)
 
 
 class AIAnalysisSkill(Skill):
-    """Call the Ollama LLM to produce a structured market analysis.
+    """Call the configured LLM to produce a structured market analysis.
 
     Critical: without a valid analysis the opportunity-detection step
     cannot run its AI rule (Rule 1).  The skill retries on transient
-    ``OllamaError`` failures (connection reset, timeout) but does NOT
+    ``LLMError`` failures (connection reset, timeout) but does NOT
     retry on a parse failure — those indicate a model response issue
     that is unlikely to change with an immediate retry.
+
+    Works with any provider: Ollama (local), Groq, or a custom
+    OpenAI-compatible endpoint.  The active provider is read from the DB
+    setting ``llm_provider`` or the ``LLM_PROVIDER`` env var.
     """
 
     name = "ai_analysis"
@@ -26,7 +30,11 @@ class AIAnalysisSkill(Skill):
     retry_delay_base = 2.0
 
     def run(self, ctx: AgentContext) -> SkillResult:
-        from backend.analysis import OllamaError, analyze
+        from backend.analysis import (  # noqa: F401 (OllamaError re-export)
+            LLMError,
+            OllamaError,
+            analyze,
+        )
 
         if ctx.market_data is None:
             return SkillResult(success=False, error="market_data not available")
@@ -36,22 +44,28 @@ class AIAnalysisSkill(Skill):
             analysis = analyze(ctx.market_data, memory=ctx.memory)
             if analysis.get("error"):
                 # analyze() never raises — it returns an error dict on failure.
-                # Treat connection/timeout OllamaErrors as retryable.
+                # Treat connection/timeout LLMErrors as retryable.
                 err = analysis["error"]
                 retryable = any(
                     kw in err.lower() for kw in ("cannot reach", "timed out", "connection")
                 )
                 if retryable:
-                    raise OllamaError(err)
+                    raise LLMError(err)
                 # Parse errors etc. — surface but don't retry.
                 ctx.analysis = analysis
                 return SkillResult(success=False, error=err, data=analysis)
 
             ctx.analysis = analysis
-            _log.info("ai_analysis ◀ %s — %s", ctx.ticker, analysis.get("trend", "?"))
+            _log.info(
+                "ai_analysis ◀ %s — %s (provider=%s model=%s)",
+                ctx.ticker,
+                analysis.get("trend", "?"),
+                analysis.get("llm_provider", "?"),
+                analysis.get("llm_model", "?"),
+            )
             return SkillResult(success=True, data=analysis)
 
-        except OllamaError as exc:
+        except LLMError as exc:
             _log.warning("ai_analysis transient error for %s: %s", ctx.ticker, exc)
             return SkillResult(success=False, error=str(exc))
         except Exception as exc:

@@ -216,6 +216,61 @@ Trigger a test alert via the React UI or `curl` to confirm delivery.
 
 ---
 
+## 4b. Cloud AI quick-start (no GPU, no credit card)
+
+> **Skip this section** if you plan to run Ollama locally.
+> Use it if your machine is low on RAM/VRAM, or you just want the fastest path to
+> a running system.
+
+Groq Cloud provides free inference with no credit card required:
+
+| Provider | Sign-up | Free tier | Default model |
+|---|---|---|---|
+| **Groq Cloud** | https://console.groq.com | ~30 req/min · 6 000 req/day | `llama-3.3-70b-versatile` |
+
+At the default scan interval (15 min, 6 tickers) the app sends ~0.4 req/min —
+the free tier has **75× headroom**.
+
+### Option A — Configure from the Settings page (easiest, no restart)
+
+1. Run `make infra` (add `--skip-ollama` if you also want to skip Ollama containers):
+   ```bash
+   bash infra/start-infra.sh --skip-ollama
+   ```
+2. Run `make build` to start MarketSage.
+3. Open the **Settings page** (⚙ in the top-right header).
+4. Under **AI Provider** select *Groq Cloud*.
+5. Paste your API key → **Save AI Provider settings**.
+6. Done — the next analysis run uses the cloud provider immediately.
+
+### Option B — Configure via `.env` (before first start)
+
+```bash
+# In your .env:
+LLM_PROVIDER=groq
+GROQ_API_KEY=gsk_...          # from console.groq.com → API Keys → Create
+```
+
+Then run:
+```bash
+make infra          # auto-detects LLM_PROVIDER=groq, skips Ollama (saves RAM/VRAM)
+make build
+```
+
+> **No Ollama needed.** When `LLM_PROVIDER` is set to anything other than
+> `ollama`, `make infra` automatically skips the Ollama and `ollama-pull`
+> containers. No 9 GB download, no GPU memory. Portainer still starts.
+
+### Rate-limit sanity check
+
+`SCAN_INTERVAL_MINUTES=15` with a 6-ticker watchlist sends:
+```
+6 tickers / 15 min × 60 min/h ≈ 24 req/h ≈ 0.4 req/min
+```
+Groq free tier: **1 800 req/h** (30 req/min) — 75× more than needed.
+
+---
+
 ## 5. First run
 
 ### Step 0 — Make sure Docker is running

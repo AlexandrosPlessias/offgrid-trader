@@ -3,7 +3,7 @@
 **Local, zero-cost AI stock monitor.**
 FastAPI · Ollama (`qwen2.5:14b`) · React · SQLite.
 
-Everything runs on your machine — no paid APIs, no cloud AI, no subscription.
+Runs locally with **Ollama** (default) or via free cloud inference (**Groq**) — no paid APIs, no subscription required.
 
 > ⚠️ **Not financial advice.** For educational and research use only.
 
@@ -91,6 +91,8 @@ See [docs/screenshots/README.md](../screenshots/README.md) for full instructions
 | [Architecture](architecture.md) | Pipeline diagram, Docker service map, SSE streaming design, data persistence |
 | [API Reference](api.md) | All endpoints with full request/response shapes and `curl` examples |
 | [Settings Reference](settings.md) | Every `.env` variable, defaults, and which ones can be changed at runtime |
+| [Cloud LLM Providers](cloud-llm.md) | Free Groq setup, model reference, switching between providers |
+| [How Signals Work](how-signals-work.md) | End-to-end walkthrough: AI verdict → 5 rule checks → merge + corroboration bonus → macro filter → confidence floor |
 | [Indicators](indicators.md) | RSI, MACD, EMA, Bollinger Bands, Stochastic, Volume ratio, Fundamentals, Balance Sheet, Macro — definitions and how they're used |
 | [Glossary](glossary.md) | Alphabetical trading and macro terminology |
 | [Observability](observability.md) | OTEL span hierarchy, Aspire usage guide, log lines |

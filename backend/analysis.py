@@ -1,14 +1,16 @@
-"""AI analysis layer backed by a local Ollama model (qwen2.5:14b).
+"""AI analysis layer — routes to a local Ollama model or a cloud LLM provider.
 
 Turns the unified market-data dict from :mod:`backend.data` into a structured
-prompt, sends it to the local Ollama ``/api/chat`` endpoint and parses the
-JSON response into a normalised analysis dict.
+prompt, sends it to the configured LLM (Ollama, Groq, or a custom
+OpenAI-compatible endpoint) and parses the JSON response into a normalised
+analysis dict.
 
-Everything is local and free — no cloud/paid LLM is contacted. All failure
-modes (Ollama not running, request timeout, malformed JSON) are caught and
-returned as a structured error so callers never crash.
+The active provider is controlled by the ``LLM_PROVIDER`` env var (default
+``ollama``) or the ``llm_provider`` DB setting (set via the Settings page).
+All failure modes (server unreachable, request timeout, malformed JSON) are
+caught and returned as a structured error so callers never crash.
 
-Run standalone (requires a running Ollama)::
+Run standalone::
 
     python -m backend.analysis AAPL
 """
@@ -52,8 +54,16 @@ def _load_prompt(filename: str) -> str:
 _SYSTEM_PROMPT = _load_prompt("system_prompt.md")
 
 
-class OllamaError(RuntimeError):
-    """Raised when the local Ollama server cannot be reached or errors out."""
+class LLMError(RuntimeError):
+    """Raised when any configured LLM provider cannot be reached or errors out."""
+
+
+class OllamaError(LLMError):
+    """Raised when the local Ollama server cannot be reached or errors out.
+
+    Subclass of :class:`LLMError` for backward compatibility — existing
+    ``except OllamaError`` call-sites continue to work on the Ollama path.
+    """
 
 
 # --------------------------------------------------------------------------- #
@@ -219,7 +229,7 @@ def call_ollama(
     *,
     model: str | None = None,
     ticker: str | None = None,
-) -> str:
+) -> tuple[str, str, int, int]:
     """Send a chat request to the local Ollama server and return raw content.
 
     Raises :class:`OllamaError` if the server is unreachable or errors.
@@ -375,7 +385,211 @@ def call_ollama(
             len(content),
             content,
         )
-        return content
+        return content, _model, input_tokens, output_tokens  # (raw, model, in_tok, out_tok)
+
+
+# --------------------------------------------------------------------------- #
+# Cloud LLM call (Groq or any OpenAI-compatible endpoint)
+# --------------------------------------------------------------------------- #
+def call_cloud_llm(  # noqa: C901
+    user_prompt: str,
+    system_prompt: str = _SYSTEM_PROMPT,
+    *,
+    model: str | None = None,
+    ticker: str | None = None,
+) -> tuple[str, str, int, int]:
+    """Send a chat request to a cloud OpenAI-compatible endpoint.
+
+    Reads provider / api_key / base_url from DB settings first, then falls
+    back to env-var config (``settings.llm``).
+
+    Returns ``(raw_content, model_used)``.
+    Raises :class:`LLMError` on connectivity, auth, or HTTP errors.
+    """
+    try:
+        import openai as _openai  # lazy import — optional dependency
+    except ImportError as exc:  # pragma: no cover
+        raise LLMError(
+            "The 'openai' package is required for cloud LLM providers. "
+            "Add it to requirements/backend.txt and rebuild the container."
+        ) from exc
+
+    settings = get_settings()
+
+    # DB settings take precedence over env vars (same pattern as ollama_model).
+    _db_provider = _get_db_setting("llm_provider", "")
+    _db_api_key = _get_db_setting("llm_api_key", "")
+    _db_model = _get_db_setting("llm_model", "")
+    _db_base_url = _get_db_setting("llm_base_url", "")
+    _db_timeout = _get_db_setting("ollama_timeout", "")  # reuse existing UI knob
+    _db_reasoning_effort = _get_db_setting("llm_reasoning_effort", "none")
+
+    provider = _db_provider or settings.llm.provider
+    api_key = _db_api_key or settings.llm.api_key_for(provider)
+    base_url = _db_base_url or settings.llm.base_url_for(provider)
+    _model = model or _db_model or settings.llm.default_model_for(provider)
+    _timeout = int(_db_timeout) if _db_timeout else settings.llm.cloud_timeout
+
+    if not api_key:
+        raise LLMError(
+            f"No API key configured for provider '{provider}'. "
+            "Set it via the Settings page or the relevant env var "
+            "(GROQ_API_KEY / LLM_API_KEY)."
+        )
+    if not base_url:
+        raise LLMError(
+            f"No base URL found for provider '{provider}'. "
+            "Use LLM_PROVIDER=groq or set LLM_BASE_URL for a custom endpoint."
+        )
+
+    _log.info(
+        "cloud_llm ▶ provider=%s ticker=%s model=%s prompt_chars=%d",
+        provider,
+        ticker or "?",
+        _model,
+        len(user_prompt),
+    )
+
+    client = _openai.OpenAI(api_key=api_key, base_url=base_url, timeout=_timeout)
+
+    with _tracer.start_as_current_span("llm.chat") as span:
+        span.set_attribute("gen_ai.system", provider)
+        span.set_attribute("gen_ai.request.model", _model)
+        span.set_attribute("llm.ticker", ticker or "")
+        span.set_attribute("gen_ai.system_prompt_chars", len(system_prompt))
+        span.set_attribute("gen_ai.user_prompt_chars", len(user_prompt))
+        span.set_attribute("llm.prompt_chars", len(user_prompt))
+
+        span.add_event("gen_ai.system.message", {"role": "system", "chars": len(system_prompt)})
+        span.add_event("gen_ai.user.message", {"role": "user", "chars": len(user_prompt)})
+
+        if settings.otel.include_llm_content:
+            with _tracer.start_as_current_span("llm.system_prompt") as _s:
+                _s.set_attribute("role", "system")
+                _s.set_attribute("content", system_prompt)
+                _s.set_attribute("chars", len(system_prompt))
+            with _tracer.start_as_current_span("llm.user_prompt") as _u:
+                _u.set_attribute("role", "user")
+                _u.set_attribute("content", user_prompt)
+                _u.set_attribute("chars", len(user_prompt))
+
+        t0 = time.monotonic()
+        try:
+            request = {
+                "model": _model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.2,
+            }
+            if provider in ("groq", "gemini", "mistral", "custom"):
+                request["response_format"] = {"type": "json_object"}
+            if provider in ("groq", "mistral"):
+                request["reasoning_effort"] = _db_reasoning_effort
+            elif provider == "gemini" and _db_reasoning_effort != "none":
+                # Gemini only accepts reasoning_effort="none" on 2.5 models; sending
+                # it at all is optional, so only include the field when the user has
+                # explicitly chosen a non-default value (avoids 400 INVALID_ARGUMENT
+                # on Gemini 3.x / other models where reasoning can't be disabled).
+                request["reasoning_effort"] = _db_reasoning_effort
+            completion = client.chat.completions.create(**request)
+        except _openai.APIConnectionError as exc:
+            span.set_attribute("error", str(exc))
+            raise LLMError(
+                f"Cannot reach {provider} API ({base_url}). "
+                "Check your internet connection and the provider's status page."
+            ) from exc
+        except _openai.APITimeoutError as exc:
+            span.set_attribute("error", f"timeout after {_timeout}s")
+            raise LLMError(f"{provider} request timed out after {_timeout}s.") from exc
+        except _openai.AuthenticationError as exc:
+            span.set_attribute("error", "authentication failed")
+            raise LLMError(f"{provider} authentication failed — check your API key.") from exc
+        except _openai.APIStatusError as exc:
+            span.set_attribute("error", f"HTTP {exc.status_code}")
+            raise LLMError(
+                f"{provider} returned HTTP {exc.status_code}: {exc.message[:300]}"
+            ) from exc
+        latency = time.monotonic() - t0
+
+        content = (completion.choices[0].message.content or "").strip()
+        if not content:
+            span.set_attribute("error", "empty content")
+            raise LLMError(f"{provider} response contained no message content.")
+
+        usage = completion.usage
+        input_tokens = usage.prompt_tokens if usage else 0
+        output_tokens = usage.completion_tokens if usage else 0
+        ttft_s = round(latency, 3)  # cloud APIs don't expose TTFT separately
+        total_latency_s = round(latency, 2)
+
+        span.set_attribute("llm.input_tokens", input_tokens)
+        span.set_attribute("llm.output_tokens", output_tokens)
+        span.set_attribute("llm.ttft_s", ttft_s)
+        span.set_attribute("llm.total_latency_s", total_latency_s)
+        span.set_attribute("llm.response_chars", len(content))
+
+        span.add_event(
+            "gen_ai.assistant.message",
+            {
+                "role": "assistant",
+                "chars": len(content),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            },
+        )
+        if settings.otel.include_llm_content:
+            with _tracer.start_as_current_span("llm.assistant_response") as _a:
+                _a.set_attribute("role", "assistant")
+                _a.set_attribute("content", content)
+                _a.set_attribute("chars", len(content))
+                _a.set_attribute("input_tokens", input_tokens)
+                _a.set_attribute("output_tokens", output_tokens)
+
+        _log.info(
+            "cloud_llm ◀ provider=%s ticker=%s model=%s latency=%.1fs "
+            "in_tok=%d out_tok=%d chars=%d",
+            provider,
+            ticker or "?",
+            _model,
+            latency,
+            input_tokens,
+            output_tokens,
+            len(content),
+        )
+        return content, _model, input_tokens, output_tokens  # (raw, model, in_tok, out_tok)
+
+
+# --------------------------------------------------------------------------- #
+# LLM dispatcher — routes to the configured provider
+# --------------------------------------------------------------------------- #
+def _effective_provider() -> str:
+    """Return the active LLM provider, DB setting takes precedence over env."""
+    db_val = _get_db_setting("llm_provider", "")
+    return db_val or get_settings().llm.provider
+
+
+def call_llm(
+    user_prompt: str,
+    system_prompt: str = _SYSTEM_PROMPT,
+    *,
+    model: str | None = None,
+    ticker: str | None = None,
+) -> tuple[str, str, int, int]:
+    """Route to the configured LLM provider.
+
+    Returns ``(raw_content, model_used, prompt_tokens, completion_tokens)``.
+    Raises :class:`LLMError` on any provider failure.
+    """
+    provider = _effective_provider()
+    if provider == "ollama":
+        return call_ollama(user_prompt, system_prompt, model=model, ticker=ticker)
+    if provider in ("groq", "gemini", "mistral", "custom"):
+        return call_cloud_llm(user_prompt, system_prompt, model=model, ticker=ticker)
+    raise LLMError(
+        f"Unknown LLM_PROVIDER={provider!r}. Valid values: ollama, groq, gemini, mistral, custom."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -401,7 +615,7 @@ def parse_ai_response(content: str) -> dict[str, Any]:
 
     data = json.loads(text)  # may raise json.JSONDecodeError
     if not isinstance(data, dict):
-        raise ValueError("AI response JSON was not an object.")
+        raise TypeError("AI response JSON was not an object.")
 
     normalised: dict[str, Any] = {key: data.get(key) for key in _EXPECTED_KEYS}
 
@@ -434,10 +648,13 @@ def analyze(
     market_data: dict[str, Any],
     memory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Full pipeline: prompt -> Ollama -> parsed analysis.
+    """Full pipeline: prompt -> LLM (local or cloud) -> parsed analysis.
 
     Always returns a dict. On failure the dict contains ``error`` (and, when
     available, ``raw`` with the offending model output) instead of raising.
+
+    The returned dict always includes ``llm_provider`` and ``llm_model`` keys
+    so callers can display which model produced the analysis.
 
     Args:
         market_data: The full market-data dict from ``get_market_data()``.
@@ -446,12 +663,21 @@ def analyze(
     """
 
     ticker = market_data.get("ticker")
+    provider = _effective_provider()
     prompt = build_prompt(market_data, memory=memory)
 
     try:
-        raw = call_ollama(prompt, ticker=ticker)
-    except OllamaError as exc:
-        return {"ticker": ticker, "error": str(exc), "opportunity": None}
+        raw, model_used, prompt_tokens, completion_tokens = call_llm(prompt, ticker=ticker)
+    except LLMError as exc:
+        return {
+            "ticker": ticker,
+            "error": str(exc),
+            "opportunity": None,
+            "llm_provider": provider,
+            "llm_model": "",
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        }
 
     try:
         parsed = parse_ai_response(raw)
@@ -461,9 +687,17 @@ def analyze(
             "error": f"Failed to parse AI JSON response: {exc}",
             "raw": raw,
             "opportunity": None,
+            "llm_provider": provider,
+            "llm_model": model_used,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
         }
 
     parsed["ticker"] = ticker
+    parsed["llm_provider"] = provider
+    parsed["llm_model"] = model_used
+    parsed["prompt_tokens"] = prompt_tokens
+    parsed["completion_tokens"] = completion_tokens
     return parsed
 
 

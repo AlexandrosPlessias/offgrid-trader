@@ -326,16 +326,18 @@ class TickerAgent:
                 )
 
                 if result.success:
-                    await self._emit(
-                        {
-                            "type": "step",
-                            "step": skill.name,
-                            "status": "done",
-                            "elapsed_ms": round(elapsed * 1000),
-                        },
-                        ctx,
-                        event_queue,
-                    )
+                    done_event: dict = {
+                        "type": "step",
+                        "step": skill.name,
+                        "status": "done",
+                        "elapsed_ms": round(elapsed * 1000),
+                    }
+                    # Attach LLM metadata when the AI step completes so the
+                    # frontend can display the provider/model chip immediately.
+                    if skill.name == "ai_analysis" and ctx.analysis:
+                        done_event["llm_provider"] = ctx.analysis.get("llm_provider")
+                        done_event["llm_model"] = ctx.analysis.get("llm_model")
+                    await self._emit(done_event, ctx, event_queue)
                     span.set_attribute("skill.success", True)
                     return result
 

@@ -4,6 +4,8 @@
 - [Architecture](architecture)
 - [API Reference](api)
 - [Settings Reference](settings)
+- [Cloud LLM Providers](cloud-llm)
+- [How Signals Work](how-signals-work)
 - [Indicators](indicators)
 - [Glossary](glossary)
 - [Observability](observability)

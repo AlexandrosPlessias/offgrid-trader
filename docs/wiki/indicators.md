@@ -253,6 +253,12 @@ Without a Finnhub key the news block is empty — the system still works but the
 
 ---
 
+## Related pages
+
+- [How Signals Work](how-signals-work.md) — see exactly how RSI, MACD, volume, and P/E combine with the AI verdict to produce a confidence score
+
+---
+
 ## Further reading
 
 - [RSI — Investopedia](https://www.investopedia.com/terms/r/rsi.asp)
