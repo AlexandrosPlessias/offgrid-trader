@@ -85,7 +85,10 @@ class MemoryLayer:
         age = _age_hours(row.get("last_scan"))
         if age > MEMORY_TTL_HOURS:
             _log.debug(
-                "memory.load: expired (%.1fh > %.0fh) for %s", age, MEMORY_TTL_HOURS, _safe(ticker)
+                "memory.load: expired (%.1fh > %.0fh) for %s",
+                age,
+                MEMORY_TTL_HOURS,
+                _safe(ticker),
             )
             return {}
 

@@ -698,10 +698,7 @@ except Exception as exc:
 # Summary
 # --------------------------------------------------------------------------- #
 if os.path.exists(_TMP_DB):
-    try:
-        os.remove(_TMP_DB)
-    except OSError:
-        pass
+    os.remove(_TMP_DB)  # existence already checked above; race window negligible in tests
 
 print("\n" + ("=" * 50))
 if failures:

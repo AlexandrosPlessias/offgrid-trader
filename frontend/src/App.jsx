@@ -85,15 +85,21 @@ function useAnalyzeStream() {
           ))
         } else if (evt.type === 'result') {
           setResult(evt)
-          // Backfill the detect step with scored opportunities so the stepper
-          // can show them inline — no extra SSE event needed.
-          if (evt.opportunities?.length) {
-            setSteps(prev => prev && prev.map(s =>
-              s.id === 'detect'
-                ? { ...s, opportunities: evt.opportunities, actionable: evt.actionable ?? [] }
-                : s
-            ))
-          }
+          // Backfill the detect step with scored opportunities and the analyze step
+          // with the model that actually ran — no extra SSE event needed.
+          setSteps(prev => prev && prev.map(s => {
+            if (s.id === 'detect' && evt.opportunities?.length) {
+              return { ...s, opportunities: evt.opportunities, actionable: evt.actionable ?? [] }
+            }
+            if (s.id === 'analyze' && evt.analysis) {
+              return {
+                ...s,
+                llm_model:    evt.analysis.llm_model    ?? null,
+                llm_provider: evt.analysis.llm_provider ?? null,
+              }
+            }
+            return s
+          }))
         }
       }
     } catch (e) {
@@ -204,6 +210,14 @@ function AnalysisStepper({ steps }) {
               <div className="step-header-row">
                 <span className="step-icon-lg">{meta.icon}</span>
                 <span className="step-label">{meta.label}</span>
+                {step.id === 'analyze' && step.status === 'done' && step.llm_model && (
+                  <span
+                    className="model-chip step-model-chip"
+                    title={step.llm_provider ? `${step.llm_provider} · ${step.llm_model}` : step.llm_model}
+                  >
+                    {step.llm_provider ? `${step.llm_provider} · ` : ''}{step.llm_model}
+                  </span>
+                )}
                 {step.elapsed != null && (
                   <span className={`step-elapsed${step.status === 'running' ? ' step-elapsed-live' : ''}`}>
                     {step.elapsed}s{step.status === 'running' ? '…' : ''}
@@ -222,10 +236,7 @@ function AnalysisStepper({ steps }) {
               <ul className={`step-subs${step.status === 'pending' ? ' step-subs-pending' : ''}`}>
                 {meta.subs.map(s => <li key={s}>{s}</li>)}
               </ul>
-              {/* Scored opportunities — shown inline when detect step finishes */}
-              {step.id === 'detect' && step.status === 'done' && step.opportunities === null && (
-                <div className="step-opp-none">opportunity scores not stored — re-run to see</div>
-              )}
+              {/* Scored opportunities — summary pills; full breakdown in Score Computation section */}
               {step.id === 'detect' && step.status === 'done' && step.opportunities !== null && step.opportunities?.length > 0 && (
                 <div className="step-opp-pills">
                   {[...step.opportunities]
@@ -572,9 +583,28 @@ function IndicatorTable({ marketData }) {
 
 // ─── Header ───────────────────────────────────────────────────────────────────
 
-function Header({ health, activeView, onViewChange }) {
+function fmtTokens(n) {
+  if (n == null || n === 0) return '0'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
+function Header({ health, usage, activeView, onViewChange }) {
   const ok   = health?.status === 'ok'
   const open = health?.scheduler?.market_open
+
+  // Model label — provider + model from /health
+  const provider  = health?.llm_provider ?? null
+  const modelName = health?.llm_model    ?? health?.ollama_model ?? null
+  const modelLabel = provider && provider !== 'ollama'
+    ? `${provider} · ${modelName ?? '—'}`
+    : (modelName ?? null)
+
+  // Token label — today's total from /usage (by_day[0] if date matches today)
+  const today = new Date().toISOString().slice(0, 10)
+  const todayEntry = usage?.by_day?.find(d => d.date === today)
+  const todayTokens = todayEntry?.total_tokens ?? null
 
   return (
     <header className="header">
@@ -600,21 +630,44 @@ function Header({ health, activeView, onViewChange }) {
             Learn
           </button>
         </nav>
+
+        {/* Live status chips — API · Market · Model · Tokens */}
+        <div className="header-live-chips">
+          {!health && (
+            <span className="live-chip live-chip-connecting">connecting…</span>
+          )}
+          {health && (
+            <span
+              className={`live-chip live-chip-api ${ok ? 'live-chip-api-ok' : 'live-chip-api-err'}`}
+              title={ok ? 'Backend API is healthy' : 'Backend API error'}
+            >
+              {ok ? '✅ API' : '⚠️ API Error'}
+            </span>
+          )}
+          {health && (
+            <span
+              className={`live-chip ${open ? 'live-chip-market-open' : 'live-chip-market-closed'}`}
+              title={open ? 'US equity market is currently open' : 'US equity market is currently closed'}
+            >
+              {open ? '🟢 Market Open' : '🔴 Market Closed'}
+            </span>
+          )}
+          {health && modelLabel && (
+            <span className="live-chip live-chip-model" title={`Active LLM: ${modelLabel}`}>
+              🧠 {modelLabel}
+            </span>
+          )}
+          {health && todayTokens != null && (
+            <span
+              className="live-chip live-chip-tokens"
+              title={`Tokens used today: ${todayTokens.toLocaleString()}\n(${fmtTokens(usage?.total_prompt_tokens ?? 0)} prompt + ${fmtTokens(usage?.total_completion_tokens ?? 0)} completion — last ${usage?.period_days ?? 30}d)`}
+            >
+              ⚡ {fmtTokens(todayTokens)} tok today
+            </span>
+          )}
+        </div>
       </div>
       <div className="header-right">
-        {health ? (
-          <div className="header-status">
-            <span className={`api-pill ${ok ? 'ok' : 'err'}`}>
-              <span className="api-dot" />
-              {ok ? 'API' : 'Error'}
-            </span>
-            <span className={`market-badge ${open ? 'open' : 'closed'}`}>
-              {open ? 'Market Open' : 'Market Closed'}
-            </span>
-          </div>
-        ) : (
-          <span className="connecting">connecting…</span>
-        )}
         <div className="header-tools">
           <a href="http://localhost:18889" target="_blank" rel="noreferrer" className="tool-btn" title="Aspire — traces & logs">Logs</a>
           <a href="http://localhost:9000"  target="_blank" rel="noreferrer" className="tool-btn" title="Portainer — container management">Portainer</a>
@@ -1012,6 +1065,7 @@ const SOURCE_LABEL = {
 function SignalCard({ r, expanded, onToggle, onDelete }) {
   const isLong = r.type === 'long'
   const conf   = r.confidence ?? 0
+  const modelTag = r.llm_model || null
 
   return (
     <div className={`signal-card ${r.type ?? 'unknown'}`}>
@@ -1056,6 +1110,7 @@ function SignalCard({ r, expanded, onToggle, onDelete }) {
             <span className="signal-level-value">{fmtN(val)}</span>
           </div>
         ))}
+
       </div>
 
       {/* source chips */}
@@ -1073,6 +1128,10 @@ function SignalCard({ r, expanded, onToggle, onDelete }) {
           <div className="signal-reasoning-label">AI Reasoning</div>
           <div className="signal-reasoning-body">{r.llm_analysis}</div>
         </div>
+      )}
+
+      {modelTag && (
+        <span className="signal-model-bubble" title={`Model: ${modelTag}`}>{modelTag}</span>
       )}
     </div>
   )
@@ -1286,7 +1345,11 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
           {steps
             ? <AnalysisStepper steps={steps} />
             : result && (
-              <AnalysisStepper steps={INIT_STEPS.map(s => ({ ...s, status: 'done' }))} />
+              <AnalysisStepper steps={INIT_STEPS.map(s =>
+                s.id === 'analyze'
+                  ? { ...s, status: 'done', llm_model: analysis?.llm_model ?? null, llm_provider: analysis?.llm_provider ?? null }
+                  : { ...s, status: 'done' }
+              )} />
             )
           }
         </div>
@@ -1555,26 +1618,302 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
       )}
 
       {/* Section 5 — AI reasoning */}
-      {analysis && !analysis.error && (
-        <div className="explorer-section">
-          <div className="section-header">
-            <span className="section-badge">5</span>
-            <span className="section-label">AI reasoning {modelName && <span className="text-dim">({modelName})</span>}</span>
+      {analysis && !analysis.error && (() => {
+        // Prefer per-analysis model info (recorded at run time) over the
+        // global default model from /health — shows what actually ran.
+        const perAnalysisModel    = analysis.llm_model    || null
+        const perAnalysisProvider = analysis.llm_provider || null
+        const displayModel        = perAnalysisModel    || modelName
+        const displayProvider     = perAnalysisProvider || null
+        return (
+          <div className="explorer-section">
+            <div className="section-header">
+              <span className="section-badge">5</span>
+              <span className="section-label">
+                AI reasoning
+                {displayModel && (
+                  <span
+                    className="model-chip"
+                    title={
+                      displayProvider
+                        ? `Analyzed with ${displayProvider} · ${displayModel}`
+                        : `Model: ${displayModel}`
+                    }
+                  >
+                    {displayProvider ? `${displayProvider} · ` : ''}{displayModel}
+                  </span>
+                )}
+              </span>
+            </div>
+            <p className="section-desc">
+              The AI model receives all indicator data as a structured prompt and
+              returns a JSON analysis: trend direction, momentum, key price levels, supporting
+              signals and risk factors.{' '}
+              {(!perAnalysisProvider || perAnalysisProvider === 'ollama')
+                ? 'Runs entirely on your machine — no cloud API calls.'
+                : `Running via ${perAnalysisProvider} cloud inference.`
+              }
+            </p>
+            <LLMReasoning analysis={analysis} defaultOpen={true} />
           </div>
-          <p className="section-desc">
-            The local Ollama model receives all indicator data as a structured prompt and
-            returns a JSON analysis: trend direction, momentum, key price levels, supporting
-            signals and risk factors. Runs entirely on your machine — no cloud API calls.
-          </p>
-          <LLMReasoning analysis={analysis} defaultOpen={true} />
-        </div>
-      )}
+        )
+      })()}
 
-      {/* Section 6 — Detected opportunities */}
+      {/* Section 6 — Opportunity score computation (always visible) */}
       {result && (
         <div className="explorer-section">
           <div className="section-header">
             <span className="section-badge">6</span>
+            <span className="section-label">Opportunity score computation</span>
+          </div>
+          <p className="section-desc">
+            Each score is built step by step: individual rule confidences are merged
+            (max source + 5 pt corroboration bonus per additional agreeing source), then
+            adjusted ±pts by the macro regime filter (yield curve, Shiller CAPE, CPI).
+          </p>
+          {opps.length === 0 && (
+            <div className="score-comp-empty">
+              <p className="score-comp-empty-title">No rule checks fired this scan</p>
+              <p className="score-comp-empty-sub">All 5 rules ran and found no signal for this ticker — thresholds not met.</p>
+              <div className="rule-checks" style={{marginTop:'10px'}}>
+                {[
+                  { label: 'AI model',        note: 'type: none or confidence below floor' },
+                  { label: 'RSI extreme',     note: 'no timeframe below 30 or above 70' },
+                  { label: 'volume spike',    note: 'ratio <2× or price move <2%' },
+                  { label: 'MACD crossover',  note: '1D and 4H histograms disagree or flat' },
+                  { label: 'valuation P/E',   note: 'P/E in normal range (8–60×)' },
+                ].map(r => (
+                  <div key={r.label} className="rule-check miss">
+                    <span className="rule-check-icon">✗</span>
+                    <span className="rule-check-name">{r.label}</span>
+                    <span className="rule-check-val" style={{opacity:0.45}}>—</span>
+                    <span className="rule-check-rule">{r.note}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="score-comp-list">
+            {[...opps]
+              .sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))
+              .map((opp, i) => {
+                const isActionable = actionable.some(
+                  a => a.type === opp.type && Math.abs((a.confidence ?? 0) - (opp.confidence ?? 0)) < 0.5
+                )
+                const bd = opp.score_breakdown
+                const hasBonus = bd && (bd.bonus ?? 0) > 0
+                const hasMacro = bd && (bd.macro_delta ?? 0) !== 0
+                return (
+                  <div key={i} className={`score-comp-card ${isActionable ? 'score-comp-ok' : 'score-comp-sub'}`}>
+                    <div className="score-comp-header">
+                      <span className={`badge ${opp.type}`}>{opp.type?.toUpperCase() ?? '—'}</span>
+                      <span className="score-comp-final">{(opp.confidence ?? 0).toFixed(0)}%</span>
+                      <span className="score-comp-src">{opp.source ?? (opp.sources ?? []).join('+') ?? ''}</span>
+                      {isActionable
+                        ? <span className="score-comp-status ok">✓ actionable</span>
+                        : <span className="score-comp-status sub">↓ below floor</span>
+                      }
+                    </div>
+                    {bd && (
+                      <div className="score-comp-body">
+                        <div className="score-comp-row">
+                          <span className="score-comp-label">Sources</span>
+                          <div>
+                            <div className="score-comp-sources">
+                              {(bd.sources_detail ?? []).map(s => (
+                                <span key={s.source} className="opp-bd-src-item">
+                                  <span className="opp-bd-src-name">{s.source.replace(/_/g, ' ')}</span>
+                                  <span className="opp-bd-src-conf">{(s.confidence ?? 0).toFixed(0)}</span>
+                                </span>
+                              ))}
+                            </div>
+                            {(bd.sources_detail ?? []).length === 1 && (
+                              <div className="score-comp-hint">
+                                1 of 5 rules fired — direction <strong>{opp.type?.toUpperCase()}</strong> set by this rule alone. Other 4 rules found no signal (conditions not met).
+                              </div>
+                            )}
+                            {(bd.sources_detail ?? []).length > 1 && (
+                              <div className="score-comp-hint">
+                                {(bd.sources_detail ?? []).length} of 5 rules fired, all agree on{' '}
+                                <strong>{opp.type?.toUpperCase()}</strong> direction → corroboration bonus applied.
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="score-comp-row">
+                          <span className="score-comp-label">Formula</span>
+                          <div className="score-comp-formula">
+                            {/* Step 1: best single source */}
+                            <span className="score-comp-step">
+                              best source <strong>{(bd.base ?? 0).toFixed(0)}</strong>
+                            </span>
+                            {/* Step 2: corroboration bonus (only when > 1 source) */}
+                            {hasBonus ? (
+                              <>
+                                <span className="score-comp-op">+</span>
+                                <span className="score-comp-step bonus">
+                                  {(bd.bonus ?? 0).toFixed(0)} bonus
+                                  <span className="score-comp-note">({(bd.sources_detail ?? []).length - 1} extra × 5)</span>
+                                </span>
+                                <span className="score-comp-op">→</span>
+                                <span className="score-comp-step">{(bd.pre_macro ?? 0).toFixed(0)} pre-macro</span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="score-comp-op score-comp-op-dim">(no bonus — 1 rule)</span>
+                                <span className="score-comp-op">→</span>
+                                <span className="score-comp-step">{(bd.pre_macro ?? 0).toFixed(0)} pre-macro</span>
+                              </>
+                            )}
+                            {/* Step 3: macro regime adjustment */}
+                            {hasMacro ? (
+                              <>
+                                <span className={`score-comp-step macro ${(bd.macro_delta ?? 0) < 0 ? 'neg' : 'pos'}`}>
+                                  {(bd.macro_delta ?? 0) > 0 ? '+' : ''}{(bd.macro_delta ?? 0).toFixed(0)} macro
+                                </span>
+                                <span className="score-comp-op">→</span>
+                              </>
+                            ) : (
+                              <span className="score-comp-op score-comp-op-dim">(no macro adj)</span>
+                            )}
+                            {/* Step 4: final */}
+                            <span className="score-comp-step final">
+                              <strong>{(bd.final ?? opp.confidence ?? 0).toFixed(0)}</strong> final
+                            </span>
+                          </div>
+                        </div>
+                        {/* All-rules diagnostic — shows actual values even for rules that didn't fire */}
+                        {bd.rules_checked && (() => {
+                          const rc = bd.rules_checked
+                          const RULES = [
+                            {
+                              key: 'ai',
+                              label: 'AI model',
+                              fired: rc.ai?.fired,
+                              value: rc.ai?.type == null
+                                ? '—'
+                                : `type: ${rc.ai.type} | conf: ${rc.ai.confidence ?? '?'}`,
+                              rule: rc.ai?.type == null
+                                ? 'no analysis run'
+                                : rc.ai?.type === 'none'
+                                  ? 'AI found no clear setup'
+                                  : rc.ai?.fired
+                                    ? 'above confidence floor → fired'
+                                    : 'below confidence floor → not fired',
+                            },
+                            {
+                              key: 'rsi',
+                              label: 'RSI extreme',
+                              fired: rc.rsi_extreme?.fired,
+                              value: (() => {
+                                const vals = rc.rsi_extreme?.values ?? {}
+                                return Object.entries(vals)
+                                  .filter(([, v]) => v != null)
+                                  .map(([tf, v]) => `${tf}: ${v}`)
+                                  .join(' | ') || '—'
+                              })(),
+                              rule: (() => {
+                                const lo = rc.rsi_extreme?.threshold_low ?? 30
+                                const hi = rc.rsi_extreme?.threshold_high ?? 70
+                                if (rc.rsi_extreme?.fired) return `<${lo} or >${hi} on 2+ TFs → fired`
+                                const os = rc.rsi_extreme?.oversold ?? []
+                                const ob = rc.rsi_extreme?.overbought ?? []
+                                const n = os.length + ob.length
+                                return `need <${lo} (oversold) or >${hi} (overbought) on 2+ TFs${n === 1 ? ` — only ${[...os, ...ob][0]} triggered` : ''}`
+                              })(),
+                            },
+                            {
+                              key: 'vol',
+                              label: 'volume spike',
+                              fired: rc.volume_spike?.fired,
+                              value: (() => {
+                                const r = rc.volume_spike?.ratio
+                                const c = rc.volume_spike?.change_pct
+                                if (r == null) return 'no data'
+                                return `ratio ${r.toFixed(1)}× | move ${c != null ? (c > 0 ? '+' : '') + c.toFixed(1) : '?'}%`
+                              })(),
+                              rule: (() => {
+                                const tr = rc.volume_spike?.threshold_ratio ?? 2
+                                const tm = rc.volume_spike?.threshold_move ?? 2
+                                if (rc.volume_spike?.fired) return `ratio ≥${tr}× AND move ≥${tm}% → fired`
+                                return `need ratio ≥${tr}× AND price move ≥${tm}%`
+                              })(),
+                            },
+                            {
+                              key: 'macd',
+                              label: 'MACD crossover',
+                              fired: rc.macd_crossover?.fired,
+                              value: (() => {
+                                const h1 = rc.macd_crossover?.hist_1d
+                                const h4 = rc.macd_crossover?.hist_4h
+                                if (h1 == null || h4 == null) return 'no data'
+                                return `hist 1D: ${h1 > 0 ? '+' : ''}${h1.toFixed(3)} | 4H: ${h4 > 0 ? '+' : ''}${h4.toFixed(3)}`
+                              })(),
+                              rule: rc.macd_crossover?.fired
+                                ? 'both TFs same-sign histogram → fired'
+                                : 'need both TFs same-sign (both + or both −)',
+                            },
+                            {
+                              key: 'val',
+                              label: 'valuation P/E',
+                              fired: rc.valuation?.fired,
+                              value: (() => {
+                                const pe = rc.valuation?.pe
+                                return pe == null ? 'P/E n/a' : `P/E ${pe}×`
+                              })(),
+                              rule: (() => {
+                                const lo = rc.valuation?.threshold_low ?? 8
+                                const hi = rc.valuation?.threshold_high ?? 60
+                                if (rc.valuation?.fired) return `<${lo} (cheap) or >${hi} (expensive) → fired`
+                                return `extreme: <${lo} undervalued or >${hi} overvalued`
+                              })(),
+                            },
+                          ]
+                          return (
+                            <div className="score-comp-row">
+                              <span className="score-comp-label">All rules</span>
+                              <div className="rule-checks">
+                                {RULES.map(rule => (
+                                  <div key={rule.key} className={`rule-check ${rule.fired ? 'fired' : 'miss'}`}>
+                                    <span className="rule-check-icon">{rule.fired ? '✓' : '✗'}</span>
+                                    <span className="rule-check-name">{rule.label}</span>
+                                    <span className="rule-check-val">{rule.value}</span>
+                                    <span className="rule-check-rule">{rule.rule}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )
+                        })()}
+
+                        {opp.reasons && opp.reasons.length > 0 && (
+                          <div className="score-comp-row">
+                            <span className="score-comp-label">Evidence</span>
+                            <div>
+                              <div className="score-comp-hint" style={{marginBottom:'6px'}}>
+                                Raw indicator values and pass/fail thresholds are shown in All Rules above.
+                              </div>
+                              <ul className="score-comp-reasons">
+                                {opp.reasons.map((r, j) => <li key={j}>{r}</li>)}
+                              </ul>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )
+              })
+            }
+          </div>
+        </div>
+      )}
+
+      {/* Section 7 — Detected opportunities */}
+      {result && (
+        <div className="explorer-section">
+          <div className="section-header">
+            <span className="section-badge">7</span>
             <span className="section-label">Signals detected</span>
           </div>
           <p className="section-desc">
@@ -1686,7 +2025,7 @@ function GlossarySection() {
     : GLOSSARY_TERMS
 
   return (
-    <EduSection id="edu-glossary" title="Trading glossary" badge="Glossary">
+        <EduSection id="edu-glossary" title="Trading glossary" badge="Glossary">
       <div className="gls-search-wrap">
         <input
           className="gls-search"
@@ -1736,6 +2075,7 @@ const EDU_SECTIONS = [
   { id: 'edu-indicators',    label: 'Indicators' },
   { id: 'edu-fundamentals',  label: 'Fundamentals' },
   { id: 'edu-rules',         label: 'Rules' },
+  { id: 'edu-signals',       label: 'How scores work' },
   { id: 'edu-glossary',      label: 'Glossary' },
   { id: 'edu-further',       label: 'Further reading' },
 ]
@@ -2168,10 +2508,90 @@ function EducationPage() {
         </p>
       </EduSection>
 
-      {/* Section 6 — Glossary with live search */}
+      {/* Section 6 — How confidence scores are built */}
+      <EduSection id="edu-signals" title="How confidence scores are built" badge="Scores">
+        <p className="section-desc">
+          Every opportunity goes through a transparent, auditable scoring pipeline.
+          The final confidence is built in four steps:
+        </p>
+
+        <div className="edu-score-steps">
+          <div className="edu-score-step">
+            <span className="edu-score-num">1</span>
+            <div>
+              <strong>Individual rule checks</strong> — each fires independently with its own raw confidence:
+              <ul className="edu-ind-levels" style={{ marginTop: 8 }}>
+                <li><strong>AI model</strong> — self-assessed 0–100; must beat the floor.</li>
+                <li><strong>RSI extreme</strong> — 55 + 10 × count (2+ timeframes oversold/overbought). Max 85.</li>
+                <li><strong>Volume spike</strong> — 55 + min(ratio, 5) × 3. Max 80.</li>
+                <li><strong>MACD crossover</strong> — fixed 62 (both 1D and 4H must agree).</li>
+                <li><strong>Valuation extreme</strong> — 40–42 (intentionally low; reinforces, never drives).</li>
+              </ul>
+            </div>
+          </div>
+
+          <div className="edu-score-step">
+            <span className="edu-score-num">2</span>
+            <div>
+              <strong>Merge & corroboration bonus</strong> — same-direction candidates are merged:
+              <div className="edu-formula">
+                confidence = max(individual scores) + 5 × (number of sources − 1)
+              </div>
+              <em>Example — AAPL long with AI 72 · RSI 75 · MACD 62:</em><br/>
+              base = <strong>75</strong>, bonus = +10 (3 sources × 5), pre-macro = <strong>85</strong>
+            </div>
+          </div>
+
+          <div className="edu-score-step">
+            <span className="edu-score-num">3</span>
+            <div>
+              <strong>Macro regime filter</strong> — adjusted ±pts based on economic conditions:
+              <table className="edu-macro-table">
+                <thead><tr><th>Condition</th><th>Long</th><th>Short</th></tr></thead>
+                <tbody>
+                  <tr><td>Yield curve inverted</td><td className="macro-neg">−8</td><td className="macro-pos">+3</td></tr>
+                  <tr><td>Shiller CAPE &gt; 35</td><td className="macro-neg">−5</td><td className="macro-pos">+3</td></tr>
+                  <tr><td>Shiller CAPE &lt; 15</td><td className="macro-pos">+5</td><td className="macro-neg">−3</td></tr>
+                  <tr><td>CPI YoY &gt; 5%</td><td className="macro-neg">−5</td><td>no change</td></tr>
+                </tbody>
+              </table>
+              Continuing the AAPL example: CAPE 37 → −5. Final = <strong>80</strong>
+            </div>
+          </div>
+
+          <div className="edu-score-step">
+            <span className="edu-score-num">4</span>
+            <div>
+              <strong>Confidence floor filter</strong> — any signal below the floor (default: 65) is
+              discarded and never stored or alerted. This is why the valuation rule (40–42) cannot
+              fire alone — it must stack with 2+ other sources to clear the floor.
+            </div>
+          </div>
+        </div>
+
+        <div className="edu-callout">
+          <strong>See it live:</strong> open any analysis in the <em>Analysis Explorer</em> and
+          scroll to <em>Opportunity score computation</em> — every rule contribution, corroboration
+          bonus, and macro adjustment is shown per signal.
+        </div>
+
+        <h4 className="edu-h4">Confidence range reference</h4>
+        <table className="edu-table">
+          <thead><tr><th>Score</th><th>Interpretation</th></tr></thead>
+          <tbody>
+            <tr><td style={{color:'var(--red)'}}>{'< 65'}</td><td>Below floor — never stored or alerted</td></tr>
+            <tr><td>65–74</td><td>Weak — one rule, mild corroboration</td></tr>
+            <tr><td>75–84</td><td>Moderate — multiple agreeing sources or strong single rule</td></tr>
+            <tr><td style={{color:'var(--green)'}}>85–94</td><td>Strong — AI + 2+ rules + favourable macro</td></tr>
+            <tr><td style={{color:'var(--green)'}}>95–100</td><td>Very strong — near-perfect alignment; rare</td></tr>
+          </tbody>
+        </table>
+      </EduSection>
+
+      {/* Section 7 — Glossary with live search */}
       <GlossarySection />
 
-      {/* Section 7 — Disclaimer + further reading */}
+      {/* Section 8 — Disclaimer + further reading */}
       <EduSection id="edu-further" title="Disclaimer & further reading" badge="⚠️">
         <div className="edu-disclaimer">
           <strong>⚠ Not financial advice.</strong> This system is for educational and research
@@ -2388,11 +2808,219 @@ function AnalysisHistoryPanel({ onOpenInExplorer }) {
   )
 }
 
+// ─── Token Usage section ──────────────────────────────────────────────────────
+
+function UsageSection({ usage, onRefresh }) {
+  const [quota,      setQuota]      = useState(null)
+  const [quotaLoading, setQuotaLoading] = useState(false)
+  const [quotaErr,   setQuotaErr]   = useState(null)
+
+  const checkQuota = async () => {
+    setQuotaLoading(true); setQuotaErr(null); setQuota(null)
+    try {
+      const res = await fetch(`${API}/provider/quota`)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail ?? `HTTP ${res.status}`)
+      setQuota(data)
+    } catch (e) {
+      setQuotaErr(e.message)
+    } finally {
+      setQuotaLoading(false)
+    }
+  }
+
+  if (!usage) return (
+    <p className="text-dim" style={{ fontSize: 13 }}>Loading usage data…</p>
+  )
+
+  const { period_days, total_rows, total_prompt_tokens, total_completion_tokens,
+          total_tokens, by_provider, by_day } = usage
+
+  const recent7 = (by_day ?? []).slice(0, 7)
+
+  return (
+    <div>
+      {/* ── Summary row ───────────────────────────────────────────────── */}
+      <div className="usage-summary-row">
+        <div className="usage-stat-card">
+          <span className="usage-stat-label">Total tokens</span>
+          <span className="usage-stat-value">{(total_tokens ?? 0).toLocaleString()}</span>
+          <span className="usage-stat-sub">last {period_days}d</span>
+        </div>
+        <div className="usage-stat-card">
+          <span className="usage-stat-label">Prompt</span>
+          <span className="usage-stat-value">{(total_prompt_tokens ?? 0).toLocaleString()}</span>
+          <span className="usage-stat-sub">input tokens</span>
+        </div>
+        <div className="usage-stat-card">
+          <span className="usage-stat-label">Completion</span>
+          <span className="usage-stat-value">{(total_completion_tokens ?? 0).toLocaleString()}</span>
+          <span className="usage-stat-sub">output tokens</span>
+        </div>
+        <div className="usage-stat-card">
+          <span className="usage-stat-label">Analyses run</span>
+          <span className="usage-stat-value">{total_rows ?? 0}</span>
+          <span className="usage-stat-sub">last {period_days}d</span>
+        </div>
+        <button className="btn-ghost btn-sm" style={{ alignSelf: 'center' }} onClick={onRefresh}>
+          ↺ Refresh
+        </button>
+      </div>
+
+      {/* ── By provider ───────────────────────────────────────────────── */}
+      {by_provider?.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <div className="settings-label" style={{ marginBottom: 8 }}>By provider / model</div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Provider</th>
+                  <th>Model</th>
+                  <th style={{ textAlign: 'right' }}>Runs</th>
+                  <th style={{ textAlign: 'right' }}>Prompt tok</th>
+                  <th style={{ textAlign: 'right' }}>Completion tok</th>
+                  <th style={{ textAlign: 'right' }}>Total tok</th>
+                </tr>
+              </thead>
+              <tbody>
+                {by_provider.map((p, i) => (
+                  <tr key={i}>
+                    <td><span className="live-chip live-chip-model" style={{ fontSize: 11 }}>{p.provider}</span></td>
+                    <td className="text-dim" style={{ fontSize: 12 }}>{p.model}</td>
+                    <td style={{ textAlign: 'right' }}>{p.rows}</td>
+                    <td style={{ textAlign: 'right' }}>{p.prompt_tokens.toLocaleString()}</td>
+                    <td style={{ textAlign: 'right' }}>{p.completion_tokens.toLocaleString()}</td>
+                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{p.total_tokens.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── Last 7 days ───────────────────────────────────────────────── */}
+      {recent7.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <div className="settings-label" style={{ marginBottom: 8 }}>Last 7 days</div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th style={{ textAlign: 'right' }}>Prompt tok</th>
+                  <th style={{ textAlign: 'right' }}>Completion tok</th>
+                  <th style={{ textAlign: 'right' }}>Total tok</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recent7.map((d, i) => (
+                  <tr key={i}>
+                    <td className="text-dim" style={{ fontSize: 12 }}>{d.date}</td>
+                    <td style={{ textAlign: 'right' }}>{d.prompt_tokens.toLocaleString()}</td>
+                    <td style={{ textAlign: 'right' }}>{d.completion_tokens.toLocaleString()}</td>
+                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{d.total_tokens.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── Live quota check ──────────────────────────────────────────── */}
+      <div style={{ marginTop: 20, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <button
+          className="btn-primary btn-sm"
+          onClick={checkQuota}
+          disabled={quotaLoading}
+        >
+          {quotaLoading ? 'Checking…' : '⚡ Check live quota'}
+        </button>
+        {quotaErr && <span className="settings-err">✗ {quotaErr}</span>}
+      </div>
+
+      {quota && (
+        <div className="usage-quota-box">
+          <div className="usage-quota-provider">
+            <span className="live-chip live-chip-model">{quota.provider}</span>
+            {quota.note && <span className="text-dim" style={{ fontSize: 12, marginLeft: 8 }}>{quota.note}</span>}
+          </div>
+
+          {/* Groq rate-limit headers */}
+          {quota.rate_limits && (
+            <div className="table-wrap" style={{ marginTop: 10 }}>
+              <table>
+                <thead><tr><th>Metric</th><th style={{ textAlign: 'right' }}>Value</th></tr></thead>
+                <tbody>
+                  {[
+                    ['Tokens limit',      quota.rate_limits.tokens_limit],
+                    ['Tokens remaining',  quota.rate_limits.tokens_remaining],
+                    ['Tokens reset',      quota.rate_limits.tokens_reset],
+                    ['Requests limit',    quota.rate_limits.requests_limit],
+                    ['Requests remaining',quota.rate_limits.requests_remaining],
+                    ['Requests reset',    quota.rate_limits.requests_reset],
+                  ].filter(([, v]) => v != null).map(([label, val], i) => (
+                    <tr key={i}>
+                      <td className="text-dim" style={{ fontSize: 12 }}>{label}</td>
+                      <td style={{ textAlign: 'right', fontWeight: 600 }}>{val}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Mistral usage */}
+          {quota.provider === 'mistral' && !quota.rate_limits && (
+            <pre className="usage-quota-json">{JSON.stringify(quota, null, 2)}</pre>
+          )}
+
+          {/* Gemini static limits */}
+          {quota.free_tier_limits && (
+            <div className="table-wrap" style={{ marginTop: 10 }}>
+              <table>
+                <thead><tr><th>Model</th><th style={{ textAlign: 'right' }}>RPM</th><th style={{ textAlign: 'right' }}>TPM</th><th style={{ textAlign: 'right' }}>RPD</th></tr></thead>
+                <tbody>
+                  {Object.entries(quota.free_tier_limits).map(([model, limits], i) => (
+                    <tr key={i}>
+                      <td className="text-dim" style={{ fontSize: 12 }}>{model}</td>
+                      <td style={{ textAlign: 'right' }}>{limits.rpm?.toLocaleString()}</td>
+                      <td style={{ textAlign: 'right' }}>{limits.tpm?.toLocaleString()}</td>
+                      <td style={{ textAlign: 'right' }}>{limits.rpd?.toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {quota.dashboard_url && (
+            <p style={{ marginTop: 8, fontSize: 12 }}>
+              <a href={quota.dashboard_url} target="_blank" rel="noreferrer" className="text-blue-link">
+                → Open Google AI Studio dashboard ↗
+              </a>
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Settings page ────────────────────────────────────────────────────────────
 
-function SettingSection({ title, icon, children }) {
+const SETTINGS_SECTIONS = [
+  { id: 'settings-scheduler',   icon: '🕐', label: 'Scheduler' },
+  { id: 'settings-alerts',      icon: '🔔', label: 'Alerts' },
+  { id: 'settings-ai-provider', icon: '🧠', label: 'AI Provider' },
+  { id: 'settings-usage',       icon: '⚡', label: 'Token Usage' },
+  { id: 'settings-data',        icon: '🗑️', label: 'Data' },
+]
+
+function SettingSection({ id, title, icon, children }) {
   return (
-    <div className="settings-section">
+    <div id={id} className="settings-section">
       <div className="settings-section-title">{icon} {title}</div>
       {children}
     </div>
@@ -2411,13 +3039,54 @@ function SaveRow({ status, errMsg, onSave, label = 'Save' }) {
   )
 }
 
-function SettingsPage() {
+function SettingsPage({ usage, onUsageRefresh }) {
+  // ── LLM Provider ────────────────────────────────────────────────────────────
+  const [llmProvider,  setLlmProvider]  = useState('ollama')
+  const [llmApiKey,    setLlmApiKey]    = useState('')
+  const [llmModel,     setLlmModel]     = useState('')
+  const [llmBaseUrl,   setLlmBaseUrl]   = useState('')
+  const [llmApiKeySet, setLlmApiKeySet] = useState(false)
+  const [showLlmApiKey, setShowLlmApiKey] = useState(false)
+  // Admin token — loaded from GET /settings; sent as X-Admin-Token header
+  // when the user clicks "Show" to reveal their LLM API key.
+  const [adminToken, setAdminToken] = useState('')
+  const [llmStatus,    setLlmStatus]    = useState(null)
+  const [llmErr,       setLlmErr]       = useState('')
+  const [useEnvDefaults, setUseEnvDefaults] = useState(false)
+  const [llmModelEnvDefault,   setLlmModelEnvDefault]   = useState('')
+  const [llmBaseUrlEnvDefault, setLlmBaseUrlEnvDefault] = useState('')
+  const [llmApiKeyEnvSet,      setLlmApiKeyEnvSet]      = useState(false)
+  const [llmReasoningEffort,   setLlmReasoningEffort]   = useState('none')
+  const [providerModels,       setProviderModels]       = useState([])
+  const [modelChoice,          setModelChoice]          = useState('')
+
+  const cloudModelSuggestions = {
+    groq: ['qwen/qwen3.6-27b'],
+    gemini: ['gemini-3.5-flash-lite', 'gemini-3.5-flash'],
+    mistral: ['mistral-small-latest', 'mistral-large-latest'],
+  }
+  const REASONING_OPTIONS = ['none', 'low', 'medium', 'high']
+  const supportsReasoning = ['groq', 'gemini', 'mistral'].includes(llmProvider)
+  const ollamaModelSuggestions = ['qwen2.5:3b', 'qwen2.5:7b', 'qwen2.5:14b']
+  const envDefaultsActive = useEnvDefaults && llmProvider !== 'custom'
+
   // ── Ollama model + timeout ──────────────────────────────────────────────────
   const [models,  setModels]  = useState([])
   const [model,   setModel]   = useState('')
   const [timeout, setTimeout_] = useState('')
   const [ollamaStatus, setOllamaStatus] = useState(null)
   const [ollamaErr,    setOllamaErr]    = useState('')
+  const modelValue = envDefaultsActive ? llmModelEnvDefault : (llmProvider === 'ollama' ? model : llmModel)
+  const modelOptions = [...new Set(
+    llmProvider === 'ollama'
+      ? [...ollamaModelSuggestions, ...models]
+      : [...(providerModels.length ? providerModels : (cloudModelSuggestions[llmProvider] ?? []))]
+  )]
+  const modelSelectValue = modelChoice || (modelOptions.includes(modelValue) ? modelValue : '__custom__')
+  const customModelEntry = llmProvider === 'custom' || modelSelectValue === '__custom__'
+  // Show dots whenever a key is known — either saved in DB or present in .env,
+  // regardless of whether the "Use .env defaults" checkbox is ticked.
+  const savedApiKeyMask = (llmApiKeySet || llmApiKeyEnvSet) ? '••••••••••••' : ''
 
   // ── Scheduler + scan interval ───────────────────────────────────────────────
   const [schedulerRunning,  setSchedulerRunning]  = useState(true)
@@ -2438,20 +3107,76 @@ function SettingsPage() {
       fetch(`${API}/settings`).then(r => r.json()),
       fetch(`${API}/settings/models`).then(r => r.json()),
     ]).then(([cfg, m]) => {
+      // LLM provider
+      setLlmProvider(cfg.llm_provider ?? 'ollama')
+      setLlmApiKeySet(cfg.llm_api_key_set ?? false)
+      setLlmModel(cfg.llm_model ?? '')
+      setLlmBaseUrl(cfg.llm_base_url ?? '')
+      setAdminToken(cfg.admin_token ?? '')
+      setLlmModelEnvDefault(cfg.llm_model_env_default ?? '')
+      setLlmBaseUrlEnvDefault(cfg.llm_base_url_env_default ?? '')
+      setLlmApiKeyEnvSet(cfg.llm_api_key_env_set ?? false)
+      setLlmReasoningEffort(cfg.llm_reasoning_effort ?? 'none')
+      // Ollama
       setModel(cfg.ollama_model ?? '')
       setTimeout_(String(cfg.ollama_timeout ?? 120))
-      setModels(m.models ?? [])
+      setModels(m.provider === 'ollama' ? (m.models ?? []) : [])
+      setProviderModels(m.provider === 'ollama' ? [] : (m.models ?? []))
+      // Other
       setScanInterval(String(cfg.scan_interval_minutes ?? 15))
       setSchedulerRunning(cfg.scheduler_running ?? true)
       setAlertsOn(cfg.alerts_enabled ?? true)
     }).catch(() => {})
   }, [])
 
+  const loadProviderSettings = async (provider) => {
+    const query = `?provider=${encodeURIComponent(provider)}`
+    const [cfg, modelData] = await Promise.all([
+      fetch(`${API}/settings${query}`).then(r => r.json()),
+      fetch(`${API}/settings/models${query}`).then(r => r.json()),
+    ])
+    setLlmApiKeySet(cfg.llm_api_key_set ?? false)
+    setLlmModel(cfg.llm_model ?? '')
+    setLlmBaseUrl(cfg.llm_base_url ?? '')
+    setLlmModelEnvDefault(cfg.llm_model_env_default ?? '')
+    setLlmBaseUrlEnvDefault(cfg.llm_base_url_env_default ?? '')
+    setLlmApiKeyEnvSet(cfg.llm_api_key_env_set ?? false)
+    setLlmReasoningEffort(cfg.llm_reasoning_effort ?? 'none')
+    if (provider === 'ollama') setModels(modelData.models ?? [])
+    else setProviderModels(modelData.models ?? [])
+  }
+
+  const saveLlm = async () => {
+    setLlmStatus('saving'); setLlmErr('')
+    try {
+      const body = { provider: llmProvider }
+      if (envDefaultsActive) {
+        body.api_key = ''
+        body.model = ''
+        body.base_url = ''
+      } else {
+        if (llmApiKey)  body.api_key  = llmApiKey
+        if (llmModel)   body.model    = llmModel
+        if (llmBaseUrl) body.base_url = llmBaseUrl
+      }
+      if (supportsReasoning) body.reasoning_effort = llmReasoningEffort
+      const r = await fetch(`${API}/settings/llm`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      if (llmApiKey) { setLlmApiKey(''); setLlmApiKeySet(true) }
+      if (envDefaultsActive) { setLlmApiKeySet(false); setLlmModel(''); setLlmBaseUrl('') }
+      setLlmStatus('ok')
+      setTimeout(() => setLlmStatus(null), 3000)
+    } catch (e) { setLlmStatus('error'); setLlmErr(e.message) }
+  }
+
   const saveOllama = async () => {
     setOllamaStatus('saving'); setOllamaErr('')
     try {
       const body = {}
-      if (model)   body.model   = model
+      body.model = useEnvDefaults ? '' : model
       if (timeout) body.timeout = parseInt(timeout, 10)
       const r = await fetch(`${API}/settings/ollama`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2517,10 +3242,25 @@ function SettingsPage() {
   }
 
   return (
-    <div className="settings-page">
+    <div className="settings-layout">
+      {/* ── Sticky TOC sidebar ─────────────────────────────────────────────── */}
+      <nav className="settings-toc">
+        <div className="settings-toc-title">Settings</div>
+        {SETTINGS_SECTIONS.map(s => (
+          <button
+            key={s.id}
+            className="settings-toc-link"
+            onClick={() => document.getElementById(s.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+          >
+            {s.icon} {s.label}
+          </button>
+        ))}
+      </nav>
+
+      <div className="settings-page">
 
       {/* ── Scheduler ─────────────────────────────────────────────────────── */}
-      <SettingSection title="Scheduler" icon="🕐">
+      <SettingSection id="settings-scheduler" title="Scheduler" icon="🕐">
         <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
           The scheduler automatically scans every ticker in your watchlist while
           the US market is open. You can pause it without stopping the container.
@@ -2561,7 +3301,7 @@ function SettingsPage() {
       </SettingSection>
 
       {/* ── Alerts ────────────────────────────────────────────────────────── */}
-      <SettingSection title="Alerts" icon="🔔">
+      <SettingSection id="settings-alerts" title="Alerts" icon="🔔">
         <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
           Enable or disable outbound alert dispatch (email, Slack, Telegram).
           Toggling here is instant — no restart required.
@@ -2585,40 +3325,263 @@ function SettingsPage() {
         )}
       </SettingSection>
 
-      {/* ── Ollama ────────────────────────────────────────────────────────── */}
-      <SettingSection title="Ollama (Local LLM)" icon="🤖">
+      {/* ── AI Provider ───────────────────────────────────────────────────── */}
+      <SettingSection id="settings-ai-provider" title="AI Provider" icon="🧠">
         <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
-          Only models already pulled in Ollama are listed. Match model size to
-          GPU VRAM: 3b ≈ 3 GB · 7b ≈ 5 GB · 14b ≈ 10 GB.
-          To pull a new model: <code className="inline-code">docker exec ollama ollama pull &lt;model&gt;</code>
+          Choose where AI analysis runs. <strong>Ollama</strong> is local (no internet, needs GPU/RAM).
+          <strong> Groq</strong>, <strong>Gemini</strong>, and <strong>Mistral</strong> are cloud APIs.
+          Changes take effect immediately, no restart needed.
         </p>
 
         <div className="settings-field">
-          <label className="settings-label">Model</label>
-          {models.length > 0 ? (
-            <select value={model} onChange={e => setModel(e.target.value)} className="settings-select">
-              {models.map(m => <option key={m} value={m}>{m}</option>)}
-            </select>
-          ) : (
-            <input type="text" value={model} onChange={e => setModel(e.target.value)}
-              placeholder="e.g. qwen2.5:7b" className="settings-select" />
-          )}
+          <label className="settings-label">Provider</label>
+          <select
+            value={llmProvider}
+            onChange={e => {
+              // Reset per-provider fields so a model/key typed for one
+              // provider can never be silently saved against another.
+              const provider = e.target.value
+              setLlmProvider(provider)
+              setUseEnvDefaults(false)
+              setModelChoice('')
+              setLlmModel('')
+              setLlmApiKey('')
+              setLlmBaseUrl('')
+              setLlmApiKeySet(false)
+              setLlmReasoningEffort('none')
+              loadProviderSettings(provider).catch(() => {})
+            }}
+            className="settings-select"
+          >
+            <option value="ollama">🖥️ Ollama (local)</option>
+            <option value="groq">⚡ Groq Cloud — free · console.groq.com</option>
+            <option value="gemini">✨ Google Gemini — free · ai.google.dev</option>
+            <option value="mistral">🌬️ Mistral AI · console.mistral.ai</option>
+            <option value="custom">🔧 Custom OpenAI-compatible endpoint</option>
+          </select>
         </div>
 
-        <div className="settings-field">
-          <label className="settings-label">Request timeout</label>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <input type="number" min={10} max={3600} value={timeout}
-              onChange={e => setTimeout_(e.target.value)} className="settings-num-input" />
-            <span className="text-dim" style={{ fontSize: 13 }}>seconds</span>
-          </div>
-        </div>
+        {llmProvider !== 'custom' && (
+          <button
+            type="button"
+            className={`settings-env-btn${useEnvDefaults ? ' active' : ''}`}
+            onClick={() => {
+              setUseEnvDefaults(v => !v)
+              setLlmApiKey('')
+              setShowLlmApiKey(false)
+            }}
+          >
+            {useEnvDefaults ? '✓ Using environment defaults' : '↩ Load Environment Default Values'}
+            <span className="settings-env-btn-sub">
+              {useEnvDefaults ? '(click to clear and enter values manually)' : '(if set in .env — can be empty)'}
+            </span>
+          </button>
+        )}
 
-        <SaveRow status={ollamaStatus} errMsg={ollamaErr} onSave={saveOllama} label="Save model settings" />
+        {llmProvider !== 'ollama' && (
+          <>
+            <div className="settings-field">
+              <label className="settings-label">API Key</label>
+              <div className="settings-secret-field">
+                <input
+                  type={showLlmApiKey ? 'text' : 'password'}
+                  value={llmApiKey || savedApiKeyMask}
+                  onFocus={() => { if (!llmApiKey && savedApiKeyMask) setLlmApiKey('') }}
+                  onChange={e => setLlmApiKey(e.target.value)}
+                  disabled={envDefaultsActive}
+                  placeholder={
+                    envDefaultsActive
+                      ? (llmApiKeyEnvSet ? 'Using key from .env' : 'No key set in .env')
+                      : (llmApiKeySet ? 'Key saved — focus to replace it' : 'Paste your API key here')
+                  }
+                  className="settings-select"
+                  autoComplete="new-password"
+                />
+                <button
+                  type="button"
+                  className="settings-secret-toggle"
+                  onClick={async () => {
+                    if (showLlmApiKey) {
+                      // Hiding: clear the revealed value, go back to dots
+                      if (!llmApiKey.replace(/•/g, '')) setLlmApiKey('')
+                      setShowLlmApiKey(false)
+                    } else {
+                      // Showing: fetch the real key if we don't have it typed yet
+                      if (!llmApiKey && savedApiKeyMask) {
+                        try {
+                          const r = await fetch(`${API}/settings/llm/key`, {
+                            headers: adminToken ? { 'X-Admin-Token': adminToken } : {},
+                          })
+                          const { key } = await r.json()
+                          if (key) setLlmApiKey(key)
+                        } catch (_) { /* silently stay on dots */ }
+                      }
+                      setShowLlmApiKey(true)
+                    }
+                  }}
+                  title={showLlmApiKey ? 'Hide API key' : 'Show API key'}
+                  aria-label={showLlmApiKey ? 'Hide API key' : 'Show API key'}
+                >
+                  {showLlmApiKey ? 'Hide' : 'Show'}
+                </button>
+              </div>
+              {!envDefaultsActive && llmApiKeySet && !llmApiKey && (
+                <span className="text-dim" style={{ fontSize: 12, marginTop: 4, display: 'block' }}>
+                  ✓ API key is set
+                </span>
+              )}
+            </div>
+
+            <div className="settings-field">
+              <label className="settings-label">
+                Model
+                <span className="text-dim" style={{ fontSize: 12, marginLeft: 6 }}>(select or type a model ID)</span>
+              </label>
+              {llmProvider !== 'custom' && !customModelEntry && (
+                <select
+                  value={envDefaultsActive ? modelValue : modelSelectValue}
+                  onChange={e => {
+                    const value = e.target.value
+                    setModelChoice(value)
+                    if (value !== '__custom__') setLlmModel(value)
+                  }}
+                  disabled={envDefaultsActive}
+                  className="settings-select"
+                >
+                  {modelOptions.map(modelOption => <option key={modelOption} value={modelOption}>{modelOption}</option>)}
+                  <option value="__custom__">— type your own model —</option>
+                </select>
+              )}
+              {(llmProvider === 'custom' || customModelEntry) && (
+                <>
+                  {customModelEntry && llmProvider !== 'custom' && (
+                    <button
+                      type="button"
+                      className="settings-back-link"
+                      onClick={() => {
+                        const first = modelOptions[0] ?? ''
+                        setModelChoice(first)
+                        setLlmModel(first)
+                      }}
+                    >
+                      ← back to model list
+                    </button>
+                  )}
+                  <input
+                    type="text"
+                    value={envDefaultsActive ? modelValue : llmModel}
+                    onChange={e => setLlmModel(e.target.value)}
+                    disabled={envDefaultsActive}
+                    placeholder="Type a model ID"
+                    className="settings-select"
+                  />
+                </>
+              )}
+            </div>
+
+            {supportsReasoning && (
+              <div className="settings-field">
+                <label className="settings-label">
+                  Reasoning effort
+                  <span className="text-dim" style={{ fontSize: 12, marginLeft: 6 }}>(only used by models that support it)</span>
+                </label>
+                <select
+                  value={llmReasoningEffort}
+                  onChange={e => setLlmReasoningEffort(e.target.value)}
+                  className="settings-select"
+                >
+                  {REASONING_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                </select>
+              </div>
+            )}
+
+            {llmProvider === 'custom' && (
+              <div className="settings-field">
+                <label className="settings-label">Base URL</label>
+                <input
+                  type="text"
+                  value={llmBaseUrl}
+                  onChange={e => setLlmBaseUrl(e.target.value)}
+                  placeholder="https://your-host/v1"
+                  className="settings-select"
+                />
+              </div>
+            )}
+          </>
+        )}
+
+        {llmProvider === 'ollama' && (
+          <>
+            <div className="settings-field">
+              <label className="settings-label">Model</label>
+              {!customModelEntry && (
+                <select
+                  value={envDefaultsActive ? modelValue : modelSelectValue}
+                  onChange={e => {
+                    const value = e.target.value
+                    setModelChoice(value)
+                    if (value !== '__custom__') setModel(value)
+                  }}
+                  disabled={envDefaultsActive}
+                  className="settings-select"
+                >
+                  {modelOptions.map(m => <option key={m} value={m}>{m}</option>)}
+                  <option value="__custom__">— type your own model —</option>
+                </select>
+              )}
+              {customModelEntry && (
+                <>
+                  <button
+                    type="button"
+                    className="settings-back-link"
+                    onClick={() => {
+                      const first = modelOptions[0] ?? ''
+                      setModelChoice(first)
+                      setModel(first)
+                    }}
+                  >
+                    ← back to model list
+                  </button>
+                  <input
+                    type="text"
+                    value={envDefaultsActive ? modelValue : model}
+                    onChange={e => setModel(e.target.value)}
+                    disabled={envDefaultsActive}
+                    placeholder="Type an Ollama model tag"
+                    className="settings-select"
+                  />
+                </>
+              )}
+            </div>
+            <div className="settings-field">
+              <label className="settings-label">Request timeout</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="number" min={10} max={3600} value={timeout}
+                  onChange={e => setTimeout_(e.target.value)} className="settings-num-input" />
+                <span className="text-dim" style={{ fontSize: 13 }}>seconds</span>
+              </div>
+            </div>
+            <p className="text-dim" style={{ fontSize: 12, marginTop: 8 }}>
+              Match model size to GPU VRAM: 3b ≈ 3 GB · 7b ≈ 5 GB · 14b ≈ 10 GB.
+              Pull new models: <code className="inline-code">docker exec ollama ollama pull &lt;model&gt;</code>
+            </p>
+          </>
+        )}
+
+        <SaveRow
+          status={llmStatus} errMsg={llmErr}
+          onSave={llmProvider === 'ollama' ? saveOllama : saveLlm}
+          label="Save AI provider settings"
+        />
+      </SettingSection>
+
+      {/* ── Token Usage ───────────────────────────────────────────────────── */}
+      <SettingSection id="settings-usage" title="Token Usage" icon="⚡">
+        <UsageSection usage={usage} onRefresh={onUsageRefresh} />
       </SettingSection>
 
       {/* ── Data ──────────────────────────────────────────────────────────── */}
-      <SettingSection title="Data" icon="🗑️">
+      <SettingSection id="settings-data" title="Data" icon="🗑️">
         <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
           Clear all stored signals and analysis history. App settings (watchlist,
           interval, model, alerts) are preserved. This cannot be undone.
@@ -2632,6 +3595,7 @@ function SettingsPage() {
         </div>
       </SettingSection>
 
+      </div>
     </div>
   )
 }
@@ -2642,6 +3606,8 @@ export default function App() {
   const { data: health }                        = usePolling('/health', 30_000)
   const { data: wl, reload: reloadWatchlist }   = usePolling('/watchlist', 60_000)
   const { data: signals, reload: reloadSignals } = usePolling('/signals?limit=30', 60_000)
+  // Token usage — 30-day window; drives header chip + settings section
+  const { data: usage, reload: reloadUsage }    = usePolling('/usage', 60_000)
 
   const [activeView, setActiveView] = useState('dashboard')
   const [explorerState, setExplorerState] = useState(null)
@@ -2657,7 +3623,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <Header health={health} activeView={activeView} onViewChange={setActiveView} />
+      <Header health={health} usage={usage} activeView={activeView} onViewChange={setActiveView} />
       <main className="main">
         {/* All three views are always mounted — switching tabs never destroys SSE state */}
         <div style={{ display: activeView === 'dashboard' ? 'flex' : 'none',
@@ -2670,12 +3636,12 @@ export default function App() {
             key={explorerKey}
             initialResult={explorerState}
             onBack={() => setActiveView('dashboard')}
-            modelName={health?.ollama_model}
+            modelName={health?.llm_model ?? health?.ollama_model}
             onOpenInExplorer={openExplorer}
           />
         </div>
         {activeView === 'education' && <EducationPage />}
-        {activeView === 'settings' && <SettingsPage />}
+        {activeView === 'settings' && <SettingsPage usage={usage} onUsageRefresh={reloadUsage} />}
       </main>
       <footer className="footer">
         <span className="footer-brand">MarketSage</span>

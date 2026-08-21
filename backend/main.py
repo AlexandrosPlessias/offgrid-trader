@@ -11,6 +11,8 @@ Endpoints
 * ``GET  /analysis/{ticker}``     — analysis-log history for a ticker.
 * ``GET  /watchlist``             — configured watchlist + scheduler status.
 * ``GET  /health``                — liveness + config summary.
+* ``GET  /usage``                 — aggregate LLM token usage from the analysis log.
+* ``GET  /provider/quota``        — live rate-limit / quota check for the active provider.
 
 CORS is enabled for the frontend dev server(s) from config. The background
 scheduler is started/stopped via the lifespan handler.
@@ -32,7 +34,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -55,6 +57,7 @@ from .database import (
     get_recent_analyses,
     get_recent_signals,
     get_setting,
+    get_usage_stats,
     init_db,
     set_setting,
 )
@@ -167,7 +170,19 @@ class AlertsSettingRequest(BaseModel):
 class OllamaSettingRequest(BaseModel):
     model: str | None = Field(None, description="Ollama model tag, e.g. qwen2.5:7b")
     timeout: int | None = Field(
-        None, ge=10, le=3600, description="Request timeout in seconds (10–3600)"  # noqa: RUF001
+        None, ge=10, le=3600, description="Request timeout in seconds (10-3600)"
+    )
+
+
+class LLMSettingRequest(BaseModel):
+    provider: str | None = Field(
+        None, description="LLM provider: ollama | groq | gemini | mistral | custom"
+    )
+    api_key: str | None = Field(None, description="API key for cloud providers")
+    model: str | None = Field(None, description="Model override (empty = provider default)")
+    base_url: str | None = Field(None, description="Custom base URL (used when provider=custom)")
+    reasoning_effort: str | None = Field(
+        None, description="Reasoning effort for models that support it: none | low | medium | high"
     )
 
 
@@ -258,15 +273,27 @@ def _background_analyze(ticker: str, send_alerts: bool = True) -> None:
 def health() -> dict[str, Any]:
     settings = get_settings()
     db_model = get_setting("ollama_model", "")
-    return {
+    db_provider = get_setting("llm_provider", "")
+    provider = db_provider or settings.llm.provider
+    active_model = (
+        db_model or settings.ollama.model
+        if provider == "ollama"
+        else (get_setting("llm_model", "") or settings.llm.default_model_for(provider))
+    )
+    result: dict[str, Any] = {
         "status": "ok",
         "version": __version__,
-        "ollama_model": db_model or settings.ollama.model,
-        "ollama_host": settings.ollama.host,
+        "llm_provider": provider,
+        "llm_model": active_model,
         "watchlist_size": len(settings.watchlist),
         "scheduler": scheduler.status(),
         "disclaimer": "Not financial advice.",
     }
+    # Keep ollama_host for backward compatibility with existing clients/tooling.
+    if provider == "ollama":
+        result["ollama_host"] = settings.ollama.host
+        result["ollama_model"] = active_model  # backward compat alias
+    return result
 
 
 def _alerts_enabled() -> bool:
@@ -354,26 +381,63 @@ def set_scan_interval(request: ScanIntervalRequest) -> dict[str, Any]:
 
 
 @app.get("/settings")
-def get_all_settings() -> dict[str, Any]:
+def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
     """Return current effective settings (env defaults overridden by DB values)."""
     cfg = get_settings()
     db_model = get_setting("ollama_model", "")
     db_timeout = get_setting("ollama_timeout", "")
+    db_provider = get_setting("llm_provider", "")
+    db_llm_api_key = get_setting("llm_api_key", "")
+    db_llm_model = get_setting("llm_model", "")
+    db_llm_base_url = get_setting("llm_base_url", "")
+    db_reasoning_effort = get_setting("llm_reasoning_effort", "")
+    provider = provider or db_provider or cfg.llm.provider
     return {
+        # LLM provider settings (new)
+        "llm_provider": provider,
+        "llm_model": db_llm_model or cfg.llm.default_model_for(provider),
+        "llm_base_url": db_llm_base_url or cfg.llm.base_url_for(provider),
+        "llm_api_key_set": bool(db_llm_api_key or cfg.llm.api_key_for(provider)),
+        "llm_reasoning_effort": db_reasoning_effort or "none",
+        # Env-only defaults (ignore DB overrides) — used by the Settings page to
+        # show what ".env defaults" actually resolve to for the *selected* provider.
+        "llm_model_env_default": cfg.llm.default_model_for(provider),
+        "llm_base_url_env_default": cfg.llm.base_url_for(provider),
+        "llm_api_key_env_set": bool(cfg.llm.api_key_for(provider)),
+        # Ollama-specific (kept for backward compat)
         "ollama_model": db_model or cfg.ollama.model,
         "ollama_timeout": int(db_timeout) if db_timeout else cfg.ollama.timeout,
-        "alerts_enabled": _alerts_enabled(),
         "env_model": cfg.ollama.model,
         "env_timeout": cfg.ollama.timeout,
+        # Other settings (unchanged)
+        "alerts_enabled": _alerts_enabled(),
         "scan_interval_minutes": scheduler.status()["scan_interval_minutes"],
         "scheduler_running": scheduler.status()["running"],
+        # Admin token — sent back to the UI so the Settings page can include
+        # it as X-Admin-Token when the user clicks "Show" on the API key field.
+        # Env var (ADMIN_TOKEN) takes priority; falls back to DB-generated UUID.
+        "admin_token": cfg.admin_token or get_setting("admin_token", ""),
     }
 
 
 @app.post("/settings/ollama")
 def set_ollama_settings(request: OllamaSettingRequest) -> dict[str, Any]:
-    """Persist Ollama model and/or timeout to the DB (no restart required)."""
+    """Persist Ollama model and/or timeout to the DB (no restart required).
+
+    Returns HTTP 404 when LLM_PROVIDER is not 'ollama' — use POST /settings/llm
+    to configure cloud providers.
+    """
     cfg = get_settings()
+    provider = get_setting("llm_provider", "") or cfg.llm.provider
+    if provider != "ollama":
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Ollama settings are not applicable when LLM_PROVIDER='{provider}'. "
+                "Use POST /settings/llm to configure cloud LLM providers, "
+                "or set LLM_PROVIDER=ollama to switch back to local Ollama."
+            ),
+        )
     if request.model is not None:
         set_setting("ollama_model", request.model)
     if request.timeout is not None:
@@ -386,20 +450,119 @@ def set_ollama_settings(request: OllamaSettingRequest) -> dict[str, Any]:
     }
 
 
+@app.post("/settings/llm")
+def set_llm_settings(request: LLMSettingRequest) -> dict[str, Any]:
+    """Persist LLM provider settings to the DB (no restart required).
+
+    All fields are optional; only the supplied fields are updated.
+    The API key is stored in the DB and never returned in GET /settings
+    (only ``llm_api_key_set: true/false`` is exposed).
+    """
+    valid_providers = {"ollama", "groq", "gemini", "mistral", "custom"}
+    if request.provider is not None:
+        if request.provider not in valid_providers:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid provider '{request.provider}'. Valid: {sorted(valid_providers)}",
+            )
+        set_setting("llm_provider", request.provider)
+    if request.api_key is not None:
+        set_setting("llm_api_key", request.api_key)
+    if request.model is not None:
+        set_setting("llm_model", request.model)
+    if request.base_url is not None:
+        set_setting("llm_base_url", request.base_url)
+    if request.reasoning_effort is not None:
+        valid_reasoning = {"none", "low", "medium", "high"}
+        if request.reasoning_effort not in valid_reasoning:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid reasoning_effort '{request.reasoning_effort}'. "
+                    f"Valid: {sorted(valid_reasoning)}"
+                ),
+            )
+        set_setting("llm_reasoning_effort", request.reasoning_effort)
+    return {
+        "ok": True,
+        "provider": get_setting("llm_provider", "") or get_settings().llm.provider,
+    }
+
+
+@app.get("/settings/llm/key")
+def reveal_llm_key(x_admin_token: str | None = Header(None)) -> dict[str, str]:
+    """Return the active API key in plaintext (DB value, or env fallback).
+
+    Requires the ``X-Admin-Token`` header to equal the installation's admin
+    token (auto-generated at first startup, stored in ``app_settings``, and
+    included in ``GET /settings`` so the UI can send it back here).
+
+    This stops single-shot automated key harvesting: an attacker must first
+    discover the token from ``GET /settings``, then make a second targeted
+    request — rather than recovering the key with one unauthenticated GET.
+    """
+    # Resolve admin token: ADMIN_TOKEN env var takes priority over DB-stored value.
+    cfg = get_settings()
+    expected = cfg.admin_token or get_setting("admin_token", "")
+    if not expected or x_admin_token != expected:
+        raise HTTPException(status_code=401, detail="Missing or invalid X-Admin-Token header.")
+    provider = get_setting("llm_provider", "") or cfg.llm.provider
+    db_key = get_setting("llm_api_key", "")
+    env_key = cfg.llm.api_key_for(provider)
+    return {"key": db_key or env_key}
+
+
 @app.get("/settings/models")
-def list_ollama_models() -> dict[str, Any]:
-    """Return models currently pulled in the local Ollama instance."""
+def list_llm_models(provider: str | None = Query(None)) -> dict[str, Any]:
+    """Return available models for the active LLM provider.
+
+    For Ollama: queries the local /api/tags endpoint.
+    For cloud providers: returns a static list of known free-tier models.
+    """
     import requests as _req
 
     cfg = get_settings()
+    provider = provider or get_setting("llm_provider", "") or cfg.llm.provider
+
+    if provider != "ollama":
+        # Static list of known free-tier models per provider.
+        cloud_models: dict[str, list[str]] = {
+            "groq": [
+                "qwen/qwen3.6-27b",
+            ],
+            "gemini": [
+                "gemini-3.5-flash-lite",
+                "gemini-3.5-flash",
+            ],
+            "mistral": [
+                "mistral-small-latest",
+                "mistral-large-latest",
+            ],
+            "custom": [],
+        }
+        active = get_setting("llm_model", "") or cfg.llm.default_model_for(provider)
+        return {
+            "provider": provider,
+            "models": cloud_models.get(provider, []),
+            "active": active,
+        }
+
+    # Ollama — query local /api/tags
     try:
         resp = _req.get(f"{cfg.ollama.host}/api/tags", timeout=5)
         resp.raise_for_status()
-        models = [m["name"] for m in resp.json().get("models", [])]
+        models = [
+            m["name"]
+            for m in resp.json().get("models", [])
+            if not any(
+                marker in m["name"].lower()
+                for marker in ("embed", "embedding", "bge-", "nomic-embed")
+            )
+        ]
     except Exception as exc:
         models = []
         _log.warning("ollama /api/tags failed: %s", exc)
-    return {"models": models}
+    return {"provider": "ollama", "models": models}
 
 
 @app.post("/analyze")
@@ -420,7 +583,9 @@ async def analyze_ticker(request: AnalyzeRequest) -> dict[str, Any]:
 
 
 @app.post("/analyze/stream")
-async def analyze_ticker_stream(request: AnalyzeRequest) -> StreamingResponse:  # noqa: C901
+async def analyze_ticker_stream(  # noqa: C901
+    request: AnalyzeRequest,
+) -> StreamingResponse:
     """On-demand analysis streamed as Server-Sent Events.
 
     Yields ``data: <json>`` lines for each pipeline step, then a final
@@ -555,7 +720,7 @@ async def market_data_history(
                     "high": float(row["High"]) if row["High"] == row["High"] else None,
                     "low": float(row["Low"]) if row["Low"] == row["Low"] else None,
                     "close": close,
-                    "volume": int(row["Volume"]) if row["Volume"] == row["Volume"] else None,
+                    "volume": (int(row["Volume"]) if row["Volume"] == row["Volume"] else None),
                     "up": close is not None and prev_close is not None and close >= prev_close,
                 }
             )
@@ -649,3 +814,146 @@ def analysis_history(
     """Return the analysis-log history for *ticker*."""
     rows = get_analysis_history(ticker=ticker, limit=limit)
     return {"ticker": ticker.upper(), "count": len(rows), "history": rows}
+
+
+# --------------------------------------------------------------------------- #
+# Token usage monitoring
+# --------------------------------------------------------------------------- #
+@app.get("/usage")
+def usage_stats(
+    days: int = Query(30, ge=1, le=365, description="Look-back window in days"),
+) -> dict[str, Any]:
+    """Aggregate LLM token usage from the analysis log.
+
+    Returns totals and per-provider/per-day breakdowns for the last *days* days.
+    Prompt and completion tokens are stored per analysis run — rows created before
+    token tracking was added will contribute 0 to the totals (SQL NULL → 0).
+    """
+    return get_usage_stats(days=days)
+
+
+@app.get("/provider/quota")
+async def provider_quota() -> dict[str, Any]:
+    """Live rate-limit and quota snapshot for the active cloud LLM provider.
+
+    Makes a minimal API call to the configured provider and returns:
+    - **groq**: rate-limit headers (``x-ratelimit-remaining-tokens``, etc.)
+    - **mistral**: ``GET /v1/usage`` — monthly token consumption
+    - **gemini**: no programmatic quota API on free tier — returns model limits
+                  and a link to the Google AI Studio dashboard
+    - **ollama / custom**: returns ``{"provider": "<name>", "quota": "n/a"}``
+
+    Raises ``HTTP 400`` if no provider is configured, ``HTTP 502`` if the
+    provider API call fails.
+    """
+    from .analysis import _effective_provider, _get_db_setting
+    from .config import get_settings as _cfg
+
+    provider = _effective_provider()
+    settings = _cfg()
+
+    if provider == "ollama":
+        return {"provider": "ollama", "quota": "n/a", "note": "Ollama runs locally — no quota."}
+
+    if provider == "custom":
+        return {"provider": "custom", "quota": "n/a", "note": "Custom provider — quota unknown."}
+
+    # Resolve API key (DB takes precedence over env).
+    api_key = _get_db_setting("llm_api_key", "") or settings.llm.api_key_for(provider)
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No API key configured for provider '{provider}'. "
+            "Set it via Settings → LLM Provider or the environment variable.",
+        )
+
+    # ------------------------------------------------------------------ groq
+    if provider == "groq":
+        # Groq exposes rate-limit state via response headers on any call.
+        # We send a minimal 1-token prompt to a cheap model and harvest the headers.
+        try:
+            import httpx
+
+            base_url = _get_db_setting("llm_base_url", "") or settings.llm.base_url_for(provider)
+            resp = await asyncio.to_thread(
+                lambda: httpx.post(
+                    f"{base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "llama-3.1-8b-instant",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 1,
+                    },
+                    timeout=15,
+                )
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Groq quota probe failed: {exc}") from exc
+
+        h = resp.headers
+        return {
+            "provider": "groq",
+            "status_code": resp.status_code,
+            "rate_limits": {
+                "requests_limit": h.get("x-ratelimit-limit-requests"),
+                "requests_remaining": h.get("x-ratelimit-remaining-requests"),
+                "requests_reset": h.get("x-ratelimit-reset-requests"),
+                "tokens_limit": h.get("x-ratelimit-limit-tokens"),
+                "tokens_remaining": h.get("x-ratelimit-remaining-tokens"),
+                "tokens_reset": h.get("x-ratelimit-reset-tokens"),
+            },
+            "note": "Rate-limit headers from a 1-token probe call to llama-3.1-8b-instant.",
+        }
+
+    # --------------------------------------------------------------- mistral
+    if provider == "mistral":
+        try:
+            import httpx
+
+            base_url = (
+                _get_db_setting("llm_base_url", "")
+                or settings.llm.base_url_for(provider)
+                or "https://api.mistral.ai/v1"
+            )
+            resp = await asyncio.to_thread(
+                lambda: httpx.get(
+                    f"{base_url}/usage",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=15,
+                )
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Mistral usage call failed: {exc}"
+            ) from exc
+
+        if resp.status_code == 200:
+            return {"provider": "mistral", **resp.json()}
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=f"Mistral /v1/usage returned {resp.status_code}: {resp.text[:300]}",
+        )
+
+    # --------------------------------------------------------------- gemini
+    if provider == "gemini":
+        # Google AI Studio (free tier) has no programmatic quota REST endpoint.
+        # Return the static free-tier limits and a dashboard link.
+        return {
+            "provider": "gemini",
+            "quota": "static",
+            "note": (
+                "Google AI Studio free tier does not expose a programmatic quota API. "
+                "Check your usage at https://aistudio.google.com/app/apikey"
+            ),
+            "free_tier_limits": {
+                "gemini-2.0-flash": {"rpm": 15, "tpm": 1_000_000, "rpd": 1_500},
+                "gemini-1.5-flash": {"rpm": 15, "tpm": 1_000_000, "rpd": 1_500},
+                "gemini-1.5-pro": {"rpm": 2, "tpm": 32_000, "rpd": 50},
+            },
+            "dashboard_url": "https://aistudio.google.com/app/apikey",
+        }
+
+    raise HTTPException(status_code=400, detail=f"Unknown provider: {provider!r}")

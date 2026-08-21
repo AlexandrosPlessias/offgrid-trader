@@ -99,45 +99,94 @@ Five additions to the data pipeline and UI — all shipped:
 
 ---
 
-## 3. Low-cost / zero-cost cloud LLM hosting
+## ✅ 3a. Low-cost / zero-cost cloud LLM hosting
+*Shipped on branch `feat/backlog-3b-agentic-arch`*
 
-Replace (or complement) local Ollama with a free or near-free cloud inference API so the app can run without a beefy local machine (no 16 GB RAM, no GPU required).
+Added full support for free cloud inference alongside (or instead of) local Ollama.
 
-**Core idea:** decouple AI inference from the local stack. The backend already calls Ollama over HTTP — pointing it at a cloud-compatible, OpenAI-style API endpoint is a small code change.
-
-### Candidate providers
-
-| Provider | Model(s) | Free tier | Notes |
+| Provider | Sign-up | Free tier | Default model |
 |---|---|---|---|
-| **Groq Cloud** | Qwen 2.5 32B, Llama 3.1 70B | ~30 req/min, no card | Fastest inference available; OpenAI-compatible; strong free tier |
-| **SambaNova Cloud** | Qwen 2.5 72B, Llama 3.1 405B | Generous free tier | Very fast; OpenAI-compatible |
-| **Together AI** | Qwen 2.5, many others | Pay-per-token (cheap) | Reliable; good for volume above free-tier limits |
-| **Replicate / RunPod** | Any model via vLLM | Pay-per-second GPU | More DevOps; skip unless others don't cut it |
+| **Groq Cloud** | https://console.groq.com | ~30 req/min, 6 000 req/day | `llama-3.3-70b-versatile` |
+| **Google Gemini** | https://aistudio.google.com | Flash-Lite 1 000 req/day · Flash 250 req/day | `gemini-3.5-flash-lite` |
+| **Mistral AI** | https://console.mistral.ai | ~1B tokens/month free | `mistral-small-latest` |
 
-Groq or SambaNova are the preferred starting point — free, fast, no credit card required.
+### What shipped
 
-### App hosting (if deploying publicly)
+- **`LLM_PROVIDER` env var** — `ollama` (default) / `groq` / `gemini` / `mistral` / `custom`; local Ollama path unchanged
+- **Settings page → AI Provider section** — provider dropdown, API key field, per-provider model dropdown + free text, base URL (custom), reasoning-effort dropdown, and a 'Use .env defaults' toggle; changes take effect instantly (DB-backed, no restart)
+- **Model tags** — every analysis result shows which provider and model produced it (stored in `analysis_log` and `signals`); shown as a chip in the Explorer and a bubble on dashboard signal cards
+- **`make infra` auto-skip** — when `LLM_PROVIDER ≠ ollama`, Ollama containers are skipped automatically (saves RAM/VRAM); override with `--with-ollama`
+- **`call_cloud_llm()`** in `analysis.py` — uses the `openai` SDK with per-provider `base_url`/`api_key`/`reasoning_effort` handling; `LLMError` base class for backward-compatible error handling
 
-| Layer | Option | Notes |
+### Privacy note
+
+When using a cloud provider, ticker data and market snapshots leave your machine and are processed by the chosen provider's API. See their privacy policies at the sign-up URLs above.
+
+### Remaining / known gaps
+
+- ✅ **Prompt revision** — `backend/prompts/system_prompt.md` rewritten with confidence calibration scale, show-your-work signals guidance, and structural-level entry/stop/target rules; ships with score_breakdown on branch `feat/backlog-3a-cloud-llm`
+- **Multi-model fallback** — moved to backlog item 3c below
+
+---
+
+## 3c. Multi-model fallback
+
+When the active LLM provider fails (network error, rate limit, quota exhaustion) automatically retry the same request with a second configured provider/model, instead of surfacing the error to the user.
+
+### Why this matters
+
+Cloud free tiers are generous but not unlimited — Groq has a 6 000 req/day cap, Gemini Flash 250 req/day, Mistral varies by model. A sequential watchlist scan across multiple tickers can exhaust one provider's quota within a session. Without fallback, the user sees an error and must manually switch providers in Settings.
+
+### Design
+
+| Priority | Provider / Model | Configured via |
 |---|---|---|
-| Frontend | **Vercel** (free) | Vite SPA — ideal fit |
-| Backend + scheduler | **Fly.io** free tier | Never sleeps; supports persistent volumes for SQLite; better than Render (which sleeps after 15 min) |
-| SQLite persistence | Fly.io persistent volume | Mount at `/data`; survives redeploys |
+| 1st | Primary (from Settings page) | existing `llm_provider` / `llm_model` DB keys |
+| 2nd | Fallback provider | new `llm_fallback_provider` / `llm_fallback_model` DB keys |
+| 3rd | (optional) Second fallback | new `llm_fallback2_*` DB keys |
 
-### What changes in the code
+Fallback fires on any `LLMError` (connection refused, HTTP 429, HTTP 5xx, timeout). If all configured providers fail, the original error is re-raised to the user as today.
 
-- `backend/analysis.py` — replace `requests.post(ollama_chat_url)` with an OpenAI-SDK call (`openai.chat.completions.create`) pointed at the chosen provider's base URL
-- `backend/config.py` — add `LLM_PROVIDER` (`ollama` / `groq` / `sambanova`), `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`; make Ollama the default so existing local setups are unchanged
-- `.env.example` — document the new env vars
-- `infra/docker-compose.yml` — make `ollama` service optional (skip if `LLM_PROVIDER != "ollama"`)
-- `SETUP.md` — add "Cloud AI" quick-start path alongside the existing local Ollama path
+### Implementation scope
 
-### Open questions (revisit before implementing)
+1. **`backend/analysis.py`** — wrap `call_llm()` in a retry loop that iterates through the fallback chain; log each attempt with provider name and error reason
+2. **`backend/config.py`** / **`backend/main.py`** — new `llm_fallback_provider` / `llm_fallback_model` setting keys; expose in `GET /settings` and `POST /settings/llm`
+3. **Settings page** — add a second "Fallback provider" row beneath the primary; same fields (provider dropdown, API key, model); shown only when primary is a cloud provider
+4. **SSE stream** — emit a `type:"fallback"` event when a retry fires so the Explorer pipeline shows which provider actually ran
 
-- Rate limits on free tiers vs. scan frequency: `SCAN_INTERVAL_MINUTES × len(WATCHLIST)` calls/hour — verify each provider's limits before committing
-- Privacy: ticker data + market snapshots leave the machine. Document this trade-off clearly.
-- SSE streaming: cloud providers return streamed chunks via the OpenAI streaming API — wire that through to the existing SSE endpoint for consistent UX
-- Backlog item 1 (pandas-ta) should ideally land first — fewer external dependencies before adding a new one
+### Dependencies
+
+- Item 3a (cloud LLM) must be complete — this only makes sense with multiple providers configured.
+
+---
+
+## 3d. App hosting — Vercel (frontend) + Fly.io (backend)
+
+Host the full stack publicly for free — no local machine needed once a cloud LLM is configured (item 3a above).
+
+| Layer | Platform | Free tier | Notes |
+|---|---|---|---|
+| **Frontend** | [Vercel](https://vercel.com) | Unlimited hobby projects | Vite SPA — `vite build` + `vercel --prod`, zero config |
+| **Backend + DB** | [Fly.io](https://fly.io) | 3 shared-CPU VMs, 3 GB storage | FastAPI + SQLite + scheduler; persistent volume at `/app/data` |
+
+### What this task covers
+
+1. **Production `Dockerfile`** for the backend — strip Aspire/OTEL overhead for the free tier, keep health endpoint
+2. **`fly.toml`** — `internal_port=8000`, volume mount at `/app/data`, process group for the scheduler
+3. **Deploy script** — `fly secrets set` for `LLM_PROVIDER`, `GROQ_API_KEY`, `WATCHLIST`, alert credentials
+4. **Vercel project** for the Vite frontend — `VITE_API_URL` points at the Fly.io backend URL; no separate API gateway needed
+5. **`SETUP.md` cloud-deploy section** — step-by-step from zero to public URL
+
+### Constraints and notes
+
+- SQLite on Fly.io persistent volume survives redeploys and restarts but is not replicated. Sufficient for single-user / personal use.
+- Fly.io free tier machines share CPU — Ollama cannot run here; must use Groq or a custom cloud endpoint (item 3a prerequisite).
+- Vercel free tier has 100 GB bandwidth/month and zero cold-start latency for a static build.
+- CORS: backend `CORS_ORIGINS` must include the Vercel preview URL pattern (`*.vercel.app`) plus the custom domain if set.
+
+### Dependencies
+
+- Item 3a must be complete (cloud LLM configured) — Fly.io cannot run a local Ollama model.
 
 ---
 
