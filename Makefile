@@ -52,7 +52,9 @@ define docker_stop
 	fi
 endef
 
-## Start Docker (WSL2), then shared infra: Ollama + Portainer (auto-detects GPU)
+## Start Docker (WSL2) + shared infra (Portainer, and Ollama when LLM_PROVIDER=ollama).
+## Auto-skips Ollama when LLM_PROVIDER=groq/sambanova/custom in .env — saves RAM/VRAM.
+## Force Ollama on regardless: bash infra/start-infra.sh --with-ollama
 infra:
 	$(call docker_start)
 	bash infra/start-infra.sh

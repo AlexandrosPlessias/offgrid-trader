@@ -6,7 +6,7 @@ All configuration for **MarketSage** is driven by environment variables in `.env
 (copied from `.env.example`). Most can also be changed at **runtime** from the
 **Settings page** (⚙ gear in the header) or via the API — no container restart needed.
 
-> Runtime changes are persisted to SQLite (`app_settings` table) and survive restarts.  
+> Runtime changes are persisted to SQLite (`app_settings` table) and survive restarts.
 > `.env` values act as defaults; the DB value overrides them once set via the UI/API.
 
 ---
@@ -22,7 +22,48 @@ All configuration for **MarketSage** is driven by environment variables in `.env
 
 ---
 
+## AI Provider
+
+> **Settings page → 🧠 AI Provider** — change provider and API key at runtime without restarting.
+> See [cloud-llm.md](cloud-llm.md) for step-by-step free-tier setup (Groq, Gemini, Mistral).
+
+The Settings page uses a left-hand menu for Scheduler, Alerts, AI Provider, and
+Data. Changing the provider clears the current provider's API key, model, base
+URL, `.env` toggle, and reasoning selection before loading the new provider's
+options. This prevents, for example, a Gemini model from being saved for Mistral.
+
+The model field is a free-text input with provider-specific suggestions. Choose
+one from the dropdown or type any valid model ID; the empty suggestion means
+"type your own model". For Ollama, suggestions include `qwen2.5:3b`,
+`qwen2.5:7b`, and `qwen2.5:14b`.
+
+For non-custom providers, **Use `.env` defaults** fills the key/model from the
+environment-derived configuration and clears saved UI overrides when saved.
+
+| Variable | Default | Runtime-mutable | Description |
+|---|---|---|---|
+| `LLM_PROVIDER` | `ollama` | ✓ (Settings page or `POST /settings/llm`) | Active provider: `ollama` / `groq` / `gemini` / `mistral` / `custom` |
+| `GROQ_API_KEY` | *(unset)* | ✓ (Settings page) | API key from https://console.groq.com — no credit card. Stored in DB; never returned by the API. |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | ✓ (Settings page) | Groq model override (optional — leave blank for the default). |
+| `GEMINI_API_KEY` | *(unset)* | ✓ (Settings page) | API key from https://aistudio.google.com — no billing required. |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | ✓ (Settings page) | Gemini model override. |
+| `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai/` | ✓ (Settings page) | Gemini's OpenAI-compatible endpoint. |
+| `MISTRAL_API_KEY` | *(unset)* | ✓ (Settings page) | API key from https://console.mistral.ai. |
+| `MISTRAL_MODEL` | `mistral-small-latest` | ✓ (Settings page) | Mistral model override. |
+| `MISTRAL_BASE_URL` | `https://api.mistral.ai/v1` | ✓ (Settings page) | Mistral's OpenAI-compatible endpoint. |
+| `LLM_BASE_URL` | *(unset)* | ✓ (Settings page) | Base URL for `custom` provider — any OpenAI-compatible endpoint. |
+| `LLM_API_KEY` | *(unset)* | ✓ (Settings page) | API key for `custom` provider. |
+| `LLM_MODEL` | *(unset)* | ✓ (Settings page) | Model name for `custom` provider. |
+| `llm_reasoning_effort` (DB setting only) | `none` | ✓ (Settings page or `POST /settings/llm`) | Reasoning effort (`none`/`low`/`medium`/`high`) sent to Groq/Mistral always, and to Gemini only when non-default (Gemini 3.x rejects `none`). |
+| `CLOUD_LLM_TIMEOUT` | `60` | ✗ | Seconds to wait for a cloud provider response. |
+
+**`make infra` auto-skip:** when `LLM_PROVIDER ≠ ollama`, Ollama containers are skipped automatically (saves RAM/VRAM). Override: `bash infra/start-infra.sh --with-ollama`.
+
+---
+
 ## Ollama (local LLM)
+
+Used when `LLM_PROVIDER=ollama` (the default).
 
 | Variable | Default | Runtime-mutable | Description |
 |---|---|---|---|

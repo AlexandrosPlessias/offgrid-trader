@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -53,6 +54,8 @@ CREATE TABLE IF NOT EXISTS signals (
     target      REAL,
     price       REAL,
     reasons     TEXT,
+    llm_provider TEXT,
+    llm_model   TEXT,
     timestamp   TEXT    NOT NULL,
     created_at  TEXT    NOT NULL
 );
@@ -67,6 +70,8 @@ CREATE TABLE IF NOT EXISTS analysis_log (
     market_snapshot    TEXT NOT NULL,
     opportunities_json TEXT,   -- JSON array of ALL detected opportunities (null on old rows)
     actionable_json    TEXT,   -- JSON array of opportunities that cleared the confidence floor
+    prompt_tokens      INTEGER,
+    completion_tokens  INTEGER,
     created_at         TEXT NOT NULL
 );
 
@@ -91,12 +96,12 @@ CREATE TABLE IF NOT EXISTS ticker_memory (
 """
 
 
-def init_db(db_path: str | None = None) -> None:
+def init_db(db_path: str | None = None) -> None:  # noqa: C901
     """Create tables and indexes if they do not already exist."""
 
     with _connect(db_path) as conn:
         conn.executescript(_SCHEMA)
-        # Migrate analysis_log tables created before opportunities columns were added.
+        # Migrate analysis_log tables created before opportunities/LLM columns were added.
         existing_cols = {
             row[1] for row in conn.execute("PRAGMA table_info(analysis_log)").fetchall()
         }
@@ -104,13 +109,64 @@ def init_db(db_path: str | None = None) -> None:
             conn.execute("ALTER TABLE analysis_log ADD COLUMN opportunities_json TEXT")
         if "actionable_json" not in existing_cols:
             conn.execute("ALTER TABLE analysis_log ADD COLUMN actionable_json TEXT")
+        if "llm_provider" not in existing_cols:
+            conn.execute("ALTER TABLE analysis_log ADD COLUMN llm_provider TEXT")
+        if "llm_model" not in existing_cols:
+            conn.execute("ALTER TABLE analysis_log ADD COLUMN llm_model TEXT")
+        if "prompt_tokens" not in existing_cols:
+            conn.execute("ALTER TABLE analysis_log ADD COLUMN prompt_tokens INTEGER")
+        if "completion_tokens" not in existing_cols:
+            conn.execute("ALTER TABLE analysis_log ADD COLUMN completion_tokens INTEGER")
+        # Migrate signals tables created before the llm_* columns were added.
+        existing_signal_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()
+        }
+        if "llm_provider" not in existing_signal_cols:
+            conn.execute("ALTER TABLE signals ADD COLUMN llm_provider TEXT")
+        if "llm_model" not in existing_signal_cols:
+            conn.execute("ALTER TABLE signals ADD COLUMN llm_model TEXT")
+        # Ensure a stable admin token exists for the key-reveal endpoint.
+        # Priority: ADMIN_TOKEN env var → DB-stored → auto-generate + store.
+        from .config import get_settings as _cfg  # local to avoid circular import at module level
+
+        env_token = _cfg().admin_token  # empty string if ADMIN_TOKEN not set
+        existing_row = conn.execute(
+            "SELECT value FROM app_settings WHERE key = 'admin_token'"
+        ).fetchone()
+
+        if env_token:
+            # User has ADMIN_TOKEN in .env — upsert so /settings returns it correctly.
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('admin_token', ?)",
+                (env_token,),
+            )
+        elif not existing_row:
+            # No env var and no DB entry — auto-generate and log once.
+            import logging as _logging
+
+            generated = str(uuid.uuid4())
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES ('admin_token', ?)",
+                (generated,),
+            )
+            _logging.getLogger(__name__).warning(
+                "ADMIN_TOKEN not set in .env — auto-generated: %s  "
+                "(add ADMIN_TOKEN=%s to .env to make it permanent)",
+                generated,
+                generated,
+            )
         conn.commit()
 
 
 # --------------------------------------------------------------------------- #
 # Writes
 # --------------------------------------------------------------------------- #
-def save_signal(opportunity: dict[str, Any], db_path: str | None = None) -> int:
+def save_signal(
+    opportunity: dict[str, Any],
+    llm_provider: str | None = None,
+    llm_model: str | None = None,
+    db_path: str | None = None,
+) -> int:
     """Persist a single opportunity dict to ``signals``; return the new row id."""
 
     reasons = opportunity.get("reasons")
@@ -125,6 +181,8 @@ def save_signal(opportunity: dict[str, Any], db_path: str | None = None) -> int:
         opportunity.get("target"),
         opportunity.get("price"),
         reasons_json,
+        llm_provider,
+        llm_model,
         opportunity.get("timestamp") or _now_iso(),
         _now_iso(),
     )
@@ -133,8 +191,8 @@ def save_signal(opportunity: dict[str, Any], db_path: str | None = None) -> int:
             """
             INSERT INTO signals
                 (ticker, type, confidence, source, entry, stop, target, price,
-                 reasons, timestamp, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 reasons, llm_provider, llm_model, timestamp, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             row,
         )
@@ -150,6 +208,10 @@ def save_analysis(
     market_snapshot: dict[str, Any],
     opportunities: list[dict[str, Any]] | None = None,
     actionable: list[dict[str, Any]] | None = None,
+    llm_provider: str | None = None,
+    llm_model: str | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
     db_path: str | None = None,
 ) -> int:
     """Persist the full analysis + market snapshot; return the new row id.
@@ -158,6 +220,12 @@ def save_analysis(
     levels).  ``actionable`` is the subset that cleared the confidence floor.
     Both default to ``None`` which stores SQL NULL so that old rows can be
     distinguished from rows that ran with zero detected opportunities.
+
+    ``llm_provider`` and ``llm_model`` record which AI provider/model produced
+    the analysis (e.g. ``"groq"`` / ``"llama-3.3-70b-versatile"``).
+
+    ``prompt_tokens`` and ``completion_tokens`` are the token counts reported
+    by the provider — stored for usage aggregation via :func:`get_usage_stats`.
     """
 
     with _connect(db_path) as conn:
@@ -165,15 +233,22 @@ def save_analysis(
             """
             INSERT INTO analysis_log
                 (ticker, analysis_json, market_snapshot,
-                 opportunities_json, actionable_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                 opportunities_json, actionable_json,
+                 llm_provider, llm_model,
+                 prompt_tokens, completion_tokens,
+                 created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ticker,
                 json.dumps(analysis, default=str),
                 json.dumps(market_snapshot, default=str),
-                json.dumps(opportunities, default=str) if opportunities is not None else None,
+                (json.dumps(opportunities, default=str) if opportunities is not None else None),
                 json.dumps(actionable, default=str) if actionable is not None else None,
+                llm_provider or None,
+                llm_model or None,
+                prompt_tokens if prompt_tokens else None,
+                completion_tokens if completion_tokens else None,
                 _now_iso(),
             ),
         )
@@ -181,6 +256,99 @@ def save_analysis(
         if cur.lastrowid is None:
             raise RuntimeError("insert into analysis_log returned no lastrowid")
         return cur.lastrowid
+
+
+def get_usage_stats(days: int = 30, db_path: str | None = None) -> dict[str, Any]:
+    """Aggregate token usage from ``analysis_log`` for the last *days* days.
+
+    Returns a dict with:
+    - ``period_days`` — the window requested
+    - ``total_rows``  — number of analysed rows in the window
+    - ``total_prompt_tokens``
+    - ``total_completion_tokens``
+    - ``total_tokens``
+    - ``by_provider``  — list of ``{provider, model, rows, prompt_tokens,
+                          completion_tokens, total_tokens}`` sorted by total desc
+    - ``by_day``       — list of ``{date, prompt_tokens, completion_tokens,
+                          total_tokens}`` newest first
+    """
+    cutoff_interval = f"-{int(days)} days"  # e.g. "-30 days"
+    with _connect(db_path) as conn:
+        # Overall totals
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*)                        AS rows,
+                COALESCE(SUM(prompt_tokens), 0) AS pt,
+                COALESCE(SUM(completion_tokens), 0) AS ct
+            FROM analysis_log
+            WHERE created_at >= datetime('now', ?)
+            """,
+            (cutoff_interval,),
+        ).fetchone()
+        total_rows = row["rows"]
+        total_pt = row["pt"]
+        total_ct = row["ct"]
+
+        # Per-provider/model breakdown
+        provider_rows = conn.execute(
+            """
+            SELECT
+                COALESCE(llm_provider, 'unknown')  AS provider,
+                COALESCE(llm_model, 'unknown')     AS model,
+                COUNT(*)                           AS rows,
+                COALESCE(SUM(prompt_tokens), 0)    AS prompt_tokens,
+                COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+            FROM analysis_log
+            WHERE created_at >= datetime('now', ?)
+            GROUP BY llm_provider, llm_model
+            ORDER BY prompt_tokens + completion_tokens DESC
+            """,
+            (cutoff_interval,),
+        ).fetchall()
+
+        # Per-day breakdown
+        day_rows = conn.execute(
+            """
+            SELECT
+                DATE(created_at)                   AS day,
+                COALESCE(SUM(prompt_tokens), 0)    AS prompt_tokens,
+                COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+            FROM analysis_log
+            WHERE created_at >= datetime('now', ?)
+            GROUP BY DATE(created_at)
+            ORDER BY day DESC
+            """,
+            (cutoff_interval,),
+        ).fetchall()
+
+    return {
+        "period_days": days,
+        "total_rows": total_rows,
+        "total_prompt_tokens": total_pt,
+        "total_completion_tokens": total_ct,
+        "total_tokens": total_pt + total_ct,
+        "by_provider": [
+            {
+                "provider": r["provider"],
+                "model": r["model"],
+                "rows": r["rows"],
+                "prompt_tokens": r["prompt_tokens"],
+                "completion_tokens": r["completion_tokens"],
+                "total_tokens": r["prompt_tokens"] + r["completion_tokens"],
+            }
+            for r in provider_rows
+        ],
+        "by_day": [
+            {
+                "date": r["day"],
+                "prompt_tokens": r["prompt_tokens"],
+                "completion_tokens": r["completion_tokens"],
+                "total_tokens": r["prompt_tokens"] + r["completion_tokens"],
+            }
+            for r in day_rows
+        ],
+    }
 
 
 # --------------------------------------------------------------------------- #

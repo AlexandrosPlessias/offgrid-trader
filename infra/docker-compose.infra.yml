@@ -15,7 +15,11 @@ name: ai-shared
 services:
 
   # ── Ollama (shared LLM runtime) ──────────────────────────────────────────────
+  # Profile "ollama" — only starts when COMPOSE_PROFILES=ollama is set.
+  # start-infra.sh sets this automatically based on LLM_PROVIDER in .env.
+  # Skip this entire block (and save RAM/VRAM) when using Groq or a custom cloud endpoint.
   ollama:
+    profiles: [ollama]
     image: ollama/ollama:0.9.0
     container_name: ollama
     restart: unless-stopped
@@ -32,6 +36,7 @@ services:
 
   # ── Model pull (one-shot; pulls all models needed by all projects) ────────────
   ollama-pull:
+    profiles: [ollama]
     image: ollama/ollama:0.9.0
     restart: "no"
     entrypoint: ["/bin/sh", "-c"]

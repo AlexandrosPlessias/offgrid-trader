@@ -35,6 +35,10 @@ class PersistSkill(Skill):
                     ctx.market_data,
                     opportunities=ctx.opportunities or [],
                     actionable=ctx.actionable or [],
+                    llm_provider=ctx.analysis.get("llm_provider"),
+                    llm_model=ctx.analysis.get("llm_model"),
+                    prompt_tokens=ctx.analysis.get("prompt_tokens") or None,
+                    completion_tokens=ctx.analysis.get("completion_tokens") or None,
                 )
                 _log.debug("persist: saved analysis for %s", ctx.ticker)
             except Exception:
@@ -42,9 +46,11 @@ class PersistSkill(Skill):
                 errors.append("save_analysis failed — check server logs")
 
         # Persist each actionable signal.
+        llm_provider = (ctx.analysis or {}).get("llm_provider")
+        llm_model = (ctx.analysis or {}).get("llm_model")
         for opp in ctx.actionable or []:
             try:
-                signal_id = save_signal(opp)
+                signal_id = save_signal(opp, llm_provider=llm_provider, llm_model=llm_model)
                 saved_ids.append(signal_id)
                 _log.debug("persist: saved signal %d for %s", signal_id, ctx.ticker)
             except Exception:

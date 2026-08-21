@@ -68,6 +68,118 @@ class OllamaConfig:
         return f"{self.host.rstrip('/')}/api/chat"
 
 
+# Provider-to-base-URL defaults (OpenAI-compatible REST APIs).
+_PROVIDER_BASE_URLS: dict[str, str] = {
+    "groq": "https://api.groq.com/openai/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "mistral": "https://api.mistral.ai/v1",
+}
+
+# Provider-to-default-model defaults (free-tier recommended models).
+_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
+    "groq": "qwen/qwen3.6-27b",
+    "gemini": "gemini-3.5-flash-lite",
+    "mistral": "mistral-small-latest",
+}
+
+
+@dataclass(frozen=True)
+class LLMConfig:
+    """Cloud / remote LLM provider settings (used when LLM_PROVIDER != 'ollama').
+
+    Env-var values serve as fallbacks; the Settings page stores overrides in the
+    DB (keys: llm_provider, llm_api_key, llm_model, llm_base_url) which take
+    precedence at call time via ``backend.database.get_setting``.
+    """
+
+    # Active provider: "ollama" (default) | "groq" | "gemini" | "mistral" | "custom"
+    provider: str = field(default_factory=lambda: _env_str("LLM_PROVIDER", "ollama"))
+
+    # Provider API keys (empty = not set)
+    groq_api_key: str = field(default_factory=lambda: _env_str("GROQ_API_KEY", ""))
+
+    # Optional model override per provider (empty = use provider default)
+    groq_model: str = field(default_factory=lambda: _env_str("GROQ_MODEL", ""))
+
+    gemini_api_key: str = field(default_factory=lambda: _env_str("GEMINI_API_KEY", ""))
+    gemini_model: str = field(default_factory=lambda: _env_str("GEMINI_MODEL", ""))
+    gemini_base_url: str = field(
+        default_factory=lambda: _env_str(
+            "GEMINI_BASE_URL",
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
+    )
+    mistral_api_key: str = field(default_factory=lambda: _env_str("MISTRAL_API_KEY", ""))
+    mistral_model: str = field(default_factory=lambda: _env_str("MISTRAL_MODEL", ""))
+    mistral_base_url: str = field(
+        default_factory=lambda: _env_str("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
+    )
+
+    # Timeout (seconds) for cloud LLM calls
+    cloud_timeout: int = field(default_factory=lambda: _env_int("CLOUD_LLM_TIMEOUT", 60))
+
+    # Custom endpoint (only used when provider == "custom")
+    custom_base_url: str = field(default_factory=lambda: _env_str("LLM_BASE_URL", ""))
+    custom_api_key: str = field(default_factory=lambda: _env_str("LLM_API_KEY", ""))
+    custom_model: str = field(default_factory=lambda: _env_str("LLM_MODEL", ""))
+
+    @property
+    def is_ollama(self) -> bool:
+        return self.provider == "ollama"
+
+    @property
+    def active_model(self) -> str:
+        """Env-var default model for the current (env-configured) provider."""
+        return self.default_model_for(self.provider)
+
+    @property
+    def base_url(self) -> str:
+        """REST base URL for the current (env-configured) provider."""
+        return self.base_url_for(self.provider)
+
+    @property
+    def api_key(self) -> str:
+        """API key for the current (env-configured) provider."""
+        return self.api_key_for(self.provider)
+
+    # -- provider-parametrised variants ---------------------------------
+    # The Settings page can override the *provider* in the DB without
+    # touching any of the other llm_* env vars, so callers that resolve an
+    # effective provider (DB override or this env default) must re-derive
+    # base_url/api_key/model for *that* provider rather than relying on the
+    # properties above, which are only ever correct for ``self.provider``.
+    def default_model_for(self, provider: str) -> str:
+        if provider == "groq":
+            return self.groq_model or _PROVIDER_DEFAULT_MODELS[provider]
+        if provider == "gemini":
+            return self.gemini_model or _PROVIDER_DEFAULT_MODELS[provider]
+        if provider == "mistral":
+            return self.mistral_model or _PROVIDER_DEFAULT_MODELS[provider]
+        if provider == "custom":
+            return self.custom_model
+        return ""  # ollama uses OllamaConfig.model
+
+    def base_url_for(self, provider: str) -> str:
+        if provider == "gemini":
+            return self.gemini_base_url
+        if provider == "mistral":
+            return self.mistral_base_url
+        if provider == "custom":
+            return self.custom_base_url
+        return _PROVIDER_BASE_URLS.get(provider, "")
+
+    def api_key_for(self, provider: str) -> str:
+        if provider == "groq":
+            return self.groq_api_key
+        if provider == "gemini":
+            return self.gemini_api_key
+        if provider == "mistral":
+            return self.mistral_api_key
+        if provider == "custom":
+            return self.custom_api_key
+        return ""
+
+
 @dataclass(frozen=True)
 class MarketHours:
     """US equity regular trading session, expressed in America/New_York."""
@@ -186,7 +298,8 @@ class Settings:
         default_factory=lambda: [
             o.strip()
             for o in _env_str(
-                "CORS_ORIGINS", "http://localhost:5174,http://localhost:5173,http://localhost:3000"
+                "CORS_ORIGINS",
+                "http://localhost:5174,http://localhost:5173,http://localhost:3000",
             ).split(",")
             if o.strip()
         ]
@@ -202,6 +315,13 @@ class Settings:
         default_factory=lambda: _env_str("SCHEDULER_AUTO_START", "false").lower() == "true"
     )
 
+    # Admin token — used to gate GET /settings/llm/key (key-reveal endpoint).
+    # Set ADMIN_TOKEN in .env to choose your own password.
+    # If not set, a random UUID is auto-generated at first startup and stored
+    # in the DB (key: admin_token); it is also logged once so you can retrieve
+    # it from `docker logs offgrid-trader-backend`.
+    admin_token: str = field(default_factory=lambda: _env_str("ADMIN_TOKEN", ""))
+
     finnhub_api_key: str = field(default_factory=lambda: _env_str("FINNHUB_API_KEY", ""))
 
     # Optional FRED API key — enables the FRED REST API (api.stlouisfed.org)
@@ -212,6 +332,7 @@ class Settings:
     fred_api_key: str = field(default_factory=lambda: _env_str("FRED_API_KEY", ""))
 
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
     market_hours: MarketHours = field(default_factory=MarketHours)
     thresholds: Thresholds = field(default_factory=Thresholds)
     email: EmailConfig = field(default_factory=EmailConfig)
@@ -252,6 +373,13 @@ def _redacted_summary(cfg: Settings) -> dict:
             "host": cfg.ollama.host,
             "model": cfg.ollama.model,
             "timeout": cfg.ollama.timeout,
+        },
+        "llm": {
+            "provider": cfg.llm.provider,
+            "groq_api_key": mask(cfg.llm.groq_api_key),
+            "custom_api_key": mask(cfg.llm.custom_api_key),
+            "active_model": cfg.llm.active_model or cfg.ollama.model,
+            "base_url": cfg.llm.base_url or cfg.ollama.chat_url,
         },
         "market_hours": {
             "timezone": cfg.market_hours.timezone,

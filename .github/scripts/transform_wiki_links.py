@@ -57,18 +57,23 @@ def transform(text: str, repo: str) -> str:
 
     text = REPO_LINK_RE.sub(_repo_link, text)
 
-    # Rule 1b: ../../.vscode/foo.json  →  https://github.com/.../blob/main/.vscode/foo.json
-    # Handles non-.md repo-relative links that the wiki renderer can't traverse.
-    def _repo_nonmd_link(m: re.Match) -> str:
-        return f"]({blob_base}/{m.group('path')})"
-
-    text = REPO_NONMD_LINK_RE.sub(_repo_nonmd_link, text)
-
     # Rule 2: ../screenshots/foo.png → raw GitHub URL under docs/screenshots/
+    # NOTE: must run BEFORE Rule 1b — REPO_NONMD_LINK_RE also matches one-level
+    # relative paths like ../screenshots/foo.png (because (?:\.\.\/)*\.\.\/
+    # allows a single ../), which would convert them to wrong /blob/ URLs.
+    # Processing screenshots first prevents that mis-match.
     def _screenshot_link(m: re.Match) -> str:
         return f"]({raw_base}/docs/screenshots/{m.group('filename')})"
 
     text = SCREENSHOT_LINK_RE.sub(_screenshot_link, text)
+
+    # Rule 1b: ../../.vscode/foo.json  →  https://github.com/.../blob/main/.vscode/foo.json
+    # Handles non-.md repo-relative links that the wiki renderer can't traverse.
+    # Runs after screenshot links are already converted to absolute raw URLs.
+    def _repo_nonmd_link(m: re.Match) -> str:
+        return f"]({blob_base}/{m.group('path')})"
+
+    text = REPO_NONMD_LINK_RE.sub(_repo_nonmd_link, text)
 
     # Rule 3: architecture.md  →  architecture
     #         indicators.md#rsi  →  indicators#rsi
