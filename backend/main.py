@@ -54,14 +54,16 @@ from .database import (
 from .database import (
     get_analysis_history,
     get_effective_watchlist,
+    get_paper_orders,
     get_recent_analyses,
     get_recent_signals,
     get_setting,
     get_usage_stats,
     init_db,
     set_setting,
+    update_paper_order_status,
 )
-from .scheduler import scan_ticker_async, scheduler
+from .scheduler import scan_ticker_async, scheduler, sync_paper_orders
 
 _log = logging.getLogger(__name__)
 
@@ -86,6 +88,11 @@ def _clean_ticker(raw: str) -> str:
 def _log_safe(value: str) -> str:
     """Strip CR/LF from *value* so it can't forge extra log lines/entries."""
     return value.replace("\r", "").replace("\n", "")
+
+
+def _sse_frame(payload: dict[str, Any]) -> str:
+    """Encode *payload* as a single SSE data frame (``data: ...\\n\\n``)."""
+    return f"data: {json.dumps(payload)}\n\n"
 
 
 # --------------------------------------------------------------------------- #
@@ -182,7 +189,8 @@ class LLMSettingRequest(BaseModel):
     model: str | None = Field(None, description="Model override (empty = provider default)")
     base_url: str | None = Field(None, description="Custom base URL (used when provider=custom)")
     reasoning_effort: str | None = Field(
-        None, description="Reasoning effort for models that support it: none | low | medium | high"
+        None,
+        description="Reasoning effort for models that support it: none | low | medium | high",
     )
 
 
@@ -210,6 +218,76 @@ class TradingViewWebhook(BaseModel):
     def resolved_ticker(self) -> str | None:
         value = self.ticker or self.symbol
         return value.strip().upper() if value else None
+
+
+class BacktestCompareRequest(BaseModel):
+    run_ids: list[int] = Field(
+        ..., min_length=2, max_length=5, description="2-5 run IDs to compare"
+    )
+
+
+class BacktestRequest(BaseModel):
+    tickers: list[str] = Field(..., min_length=1, description="Ticker symbols to replay")
+    start_date: str = Field(..., description="Replay window start (YYYY-MM-DD)")
+    end_date: str = Field(..., description="Replay window end (YYYY-MM-DD)")
+    initial_balance: float = Field(10_000.0, gt=0, description="Virtual wallet starting balance")
+    confidence_floor: float | None = Field(
+        None,
+        ge=0,
+        le=100,
+        description="Confidence floor override (default: system setting)",
+    )
+    max_hold_days: int = Field(10, ge=1, le=120, description="Days before timing out a trade")
+    use_llm: bool = Field(False, description="Run LLM analysis on each replay day (slower)")
+    atr_multiple: float = Field(1.5, gt=0, description="ATR multiple for stop distance")
+    reward_risk: float = Field(2.0, gt=0, description="Reward-to-risk ratio for target")
+    requests_per_minute: int | None = Field(
+        None, ge=1, description="LLM RPM cap (None = no throttle)"
+    )
+    scan_interval_minutes: int = Field(
+        1440,
+        ge=5,
+        le=1440,
+        description=(
+            "How often to check for signals within each trading day. "
+            "1440 = once at end-of-day (default). "
+            "Common values: 15, 30, 60, 120, 240, 480."
+        ),
+    )
+    is_out_of_sample: bool = Field(
+        False,
+        description="Mark this window as a held-out test set (OOS). Used by AI Review evidence.",
+    )
+    max_concurrent_tickers: int | None = Field(
+        None,
+        ge=1,
+        le=20,
+        description="Max tickers processed in parallel (None = use system default)",
+    )
+    max_concurrent_llm: int | None = Field(
+        None,
+        ge=1,
+        le=10,
+        description="Max simultaneous LLM calls (None = use system default)",
+    )
+    position_size_pct: float = Field(
+        0.10,
+        ge=0.01,
+        le=0.50,
+        description=(
+            "Virtual wallet: fraction of initial_balance invested per signal "
+            "(0.01 = 1%, 0.10 = 10%, 0.50 = 50%). Stored in metrics_json."
+        ),
+    )
+    cashout_r: float | None = Field(
+        None,
+        ge=0.1,
+        le=10.0,
+        description=(
+            "Early profit-taking: close a trade as soon as its unrealised R "
+            "reaches this level, before the original target. None = disabled."
+        ),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -380,6 +458,256 @@ def set_scan_interval(request: ScanIntervalRequest) -> dict[str, Any]:
     return scheduler.status()
 
 
+class SignalScanLlmRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/settings/signal-scan-llm")
+def set_signal_scan_llm(request: SignalScanLlmRequest) -> dict[str, Any]:
+    """Enable or disable LLM calls for live signal scanning.
+
+    When disabled the AI-analysis skill is skipped and the pipeline runs
+    in rules-only mode — no LLM API quota is consumed by the scheduler.
+    Takes effect immediately (no restart required).
+    """
+    set_setting("signal_scan_llm_enabled", "true" if request.enabled else "false")
+    return {"signal_scan_llm_enabled": request.enabled}
+
+
+# ── Alpaca paper-trading settings ──────────────────────────────────────────
+
+
+class AlpacaSettingsRequest(BaseModel):
+    paper_url: str | None = None
+    key_id: str | None = None
+    secret_key: str | None = None
+    position_size: float | None = Field(None, ge=1, le=1_000_000)
+    min_confidence: float | None = Field(None, ge=0, le=100)
+    enabled: bool | None = None
+    # When True, clear DB-stored credentials so the client falls back to env vars.
+    use_env: bool | None = None
+
+
+@app.post("/settings/alpaca")
+def set_alpaca_settings(request: AlpacaSettingsRequest) -> dict[str, Any]:
+    """Persist Alpaca paper-trading credentials and trade parameters to DB.
+
+    All fields are optional — only non-None values are written.
+    When ``use_env=True`` the DB-stored key_id/secret are cleared so the
+    Alpaca client falls back to env-var values (ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY).
+    Takes effect immediately (no restart required).
+    """
+    if request.use_env:
+        # Clear DB overrides — client will read env vars directly.
+        set_setting("alpaca_key_id", "")
+        set_setting("alpaca_secret_key", "")
+    else:
+        if request.key_id is not None:
+            set_setting("alpaca_key_id", request.key_id.strip())
+        if request.secret_key is not None:
+            set_setting("alpaca_secret_key", request.secret_key.strip())
+    if request.paper_url is not None:
+        set_setting("alpaca_paper_url", request.paper_url.strip())
+    if request.position_size is not None:
+        set_setting("paper_trade_position_size", str(request.position_size))
+    if request.min_confidence is not None:
+        set_setting("paper_trade_min_confidence", str(request.min_confidence))
+    if request.enabled is not None:
+        set_setting("paper_trading_enabled", "true" if request.enabled else "false")
+    return {"saved": True}
+
+
+@app.get("/settings/alpaca/secret")
+def get_alpaca_secret(x_admin_token: str | None = Header(None)) -> dict[str, Any]:
+    """Reveal the stored Alpaca API secret (admin-token gated).
+
+    Requires the ``X-Admin-Token`` header to equal the installation's
+    admin token — same protection model as ``GET /settings/llm/key``.
+    """
+    cfg = get_settings()
+    expected = cfg.admin_token or get_setting("admin_token", "")
+    if not x_admin_token or x_admin_token != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Admin-Token")
+    secret = get_setting("alpaca_secret_key", "") or cfg.alpaca.secret_key
+    return {"secret": secret}
+
+
+# ── Paper trading data endpoints ───────────────────────────────────────────
+
+
+@app.get("/paper/account")
+def paper_account() -> dict[str, Any]:
+    """Return live Alpaca paper account summary (equity, buying_power, etc.).
+
+    Always attempts the Alpaca call regardless of the paper_trading_enabled flag
+    so the Settings page can test credentials before the feature is switched on.
+    """
+    from .alpaca import AlpacaError, get_client  # local import
+
+    try:
+        client = get_client()
+        account = client.get_account()
+        return {"enabled": True, "account": account}
+    except AlpacaError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+class AlpacaTestRequest(BaseModel):
+    key_id: str | None = None
+    secret_key: str | None = None
+    paper_url: str | None = None
+
+
+@app.post("/settings/alpaca/test")
+def test_alpaca_connection(request: AlpacaTestRequest) -> dict[str, Any]:
+    """Test Alpaca credentials without saving them to the DB.
+
+    Accepts credentials directly in the request body — uses whatever is currently
+    typed in the Settings form, before the user clicks Save.  Falls back to saved
+    DB / env values for any field left blank.
+    """
+    from .alpaca import AlpacaClient, AlpacaError  # local import
+
+    try:
+        client = AlpacaClient(
+            key_id=request.key_id or None,
+            secret_key=request.secret_key or None,
+            base_url=request.paper_url or None,
+        )
+        account = client.get_account()
+        return {"ok": True, "account": account}
+    except AlpacaError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/paper/orders")
+def paper_orders_list(limit: int = Query(100, ge=1, le=500)) -> dict[str, Any]:
+    """Return paper orders from the local DB (most recent first)."""
+    rows = get_paper_orders(limit=limit)
+    return {"count": len(rows), "orders": rows}
+
+
+@app.get("/paper/positions")
+def paper_positions() -> dict[str, Any]:
+    """Return live open positions from Alpaca."""
+    from .alpaca import AlpacaError, get_client  # local import
+
+    if get_setting("paper_trading_enabled", "false") != "true":
+        return {"enabled": False, "positions": []}
+    try:
+        client = get_client()
+        positions = client.get_positions()
+        return {"enabled": True, "positions": positions}
+    except AlpacaError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/paper/orders/{order_id}/cancel")
+def cancel_paper_order(order_id: int) -> dict[str, Any]:
+    """Cancel a pending paper order by its DB id."""
+    from .alpaca import AlpacaError, get_client  # local import
+
+    orders = get_paper_orders(limit=1000)
+    target = next((o for o in orders if o["id"] == order_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    alpaca_id = target.get("alpaca_order_id")
+    if not alpaca_id:
+        raise HTTPException(status_code=400, detail="Order has no Alpaca order ID")
+    try:
+        client = get_client()
+        client.cancel_order(alpaca_id)
+        update_paper_order_status(alpaca_id, {"status": "cancelled"})
+        return {"cancelled": True, "alpaca_order_id": alpaca_id}
+    except AlpacaError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/paper/sync")
+async def paper_sync() -> dict[str, Any]:
+    """Trigger an immediate poll of Alpaca order statuses."""
+    await sync_paper_orders()
+    return {"synced": True}
+
+
+@app.get("/paper/clock")
+def paper_clock() -> dict[str, Any]:
+    """Return Alpaca market clock (is_open, next_open, next_close)."""
+    from .alpaca import AlpacaError, get_client  # local import
+
+    try:
+        return get_client().get_clock()
+    except AlpacaError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/paper/history")
+def paper_portfolio_history(
+    period: str = Query("1M", pattern=r"^\d+[DWMA]$"),
+    timeframe: str = Query("1D", pattern=r"^(1|5|15|30)Min$|^1[HD]$"),
+) -> dict[str, Any]:
+    """Return Alpaca portfolio equity curve for the given period/timeframe."""
+    from .alpaca import AlpacaError, get_client  # local import
+
+    try:
+        return get_client().get_portfolio_history(period=period, timeframe=timeframe)
+    except AlpacaError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/paper/market/snapshots")
+def market_snapshots(
+    symbols: str = Query(..., description="Comma-separated tickers")
+) -> dict[str, Any]:
+    """Live market data snapshots for the given tickers (single Alpaca call).
+
+    Returns per-ticker: latest price, day OHLCV, prev-close, VWAP, volume,
+    bid/ask.  Does not require paper_trading_enabled — only valid credentials.
+    """
+    from .alpaca import AlpacaError, get_client  # local import
+
+    tickers = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not tickers:
+        raise HTTPException(status_code=400, detail="symbols required")
+    try:
+        raw = get_client().get_snapshots(tickers)
+        # Normalise to a friendlier shape so the frontend doesn't have to decode
+        # Alpaca's single-letter field names (c=close, h=high, l=low, v=volume…)
+        result: dict[str, Any] = {}
+        for ticker, snap in raw.items():
+            daily = snap.get("dailyBar") or {}
+            prev = snap.get("prevDailyBar") or {}
+            minute = snap.get("minuteBar") or {}
+            trade = snap.get("latestTrade") or {}
+            quote = snap.get("latestQuote") or {}
+            close = daily.get("c") or minute.get("c")
+            prev_close = prev.get("c")
+            day_chg = (close - prev_close) if (close and prev_close) else None
+            day_chg_pct = (
+                (day_chg / prev_close * 100) if (day_chg is not None and prev_close) else None
+            )
+            result[ticker] = {
+                "price": trade.get("p") or minute.get("c"),
+                "open": daily.get("o"),
+                "high": daily.get("h"),
+                "low": daily.get("l"),
+                "close": close,
+                "vwap": daily.get("vw"),
+                "volume": daily.get("v"),
+                "trades": daily.get("n"),
+                "prev_close": prev_close,
+                "day_chg": round(day_chg, 4) if day_chg is not None else None,
+                "day_chg_pct": round(day_chg_pct, 4) if day_chg_pct is not None else None,
+                "bid": quote.get("bp"),
+                "ask": quote.get("ap"),
+                "last_trade_at": trade.get("t"),
+                "minute_close": minute.get("c"),
+            }
+        return {"snapshots": result}
+    except AlpacaError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.get("/settings")
 def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
     """Return current effective settings (env defaults overridden by DB values)."""
@@ -417,6 +745,26 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
         # it as X-Admin-Token when the user clicks "Show" on the API key field.
         # Env var (ADMIN_TOKEN) takes priority; falls back to DB-generated UUID.
         "admin_token": cfg.admin_token or get_setting("admin_token", ""),
+        # Signal-scan LLM switch — default True (enabled) if never explicitly set.
+        "signal_scan_llm_enabled": get_setting("signal_scan_llm_enabled", "true") != "false",
+        # Alpaca paper trading
+        "alpaca_paper_url": (get_setting("alpaca_paper_url", "") or cfg.alpaca.paper_url),
+        # Key ID is not secret (analogous to a username) — safe to return in plain text
+        # so the Settings page can pre-fill the input field on load.
+        "alpaca_key_id": (get_setting("alpaca_key_id", "") or cfg.alpaca.key_id),
+        "alpaca_key_id_set": bool(get_setting("alpaca_key_id", "") or cfg.alpaca.key_id),
+        "alpaca_secret_set": bool(get_setting("alpaca_secret_key", "") or cfg.alpaca.secret_key),
+        # Env-only flags: True when the .env variable is non-empty (DB not considered).
+        # Used by the Settings UI to offer "Load Environment Default Values".
+        "alpaca_key_id_env_set": bool(cfg.alpaca.key_id),
+        "alpaca_secret_env_set": bool(cfg.alpaca.secret_key),
+        "paper_trading_enabled": get_setting("paper_trading_enabled", "false") == "true",
+        "paper_trade_position_size": float(get_setting("paper_trade_position_size", "") or 500),
+        "paper_trade_min_confidence": (
+            float(get_setting("paper_trade_min_confidence", ""))
+            if get_setting("paper_trade_min_confidence", "")
+            else None
+        ),
     }
 
 
@@ -576,6 +924,7 @@ async def analyze_ticker(request: AnalyzeRequest) -> dict[str, Any]:
         "analysis": result.get("analysis"),
         "opportunities": result["opportunities"],
         "actionable": result["actionable"],
+        "rules_checked": result.get("rules_checked"),
         "saved_signal_ids": result["saved_signal_ids"],
         "alerts": result["alerts"],
         "errors": result["errors"],
@@ -583,7 +932,7 @@ async def analyze_ticker(request: AnalyzeRequest) -> dict[str, Any]:
 
 
 @app.post("/analyze/stream")
-async def analyze_ticker_stream(  # noqa: C901
+async def analyze_ticker_stream(
     request: AnalyzeRequest,
 ) -> StreamingResponse:
     """On-demand analysis streamed as Server-Sent Events.
@@ -646,6 +995,7 @@ async def analyze_ticker_stream(  # noqa: C901
                 "market_data": ctx.market_data,
                 "opportunities": ctx.opportunities or [],
                 "actionable": ctx.actionable or [],
+                "rules_checked": ctx.rules_checked,
                 "saved_signal_ids": ctx.saved_signal_ids,
                 "alerts": ctx.alerts_sent,
                 "errors": ctx.errors,
@@ -806,6 +1156,82 @@ def reset_data() -> dict[str, Any]:
     return {"cleared": ["signals", "analysis_log"], **counts}
 
 
+# --------------------------------------------------------------------------- #
+# Data cache management
+# --------------------------------------------------------------------------- #
+@app.get("/data/cache/stats")
+def cache_stats() -> dict[str, Any]:
+    """Return current data-cache statistics (entry count, size, age range)."""
+    from .database import get_cache_stats
+
+    stats = get_cache_stats()
+    stats["total_kb"] = round((stats.get("total_bytes") or 0) / 1024, 1)
+    return stats
+
+
+@app.delete("/data/cache")
+def evict_cache(older_than_hours: int = Query(168, ge=1, le=8760)) -> dict[str, Any]:
+    """Evict data-cache entries older than *older_than_hours* hours (default 7 days).
+
+    Pass ``older_than_hours=0`` to clear everything (minimum enforced at 1).
+    """
+    from .database import evict_cache_entries
+
+    deleted = evict_cache_entries(older_than_hours=older_than_hours)
+    return {"deleted": deleted, "older_than_hours": older_than_hours}
+
+
+@app.get("/settings/performance")
+def get_performance_settings() -> dict[str, Any]:
+    """Return current parallelism settings and provider rate-limit reference."""
+    from .config import get_settings as _cfg
+    from .database import get_setting
+
+    cfg = _cfg()
+    concurrent_tickers = int(get_setting("concurrent_tickers") or 0) or cfg.concurrent_tickers
+    concurrent_llm = int(get_setting("concurrent_llm") or 0) or cfg.concurrent_llm
+
+    return {
+        "concurrent_tickers": concurrent_tickers,
+        "concurrent_llm": concurrent_llm,
+        "rate_limits": {
+            "yfinance": {
+                "note": "No official rate limit. 3-4 concurrent requests are safe. "
+                "Permanent cache means most calls are instant after first run.",
+                "recommended_concurrent": 4,
+            },
+            "finnhub": {
+                "free_tier_rpm": 60,
+                "note": "Date-keyed cache means 1 network call per ticker per day max.",
+            },
+            "llm_providers": {
+                "gemini_free": {"rpm": 15, "rpd": 1500, "tpm": 1_000_000},
+                "groq": {"rpm": 30, "note": "Varies by model; check Groq console."},
+                "openai": {"note": "Tier-dependent; check platform.openai.com/usage."},
+                "mistral": {"rpm": 30, "rpd": 500},
+                "ollama": {"note": "Local inference — no external rate limits."},
+            },
+        },
+    }
+
+
+@app.post("/settings/performance")
+def save_performance_settings(
+    concurrent_tickers: int = Query(..., ge=1, le=20),
+    concurrent_llm: int = Query(..., ge=1, le=10),
+) -> dict[str, Any]:
+    """Persist parallelism settings to the DB."""
+    from .database import set_setting
+
+    set_setting("concurrent_tickers", str(concurrent_tickers))
+    set_setting("concurrent_llm", str(concurrent_llm))
+    return {
+        "concurrent_tickers": concurrent_tickers,
+        "concurrent_llm": concurrent_llm,
+        "saved": True,
+    }
+
+
 @app.get("/analysis/{ticker}")
 def analysis_history(
     ticker: str,
@@ -828,8 +1254,19 @@ def usage_stats(
     Returns totals and per-provider/per-day breakdowns for the last *days* days.
     Prompt and completion tokens are stored per analysis run — rows created before
     token tracking was added will contribute 0 to the totals (SQL NULL → 0).
+    Also returns active_provider / active_model so the header chip can filter
+    to the currently selected model's tokens.
     """
-    return get_usage_stats(days=days)
+    stats = get_usage_stats(days=days)
+    active_prov = get_setting("llm_provider") or None
+    # DB model may be empty if the provider uses env-var config only; fall back to provider env var.
+    _prov_env = f"{(active_prov or '').upper()}_MODEL"
+    active_model = (
+        get_setting("llm_model") or os.environ.get(_prov_env) or os.environ.get("LLM_MODEL") or None
+    )
+    stats["active_provider"] = active_prov
+    stats["active_model"] = active_model
+    return stats
 
 
 @app.get("/provider/quota")
@@ -853,10 +1290,18 @@ async def provider_quota() -> dict[str, Any]:
     settings = _cfg()
 
     if provider == "ollama":
-        return {"provider": "ollama", "quota": "n/a", "note": "Ollama runs locally — no quota."}
+        return {
+            "provider": "ollama",
+            "quota": "n/a",
+            "note": "Ollama runs locally — no quota.",
+        }
 
     if provider == "custom":
-        return {"provider": "custom", "quota": "n/a", "note": "Custom provider — quota unknown."}
+        return {
+            "provider": "custom",
+            "quota": "n/a",
+            "note": "Custom provider — quota unknown.",
+        }
 
     # Resolve API key (DB takes precedence over env).
     api_key = _get_db_setting("llm_api_key", "") or settings.llm.api_key_for(provider)
@@ -867,13 +1312,13 @@ async def provider_quota() -> dict[str, Any]:
             "Set it via Settings → LLM Provider or the environment variable.",
         )
 
+    import httpx
+
     # ------------------------------------------------------------------ groq
     if provider == "groq":
         # Groq exposes rate-limit state via response headers on any call.
         # We send a minimal 1-token prompt to a cheap model and harvest the headers.
         try:
-            import httpx
-
             base_url = _get_db_setting("llm_base_url", "") or settings.llm.base_url_for(provider)
             resp = await asyncio.to_thread(
                 lambda: httpx.post(
@@ -910,32 +1355,21 @@ async def provider_quota() -> dict[str, Any]:
 
     # --------------------------------------------------------------- mistral
     if provider == "mistral":
-        try:
-            import httpx
-
-            base_url = (
-                _get_db_setting("llm_base_url", "")
-                or settings.llm.base_url_for(provider)
-                or "https://api.mistral.ai/v1"
-            )
-            resp = await asyncio.to_thread(
-                lambda: httpx.get(
-                    f"{base_url}/usage",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    timeout=15,
-                )
-            )
-        except Exception as exc:
-            raise HTTPException(
-                status_code=502, detail=f"Mistral usage call failed: {exc}"
-            ) from exc
-
-        if resp.status_code == 200:
-            return {"provider": "mistral", **resp.json()}
-        raise HTTPException(
-            status_code=resp.status_code,
-            detail=f"Mistral /v1/usage returned {resp.status_code}: {resp.text[:300]}",
-        )
+        # Mistral does not expose a programmatic per-key usage/quota REST
+        # endpoint in their v1 API.  Return static free-tier limits so the
+        # pre-flight notifier still has something to show.
+        return {
+            "provider": "mistral",
+            "quota": "static",
+            "note": (
+                "Mistral does not expose a usage API on the v1 path. "
+                "Monitor consumption at https://console.mistral.ai/usage."
+            ),
+            "free_tier_limits": {
+                "mistral-small-latest": {"rpm": 30, "tpm": 100_000, "rpd": 500},
+                "mistral-large-latest": {"rpm": 30, "tpm": 100_000, "rpd": 500},
+            },
+        }
 
     # --------------------------------------------------------------- gemini
     if provider == "gemini":
@@ -949,11 +1383,607 @@ async def provider_quota() -> dict[str, Any]:
                 "Check your usage at https://aistudio.google.com/app/apikey"
             ),
             "free_tier_limits": {
+                # Source: https://ai.google.dev/gemini-api/docs/rate-limits (free tier)
+                "gemini-3.5-flash-lite": {"rpm": 15, "tpm": 1_000_000, "rpd": 1_500},
+                "gemini-3.5-flash": {"rpm": 15, "tpm": 1_000_000, "rpd": 1_500},
                 "gemini-2.0-flash": {"rpm": 15, "tpm": 1_000_000, "rpd": 1_500},
                 "gemini-1.5-flash": {"rpm": 15, "tpm": 1_000_000, "rpd": 1_500},
+                "gemini-1.5-flash-8b": {"rpm": 15, "tpm": 250_000, "rpd": 1_500},
                 "gemini-1.5-pro": {"rpm": 2, "tpm": 32_000, "rpd": 50},
             },
             "dashboard_url": "https://aistudio.google.com/app/apikey",
         }
 
     raise HTTPException(status_code=400, detail=f"Unknown provider: {provider!r}")
+
+
+# --------------------------------------------------------------------------- #
+# Backtesting endpoints
+# --------------------------------------------------------------------------- #
+@app.post("/backtest/stream")
+async def backtest_stream(request: BacktestRequest) -> StreamingResponse:
+    """Run a backtest and stream progress + result as SSE events.
+
+    Event types emitted:
+    * ``{"type":"progress", "ticker":..., "day":..., "pct":...}``
+    * ``{"type":"fallback", "from":..., "to":..., "reason":...}`` (LLM mode)
+    * ``{"type":"quota_stop", "ticker":..., "day":..., "msg":...}`` (LLM quota)
+    * ``{"type":"result", "run_id":..., "report":...}``
+    * ``{"type":"error", "msg":...}``
+    """
+    from .backtest import BacktestParams, run_backtest
+    from .config import get_settings as _cfg
+
+    # Validate and sanitise each ticker.
+    clean_tickers = [_clean_ticker(t) for t in request.tickers]
+
+    # Resolve confidence floor (request overrides system setting).
+    floor = (
+        request.confidence_floor
+        if request.confidence_floor is not None
+        else _cfg().thresholds.confidence_floor
+    )
+
+    params = BacktestParams(
+        tickers=clean_tickers,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        initial_balance=request.initial_balance,
+        confidence_floor=floor,
+        max_hold_days=request.max_hold_days,
+        use_llm=request.use_llm,
+        atr_multiple=request.atr_multiple,
+        reward_risk=request.reward_risk,
+        requests_per_minute=request.requests_per_minute,
+        scan_interval_minutes=request.scan_interval_minutes,
+        is_out_of_sample=request.is_out_of_sample,
+        position_size_pct=request.position_size_pct,
+        cashout_r=request.cashout_r,
+        max_concurrent_tickers=(
+            request.max_concurrent_tickers
+            or int(get_setting("concurrent_tickers") or 0)
+            or _cfg().concurrent_tickers
+        ),
+        max_concurrent_llm=(
+            request.max_concurrent_llm
+            or int(get_setting("concurrent_llm") or 0)
+            or _cfg().concurrent_llm
+        ),
+    )
+
+    event_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+    def _emit(evt: dict[str, Any]) -> None:
+        event_queue.put_nowait(evt)
+
+    async def _stream():
+        async def _run():
+            try:
+                report = await asyncio.to_thread(run_backtest, params, emit=_emit)
+                event_queue.put_nowait(
+                    {
+                        "type": "result",
+                        "run_id": report["run_id"],
+                        "report": report,
+                    }
+                )
+            except Exception as exc:
+                event_queue.put_nowait({"type": "error", "msg": "Backtest failed; check logs."})
+                _log.exception("backtest_stream error: %s", _log_safe(str(exc)))
+            finally:
+                event_queue.put_nowait(None)  # sentinel
+
+        task = asyncio.create_task(_run())
+        try:
+            while True:
+                evt = await event_queue.get()
+                if evt is None:
+                    break
+                yield _sse_frame(evt)
+        finally:
+            task.cancel()
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/backtest")
+def list_backtest_runs() -> dict[str, Any]:
+    """List all backtest runs, newest first."""
+    from .database import get_backtest_runs
+
+    return {"runs": get_backtest_runs()}
+
+
+def _compute_comparability(runs: list[dict[str, Any]]) -> tuple[str, list[str]]:
+    """Compute a comparability grade for a set of backtest runs.
+
+    Returns ``(grade, reasons)`` where grade is ``"full"``, ``"partial"``, or ``"none"``.
+    """
+    reasons: list[str] = []
+    r0 = runs[0]
+    same_tickers = all(
+        sorted(r.get("tickers") or []) == sorted(r0.get("tickers") or []) for r in runs
+    )
+    same_window = all(
+        r.get("start_date") == r0.get("start_date") and r.get("end_date") == r0.get("end_date")
+        for r in runs
+    )
+    same_params = all(
+        r.get("atr_multiple") == r0.get("atr_multiple")
+        and r.get("reward_risk") == r0.get("reward_risk")
+        for r in runs
+    )
+    modes = {r.get("signal_mode") for r in runs}
+    if same_tickers and same_window and same_params:
+        if len(modes) > 1:
+            reasons.append("Same universe, window, and execution params; signal_mode is controlled")
+        else:
+            reasons.append("All run parameters are identical")
+        return "full", reasons
+    if same_tickers:
+        if not same_window:
+            reasons.append("Date windows differ between runs")
+        if not same_params:
+            reasons.append("ATR multiple or reward_risk differ between runs")
+        return "partial", reasons
+    reasons.append("Different ticker universes — runs are not directly comparable")
+    return "none", reasons
+
+
+@app.post("/backtest/compare")
+async def backtest_compare(
+    request: BacktestCompareRequest,
+) -> dict[str, Any]:
+    """Ask the LLM to compare 2-5 backtest runs using the v2 comparability-gated methodology.
+
+    Returns ``comparability``, ``summary``, ``winner_run_id``, ``winner_confidence``,
+    ``llm_value_add``, per-run ``strengths``/``weaknesses``, and ``recommendation``.
+    Persisted to ``backtest_compares`` for full historicity.
+    """
+    from .analysis import LLMError, _repair_llm_json, _validate_llm_json, call_llm
+    from .database import get_backtest_run, save_backtest_compare
+
+    # Load every requested run; 404 on any missing.
+    runs: list[dict[str, Any]] = []
+    for rid in request.run_ids:
+        r = get_backtest_run(rid)
+        if r is None:
+            raise HTTPException(status_code=404, detail=f"Backtest run {rid} not found.")
+        runs.append(r)
+
+    # Compute comparability grade before calling LLM.
+    comparability, comp_reasons = _compute_comparability(runs)
+
+    # Build matched mode pairs (rules vs LLM on same universe+window).
+    rules_runs = [r for r in runs if r.get("signal_mode") == "rules"]
+    llm_runs = [r for r in runs if r.get("signal_mode") == "llm"]
+    matched_pairs = [
+        {
+            "rules_run_id": str(rr["id"]),
+            "llm_or_hybrid_run_id": str(lr["id"]),
+            "paired_delta_expectancy_r": round(
+                (lr.get("metrics", {}).get("avg_r_multiple") or 0)
+                - (rr.get("metrics", {}).get("avg_r_multiple") or 0),
+                3,
+            ),
+        }
+        for rr in rules_runs
+        for lr in llm_runs
+        if sorted(rr.get("tickers") or []) == sorted(lr.get("tickers") or [])
+        and rr.get("start_date") == lr.get("start_date")
+    ]
+
+    # Build the v2 comparison payload.
+    run_summaries = []
+    for r in runs:
+        m = r.get("metrics") or {}
+        run_summaries.append(
+            {
+                "run_id": str(r["id"]),
+                "mode": r.get("signal_mode", "rules"),
+                "model_id": r.get("llm_model"),
+                "is_out_of_sample": bool(r.get("is_out_of_sample")),
+                "total_trades": m.get("total_trades", 0),
+                "effective_trades": m.get("effective_trades", m.get("total_trades", 0)),
+                "win_rate": m.get("win_rate"),
+                "avg_r_multiple": m.get("avg_r_multiple"),
+                "expectancy_ci95": m.get("expectancy_ci95"),
+                "sharpe": m.get("sharpe"),
+                "max_drawdown_r": m.get("max_drawdown"),
+                "after_cost_avg_r": m.get("after_cost_avg_r"),
+                "fee_stress_pass": m.get("fee_stress_pass"),
+                "ticker_concentration": m.get("ticker_concentration"),
+                "confidence_floor": r.get("confidence_floor"),
+            }
+        )
+
+    comparison_payload = {
+        "comparison_id": f"cmp_{'_'.join(str(i) for i in request.run_ids)}",
+        "comparability": {
+            "backend_grade": comparability,
+            "matched_fields": [],
+            "different_fields": [],
+            "normalization_notes": comp_reasons,
+        },
+        "runs": run_summaries,
+        "matched_mode_pairs": matched_pairs,
+    }
+
+    _subs = {"backtest_comparison_json": json.dumps(comparison_payload, default=str)}
+    user_prompt = _load_prompt("backtest_compare_user.md")
+    for _k, _v in _subs.items():
+        user_prompt = user_prompt.replace(f"{{{_k}}}", _v)
+    system_prompt = _load_prompt("backtest_compare_system.md")
+
+    try:
+        raw, model_used, pt, ct = await asyncio.to_thread(call_llm, user_prompt, system_prompt)
+    except LLMError as exc:
+        raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
+    except Exception as exc:
+        _log.exception("backtest_compare error: %s", _log_safe(str(exc)))
+        raise HTTPException(status_code=503, detail=f"Compare failed: {exc}") from exc
+
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+    try:
+        result: dict[str, Any] = json.loads(cleaned)
+    except Exception:
+        result = {
+            "summary": raw,
+            "comparability": comparability,
+            "winner_run_id": None,
+            "winner_confidence": "none",
+            "per_run": [],
+            "recommendation": "",
+        }
+
+    # Schema validation + one-shot repair (pass system_prompt so repair uses the
+    # compare instructions, not the default signal-scan prompt).
+    errs = _validate_llm_json(result, "backtest_comparison.schema.json")
+    if errs:
+        _log.warning(
+            "backtest_compare v2 schema errors: %s",
+            str(errs).replace("\r", "").replace("\n", ""),
+        )
+        try:
+            repaired = _repair_llm_json(raw, errs, call_llm, system_prompt)
+            result = json.loads(repaired)
+        except Exception:  # noqa: S110
+            pass
+
+    # Inject backend-computed comparability so frontend always has it.
+    result.setdefault("comparability", comparability)
+    result.setdefault("comparability_reasons", comp_reasons)
+    result["model_used"] = model_used
+    result["prompt_tokens"] = pt
+    result["completion_tokens"] = ct
+
+    try:
+        save_backtest_compare(
+            run_ids=request.run_ids,
+            result_json=json.dumps(result, default=str),
+            llm_provider=get_setting("llm_provider") or get_settings().llm.provider,
+            llm_model=model_used,
+            prompt_tokens=pt or 0,
+            completion_tokens=ct or 0,
+        )
+    except Exception:  # noqa: S110
+        pass  # non-fatal
+
+    return result
+
+
+@app.post("/backtest/{run_id}/experiment-advisor")
+async def backtest_experiment_advisor(run_id: int) -> dict[str, Any]:
+    """Experiment Selector v2: backend generates candidates; LLM selects one.
+
+    Returns the ``selected_candidate`` (full dict with hypothesis, changes,
+    success/failure criteria, overfitting_risk) plus ``reasoning``,
+    ``model_used``, ``prompt_tokens``, ``completion_tokens``.
+    Persisted to ``backtest_floor_suggests`` for full historicity.
+    """
+    from .analysis import LLMError, _repair_llm_json, _validate_llm_json, call_llm
+    from .backtest import generate_experiment_candidates
+    from .database import get_backtest_run, save_backtest_floor_suggest
+
+    run = get_backtest_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Backtest run {run_id} not found.")
+
+    metrics = run.get("metrics") or {}
+    floor_sweep: list[dict] = metrics.get("floor_sweep") or []
+
+    # Backend generates candidates; LLM only selects.
+    # ATR and hold-day candidates are always available; floor candidates require floor_sweep.
+    candidates = generate_experiment_candidates(run)
+    if not candidates:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Could not generate experiment candidates. "
+                "Run a backtest first — floor sweep candidates require at least one completed run."
+            ),
+        )
+
+    current_floor = run.get("confidence_floor") or 65
+
+    selection_payload = {
+        "current_run": {
+            "run_id": str(run_id),
+            "is_out_of_sample": bool(run.get("is_out_of_sample")),
+            "metrics": {
+                "total_trades": metrics.get("total_trades", 0),
+                "win_rate": metrics.get("win_rate"),
+                "avg_r_multiple": metrics.get("avg_r_multiple"),
+                "expectancy_ci95": metrics.get("expectancy_ci95"),
+                "sharpe": metrics.get("sharpe"),
+                "max_drawdown_r": metrics.get("max_drawdown"),
+                "after_cost_avg_r": metrics.get("after_cost_avg_r"),
+                "fee_stress_pass": metrics.get("fee_stress_pass"),
+            },
+            "diagnostics": {
+                "performance_by_floor_train": floor_sweep,
+                "performance_by_ticker": metrics.get("per_ticker") or [],
+            },
+        },
+        "research_constraints": {
+            "minimum_effective_trades": 10,
+            "unchanged_fields": ["tickers", "start_date", "end_date"],
+            "objective": "Improve after-cost expectancy (avg_r) while maintaining ≥10 trades",
+        },
+        "candidate_experiments": candidates,
+    }
+
+    _subs = {"experiment_selection_json": json.dumps(selection_payload, default=str)}
+    user_prompt = _load_prompt("experiment_selector_user.md")
+    for _k, _v in _subs.items():
+        user_prompt = user_prompt.replace(f"{{{_k}}}", _v)
+    system_prompt = _load_prompt("experiment_selector_system.md")
+
+    try:
+        raw, model_used, pt, ct = await asyncio.to_thread(call_llm, user_prompt, system_prompt)
+    except LLMError as exc:
+        raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
+    except Exception as exc:
+        _log.error("backtest_experiment_advisor error for run %d", run_id)
+        raise HTTPException(status_code=503, detail=f"Experiment Advisor failed: {exc}") from exc
+
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+    try:
+        result: dict[str, Any] = json.loads(cleaned)
+    except Exception:
+        result = {"selected_candidate_id": None, "reasoning": raw}
+
+    # Schema validation + one-shot repair (pass system_prompt so repair uses the
+    # experiment-selector instructions, not the default signal-scan prompt).
+    errs = _validate_llm_json(result, "experiment_selection.schema.json")
+    if errs:
+        _log.warning(
+            "experiment_advisor v2 schema errors run=%d: %s",
+            run_id,
+            str(errs).replace("\r", "").replace("\n", ""),
+        )
+        try:
+            repaired = _repair_llm_json(raw, errs, call_llm, system_prompt)
+            result = json.loads(repaired)
+        except Exception:  # noqa: S110
+            pass
+
+    # Resolve the selected candidate from the backend-generated list.
+    sel_id = result.get("selected_candidate_id")
+    selected_candidate = next((c for c in candidates if c.get("candidate_id") == sel_id), None)
+
+    # LLM returned null or an unrecognised ID — auto-pick the safest (lowest
+    # overfitting_risk) candidate so the card is never empty.  Mark it so the
+    # frontend can show an "auto-selected" note.
+    if selected_candidate is None and candidates:
+        low_risk = [c for c in candidates if c.get("overfitting_risk") == "low"]
+        selected_candidate = dict(low_risk[0] if low_risk else candidates[0])
+        selected_candidate["_auto_selected"] = True
+        _log.info(
+            "experiment_advisor run=%d: LLM returned unknown id %s; auto-selected %s",
+            run_id,
+            str(sel_id).replace("\r", "").replace("\n", ""),
+            str(selected_candidate["candidate_id"])
+            .replace("\r", "")
+            .replace("\n", ""),
+        )
+
+    result["selected_candidate"] = selected_candidate
+    result["candidates"] = candidates  # send all so frontend can show alternatives
+    result["model_used"] = model_used
+    result["prompt_tokens"] = pt
+    result["completion_tokens"] = ct
+    # Normalise v2 schema field names → what frontend reads.
+    # schema: "why" → reasoning, "diagnosis" + "next_step" kept as-is.
+    if "reasoning" not in result:
+        result["reasoning"] = result.get("why") or result.get("diagnosis") or ""
+
+    # Persist using the floor from the selected candidate (if any).
+    selected_floor = int(
+        (selected_candidate or {}).get("changes", {}).get("confidence_floor") or current_floor
+    )
+    try:
+        save_backtest_floor_suggest(
+            run_id=run_id,
+            recommended_floor=selected_floor,
+            reasoning=result.get("reasoning"),
+            trade_off=result.get("next_action"),
+            result_json=json.dumps(result, default=str),
+            llm_provider=get_setting("llm_provider") or get_settings().llm.provider,
+            llm_model=model_used,
+            prompt_tokens=pt or 0,
+            completion_tokens=ct or 0,
+        )
+    except Exception:  # noqa: S110
+        pass  # non-fatal
+
+    return result
+
+
+@app.get("/backtest/{run_id}")
+def get_backtest_run_detail(run_id: int) -> dict[str, Any]:
+    """Return a single backtest run with all its trades."""
+    from .database import get_backtest_run
+
+    run = get_backtest_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Backtest run {run_id} not found.")
+    return run
+
+
+@app.delete("/backtest/{run_id}")
+def delete_backtest_run_endpoint(run_id: int) -> dict[str, Any]:
+    """Delete a backtest run and its trades."""
+    from .database import delete_backtest_run
+
+    deleted = delete_backtest_run(run_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Backtest run {run_id} not found.")
+    return {"deleted": True, "run_id": run_id}
+
+
+_PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
+
+
+def _load_prompt(filename: str) -> str:
+    """Load a prompt template from ``backend/prompts/``."""
+    path = os.path.normpath(os.path.join(_PROMPTS_DIR, filename))
+    with open(path, encoding="utf-8") as fh:
+        return fh.read().strip()
+
+
+@app.post("/backtest/{run_id}/review")
+async def backtest_review(run_id: int) -> dict[str, Any]:
+    """Ask the LLM to evaluate a backtest run using the v2 methodology.
+
+    Returns: ``verdict``, ``deployment_stage``, ``edge_assessment``, ``evidence_quality``,
+    ``strengths``, ``weaknesses``, ``blocking_issues``, ``next_action``,
+    ``model_used``, ``prompt_tokens``, ``completion_tokens``.
+    """
+    from .analysis import LLMError, _repair_llm_json, _validate_llm_json, call_llm
+    from .database import (
+        get_backtest_run,
+        save_backtest_review_tokens,
+        update_backtest_run,
+    )
+
+    run = get_backtest_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Backtest run {run_id} not found.")
+
+    metrics = run.get("metrics") or {}
+
+    # Build enriched v2 payload for the LLM.
+    review_payload = {
+        "run": {
+            "run_id": str(run_id),
+            "mode": run.get("signal_mode", "rules"),
+            "universe": run.get("tickers") or [],
+            "start": run.get("start_date", ""),
+            "end": run.get("end_date", ""),
+            "is_out_of_sample": bool(run.get("is_out_of_sample")),
+        },
+        "metric_definitions": {
+            "return_frequency": "per_trade",
+            "sharpe_method": "mean_R / std_R",
+            "max_drawdown_unit": "R",
+            "false_positive_definition": "losing trade",
+        },
+        "metrics": {
+            "total_trades": metrics.get("total_trades", 0),
+            "effective_trades": metrics.get("effective_trades", metrics.get("total_trades", 0)),
+            "win_rate": metrics.get("win_rate"),
+            "avg_r_multiple": metrics.get("avg_r_multiple"),
+            "expectancy_ci95": metrics.get("expectancy_ci95"),
+            "sharpe": metrics.get("sharpe"),
+            "max_drawdown_r": metrics.get("max_drawdown"),
+            "false_positive_rate": metrics.get("false_positive_rate"),
+            "after_cost_avg_r": metrics.get("after_cost_avg_r"),
+        },
+        "robustness": {
+            "fee_stress_pass": metrics.get("fee_stress_pass"),
+            "ticker_concentration": metrics.get("ticker_concentration"),
+            "number_of_trials": 1,
+            "untouched_holdout": bool(run.get("is_out_of_sample")),
+        },
+        "per_ticker": metrics.get("per_ticker") or [],
+        "backend_flags": [],
+    }
+
+    _subs = {"backtest_run_json": json.dumps(review_payload, default=str)}
+    user_prompt = _load_prompt("backtest_review_user.md")
+    for _k, _v in _subs.items():
+        user_prompt = user_prompt.replace(f"{{{_k}}}", _v)
+    system_prompt = _load_prompt("backtest_review_system.md")
+
+    try:
+        raw, model_used, pt, ct = await asyncio.to_thread(call_llm, user_prompt, system_prompt)
+    except LLMError as exc:
+        raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
+    except Exception as exc:
+        _log.error("backtest_review error for run %d", run_id)
+        raise HTTPException(status_code=503, detail=f"Review failed: {exc}") from exc
+
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+    try:
+        result: dict[str, Any] = json.loads(cleaned)
+    except Exception:
+        result = {
+            "verdict": raw,
+            "deployment_stage": "research_only",
+            "edge_assessment": "inconclusive",
+            "evidence_quality": "weak",
+            "strengths": [],
+            "weaknesses": [],
+            "blocking_issues": [],
+            "next_action": "Inspect raw LLM output",
+        }
+
+    # Schema validation + one-shot repair (pass system_prompt so repair uses the
+    # review instructions, not the default signal-scan prompt).
+    errs = _validate_llm_json(result, "backtest_review.schema.json")
+    if errs:
+        _log.warning(
+            "backtest_review v2 schema errors run=%d: %s",
+            run_id,
+            str(errs).replace("\r", "").replace("\n", ""),
+        )
+        try:
+            repaired = _repair_llm_json(raw, errs, call_llm, system_prompt)
+            result = json.loads(repaired)
+        except Exception:  # noqa: S110
+            pass
+
+    result["model_used"] = model_used
+    result["prompt_tokens"] = pt
+    result["completion_tokens"] = ct
+
+    # Persist token usage + deployment_stage.
+    try:
+        save_backtest_review_tokens(run_id, pt or 0, ct or 0)
+        stage = result.get("deployment_stage")
+        if stage:
+            update_backtest_run(run_id, status="done", deployment_stage=stage)
+    except Exception:  # noqa: S110
+        pass  # non-fatal
+
+    return result

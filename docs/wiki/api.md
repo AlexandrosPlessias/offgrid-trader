@@ -619,3 +619,190 @@ Message body:
 ```json
 { "ticker": "{{ticker}}", "action": "{{strategy.order.action}}", "price": {{close}} }
 ```
+
+---
+
+## Backtesting
+
+Full request/response documentation is in [backtesting.md](backtesting.md). Quick reference:
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/backtest/stream` | Start a backtest; returns SSE stream (`progress`, `fallback`, `quota_stop`, `result`, `error`) |
+| `GET` | `/backtest` | List all past runs |
+| `GET` | `/backtest/{run_id}` | Fetch a specific run including all its trades |
+| `DELETE` | `/backtest/{run_id}` | Delete a run and cascade-delete its trades |
+
+---
+
+## Paper Trading (Alpaca)
+
+Requires Alpaca credentials in Settings → 📈 Paper Trading. All endpoints work even when the `paper_trading_enabled` toggle is off (you can check the account and live prices without enabling auto-placement).
+
+### `GET /paper/account`
+
+Live Alpaca account summary.
+
+**Response**
+```json
+{
+  "equity": 100234.56,
+  "last_equity": 100100.00,
+  "day_pnl": 134.56,
+  "day_pnl_pct": 0.1344,
+  "cash": 82500.00,
+  "buying_power": 165000.00,
+  "portfolio_value": 100234.56,
+  "long_market_value": 17734.56,
+  "short_market_value": 0.0,
+  "daytrade_count": 0,
+  "currency": "USD",
+  "status": "ACTIVE"
+}
+```
+
+```bash
+curl http://localhost:8010/paper/account
+```
+
+---
+
+### `GET /paper/orders`
+
+Local DB paper orders (most recent first), joined with signal data.
+
+**Query params:** `limit` (default 100)
+
+```bash
+curl http://localhost:8010/paper/orders
+```
+
+---
+
+### `GET /paper/positions`
+
+Live open positions from Alpaca.
+
+```bash
+curl http://localhost:8010/paper/positions
+```
+
+---
+
+### `POST /paper/orders/{order_id}/cancel`
+
+Cancel a pending order by its local DB id. Calls `DELETE /v2/orders/{alpaca_id}` on Alpaca then updates the local status.
+
+```bash
+curl -X POST http://localhost:8010/paper/orders/42/cancel
+```
+
+---
+
+### `POST /paper/sync`
+
+Trigger an immediate Alpaca order-status poll (fills in automatically after each scan; this is the manual trigger).
+
+```bash
+curl -X POST http://localhost:8010/paper/sync
+```
+
+---
+
+### `GET /paper/clock`
+
+Current Alpaca market clock.
+
+**Response**
+```json
+{
+  "timestamp": "2026-08-31T10:32:00-04:00",
+  "is_open": true,
+  "next_open": "2026-09-01T09:30:00-04:00",
+  "next_close": "2026-08-31T16:00:00-04:00"
+}
+```
+
+---
+
+### `GET /paper/history`
+
+Portfolio equity curve for charting.
+
+**Query params:** `period` (default `1M`; valid: `1D`, `1W`, `1M`, `3M`, `6M`, `1A`), `timeframe` (default `1D`; valid: `1Min`, `5Min`, `15Min`, `1H`, `1D`)
+
+```bash
+curl "http://localhost:8010/paper/history?period=1M&timeframe=1D"
+```
+
+---
+
+### `GET /paper/market/snapshots`
+
+Live market data snapshots for a list of tickers (Alpaca data API). Called by the Dashboard watchlist every 30 s during market hours.
+
+**Query params:** `symbols` — comma-separated ticker list (max 50)
+
+**Response**
+```json
+{
+  "market_open": true,
+  "snapshots": {
+    "AAPL": {
+      "price": 185.42,
+      "open": 184.10,
+      "high": 186.00,
+      "low": 183.80,
+      "close": 185.42,
+      "vwap": 184.95,
+      "volume": 42381920,
+      "prev_close": 183.00,
+      "day_chg": 2.42,
+      "day_chg_pct": 1.32,
+      "bid": 185.40,
+      "ask": 185.44,
+      "last_trade_at": "2026-08-31T14:32:00Z"
+    }
+  }
+}
+```
+
+```bash
+curl "http://localhost:8010/paper/market/snapshots?symbols=AAPL,MSFT,NVDA"
+```
+
+---
+
+### `POST /settings/alpaca`
+
+Save Alpaca credentials and paper trading settings.
+
+**Request body**
+```json
+{
+  "paper_url": "https://paper-api.alpaca.markets",
+  "key_id": "PKxxxxxxx",
+  "secret_key": "xxxxxxx",
+  "use_env": false,
+  "paper_trading_enabled": true,
+  "position_size": 500.0,
+  "min_confidence": 70.0
+}
+```
+
+Pass `"use_env": true` to clear DB credentials and revert to `.env` values.
+
+---
+
+### `POST /settings/alpaca/test`
+
+Test credentials without saving them. Returns account data on success or an error message on failure.
+
+**Request body**
+```json
+{
+  "key_id": "PKxxxxxxx",
+  "secret_key": "xxxxxxx",
+  "paper_url": "https://paper-api.alpaca.markets"
+}
+```

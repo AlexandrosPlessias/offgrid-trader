@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   ResponsiveContainer,
   BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ReferenceLine,
@@ -180,7 +180,13 @@ const STEP_META = {
   analyze: {
     icon: '🤖',
     label: 'AI analysis',
-    subs: ['Build prompt with all context', 'Call local Ollama model', 'Parse structured response'],
+    subs: [
+      'Backend pre-computes long/short candidate trade plans (ATR-based)',
+      'Build structured prompt with all market context + candidate plans',
+      'Call configured LLM (Ollama · Groq · Gemini · Mistral)',
+      'LLM classifies setup & selects a plan_id — no price calculation',
+      'Parse v2 response: decision, confidence_raw, evidence, risks',
+    ],
   },
   detect: {
     icon: '🎯',
@@ -590,7 +596,7 @@ function fmtTokens(n) {
   return String(n)
 }
 
-function Header({ health, usage, activeView, onViewChange }) {
+function Header({ health, usage, btTodayTokens = 0, activeView, onViewChange }) {
   const ok   = health?.status === 'ok'
   const open = health?.scheduler?.market_open
 
@@ -601,10 +607,32 @@ function Header({ health, usage, activeView, onViewChange }) {
     ? `${provider} · ${modelName ?? '—'}`
     : (modelName ?? null)
 
-  // Token label — today's total from /usage (by_day[0] if date matches today)
+  // Token label — filter to the active provider+model so the chip reflects
+  // usage for the currently selected model only, not all providers combined.
   const today = new Date().toISOString().slice(0, 10)
+  const activeProvider = usage?.active_provider ?? null
+  const activeModel    = usage?.active_model    ?? null
+  // by_model_day rows: { day, provider, model, prompt_tokens, completion_tokens }
+  const modelTodayTokens = (() => {
+    if (!usage?.by_model_day) {
+      // fallback: use the combined by_day total
+      return usage?.by_day?.find(d => d.date === today)?.total_tokens ?? 0
+    }
+    return (usage.by_model_day
+      .filter(r =>
+        r.day === today &&
+        (!activeProvider || r.provider === activeProvider) &&
+        (!activeModel    || r.model    === activeModel)
+      )
+      .reduce((s, r) => s + (r.prompt_tokens ?? 0) + (r.completion_tokens ?? 0), 0)
+    )
+  })()
+  // by_model_day already includes backtest + signal + advisor + compare tokens
+  // (the /usage endpoint UNIONs all sources). Do NOT add btTodayTokens here —
+  // that would double-count backtest runs that are already in modelTodayTokens.
+  const todayTokens = modelTodayTokens
+  // For tooltip: all-providers combined today total
   const todayEntry = usage?.by_day?.find(d => d.date === today)
-  const todayTokens = todayEntry?.total_tokens ?? null
 
   return (
     <header className="header">
@@ -628,6 +656,12 @@ function Header({ health, usage, activeView, onViewChange }) {
             onClick={() => onViewChange('education')}
           >
             Learn
+          </button>
+          <button
+            className={`nav-tab ${activeView === 'backtest' ? 'active' : ''}`}
+            onClick={() => onViewChange('backtest')}
+          >
+            Backtesting
           </button>
         </nav>
 
@@ -657,10 +691,15 @@ function Header({ health, usage, activeView, onViewChange }) {
               🧠 {modelLabel}
             </span>
           )}
-          {health && todayTokens != null && (
+          {health && usage && (
             <span
               className="live-chip live-chip-tokens"
-              title={`Tokens used today: ${todayTokens.toLocaleString()}\n(${fmtTokens(usage?.total_prompt_tokens ?? 0)} prompt + ${fmtTokens(usage?.total_completion_tokens ?? 0)} completion — last ${usage?.period_days ?? 30}d)`}
+              title={[
+                `Tokens today (${activeModel ? activeModel.split('/').pop() : 'all models'}): ${todayTokens.toLocaleString()}`,
+                `  analysis: ${fmtTokens(modelTodayTokens)}  backtests: ${fmtTokens(btTodayTokens)}`,
+                `All providers today: ${fmtTokens(todayEntry?.total_tokens ?? 0)}`,
+                `All-time (${usage?.period_days ?? 30}d): ${fmtTokens(usage?.total_prompt_tokens ?? 0)} prompt + ${fmtTokens(usage?.total_completion_tokens ?? 0)} completion`,
+              ].join('\n')}
             >
               ⚡ {fmtTokens(todayTokens)} tok today
             </span>
@@ -685,12 +724,43 @@ function Header({ health, usage, activeView, onViewChange }) {
 // ─── Watchlist card ───────────────────────────────────────────────────────────
 
 function WatchlistCard({ wl, onWatchlistChange }) {
-  const [newTicker, setNewTicker] = useState('')
-  const [adding, setAdding] = useState(false)
+  const [newTicker,  setNewTicker]  = useState('')
+  const [adding,     setAdding]     = useState(false)
+  const [snapshots,  setSnapshots]  = useState({})   // ticker → normalised snapshot
+  const [snapError,  setSnapError]  = useState(false)
+  const [snapLoading,setSnapLoading]= useState(false)
+
+  const tickers    = wl?.watchlist ?? []
+  const marketOpen = wl?.scheduler?.market_open ?? false
+
+  const loadSnapshots = useCallback(async () => {
+    if (!tickers.length) return
+    setSnapLoading(true)
+    try {
+      const r = await fetch(`${API}/paper/market/snapshots?symbols=${tickers.join(',')}`)
+      if (!r.ok) throw new Error()
+      const d = await r.json()
+      setSnapshots(d.snapshots ?? {})
+      setSnapError(false)
+    } catch {
+      setSnapError(true)
+    } finally {
+      setSnapLoading(false)
+    }
+  }, [tickers.join(',')])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    // Always fetch once on mount so last-session prices are visible even when closed.
+    loadSnapshots()
+    // Only poll every 30 s during market hours — no point hitting Alpaca when closed.
+    if (!marketOpen) return
+    const id = setInterval(loadSnapshots, 30_000)
+    return () => clearInterval(id)
+  }, [loadSnapshots, marketOpen])
 
   if (!wl) return <div className="card skeleton" style={{ minHeight: 100 }} />
 
-  const { watchlist, scan_interval_minutes, scheduler } = wl
+  const { scan_interval_minutes, scheduler } = wl
 
   const addTicker = async () => {
     const t = newTicker.trim().toUpperCase()
@@ -714,6 +784,22 @@ function WatchlistCard({ wl, onWatchlistChange }) {
     onWatchlistChange()
   }
 
+  const fmtPrice  = (v) => v == null ? '—' : `$${parseFloat(v).toFixed(2)}`
+  const fmtVol    = (v) => {
+    if (v == null) return '—'
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`
+    if (v >= 1_000)     return `${(v / 1_000).toFixed(0)}K`
+    return String(v)
+  }
+  const fmtAgo = (iso) => {
+    if (!iso) return '—'
+    const secs = Math.round((Date.now() - new Date(iso).getTime()) / 1000)
+    if (secs < 60)   return `${secs}s ago`
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+    return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+  const hasLiveData = Object.keys(snapshots).length > 0
+
   return (
     <section className="card">
       <div className="card-title">
@@ -722,15 +808,78 @@ function WatchlistCard({ wl, onWatchlistChange }) {
         <span className={`scheduler-status-chip ${scheduler?.running ? 'running' : 'stopped'}`}>
           {scheduler?.running ? '● scanning' : '○ paused'}
         </span>
-      </div>
-      <div className="chip-row">
-        {watchlist.map((t) => (
-          <span key={t} className="chip">
-            {t}
-            <button className="chip-remove" onClick={() => removeTicker(t)} title={`Remove ${t}`}>×</button>
+        {!snapError && snapLoading && <span style={{ fontSize: 11, color: 'var(--dim)', marginLeft: 6 }}>↻</span>}
+        {snapError && <span style={{ fontSize: 10, color: 'var(--dim)', marginLeft: 6 }}>· no live prices</span>}
+        {!marketOpen && hasLiveData && (
+          <span style={{ fontSize: 10, color: 'var(--dim)', marginLeft: 8, fontStyle: 'italic' }}>
+            ⚫ market closed · prices from last session
           </span>
-        ))}
+        )}
       </div>
+
+      {/* Live market data table */}
+      {hasLiveData ? (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                <th style={{ textAlign: 'left',  padding: '4px 8px', color: 'var(--dim)', fontWeight: 500, fontSize: 11 }}>Ticker</th>
+                <th style={{ textAlign: 'right', padding: '4px 8px', color: 'var(--dim)', fontWeight: 500, fontSize: 11 }}>Price</th>
+                <th style={{ textAlign: 'right', padding: '4px 8px', color: 'var(--dim)', fontWeight: 500, fontSize: 11 }}>Chg%</th>
+                <th style={{ textAlign: 'right', padding: '4px 8px', color: 'var(--dim)', fontWeight: 500, fontSize: 11 }}>VWAP</th>
+                <th style={{ textAlign: 'right', padding: '4px 8px', color: 'var(--dim)', fontWeight: 500, fontSize: 11 }}>Vol</th>
+                <th style={{ textAlign: 'right', padding: '4px 8px', color: 'var(--dim)', fontWeight: 500, fontSize: 11 }}>H/L</th>
+                <th style={{ textAlign: 'right', padding: '4px 8px', color: 'var(--dim)', fontWeight: 500, fontSize: 11 }}>Last</th>
+                <th style={{ width: 24 }} />
+              </tr>
+            </thead>
+            <tbody>
+              {tickers.map((t) => {
+                const s = snapshots[t]
+                const chg = s?.day_chg_pct
+                const chgColor = chg == null ? 'var(--dim)' : chg >= 0 ? 'var(--green)' : 'var(--red)'
+                return (
+                  <tr key={t} style={{ borderBottom: '1px solid color-mix(in srgb, var(--border) 40%, transparent)' }}>
+                    <td style={{ padding: '5px 8px', fontWeight: 700 }}>{t}</td>
+                    <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+                      {fmtPrice(s?.price)}
+                    </td>
+                    <td style={{ padding: '5px 8px', textAlign: 'right', color: chgColor, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+                      {chg == null ? '—' : `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%`}
+                    </td>
+                    <td style={{ padding: '5px 8px', textAlign: 'right', color: 'var(--dim)', fontVariantNumeric: 'tabular-nums' }}>
+                      {fmtPrice(s?.vwap)}
+                    </td>
+                    <td style={{ padding: '5px 8px', textAlign: 'right', color: 'var(--dim)', fontVariantNumeric: 'tabular-nums' }}>
+                      {fmtVol(s?.volume)}
+                    </td>
+                    <td style={{ padding: '5px 8px', textAlign: 'right', fontSize: 11, color: 'var(--dim)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+                      {s ? `${fmtPrice(s.high)} / ${fmtPrice(s.low)}` : '—'}
+                    </td>
+                    <td style={{ padding: '5px 8px', textAlign: 'right', fontSize: 11, color: 'var(--dim)', whiteSpace: 'nowrap' }}>
+                      {fmtAgo(s?.last_trade_at)}
+                    </td>
+                    <td style={{ padding: '5px 4px', textAlign: 'right' }}>
+                      <button className="chip-remove" onClick={() => removeTicker(t)} title={`Remove ${t}`}>×</button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        /* Fallback: plain chips when Alpaca not configured */
+        <div className="chip-row">
+          {tickers.map((t) => (
+            <span key={t} className="chip">
+              {t}
+              <button className="chip-remove" onClick={() => removeTicker(t)} title={`Remove ${t}`}>×</button>
+            </span>
+          ))}
+        </div>
+      )}
+
       <div className="add-ticker-row">
         <input
           className="ticker-input ticker-input-sm"
@@ -753,41 +902,113 @@ function WatchlistCard({ wl, onWatchlistChange }) {
 
 // ─── LLM Reasoning ───────────────────────────────────────────────────────────
 
+const CONF_BAND_COLOR = {
+  very_low: 'var(--red)', low: 'var(--yellow)', moderate: 'var(--dim)',
+  high: 'var(--green)', very_high: 'var(--green)',
+}
+const EVIDENCE_DIR_COLOR = { bullish: 'var(--green)', bearish: 'var(--red)', neutral: 'var(--dim)' }
+const RISK_SEV_COLOR = { low: 'var(--dim)', medium: 'var(--yellow)', high: 'var(--red)' }
+
 function LLMReasoning({ analysis, defaultOpen = false }) {
   const [open, setOpen] = useState(defaultOpen)
   if (!analysis || analysis.error) return null
 
-  const { trend, momentum, signals = [], risk_factors = [], key_levels = {} } = analysis
+  const {
+    trend, momentum, signals = [], risk_factors = [], key_levels = {},
+    // v2 extra fields
+    confidence_band, reason_code, data_quality, evidence = [], risks = [], summary,
+  } = analysis
   const support    = key_levels?.support    ?? []
   const resistance = key_levels?.resistance ?? []
+  const isV2 = !!analysis.schema_version  // true when LLM returned v2 schema
 
   return (
     <div className="reasoning-box">
       <button className="reasoning-toggle" onClick={() => setOpen(o => !o)}>
         <span className="reasoning-toggle-label">LLM Reasoning</span>
         <span className="reasoning-badges-inline">
-          {trend    && <span className={`rbadge trend-${trend}`}>{trend}</span>}
-          {momentum && <span className="rbadge momentum">{momentum}</span>}
+          {trend    && <span className={`rbadge trend-${trend}`}>trend: {trend}</span>}
+          {momentum && <span className="rbadge momentum">momentum: {momentum}</span>}
+          {confidence_band && (
+            <span className="rbadge" style={{ color: CONF_BAND_COLOR[confidence_band] || 'var(--dim)', borderColor: CONF_BAND_COLOR[confidence_band] }}>
+              confidence: {confidence_band.replace(/_/g, ' ')}
+            </span>
+          )}
+          {reason_code && (
+            <span className="rbadge" style={{
+              color: reason_code === 'aligned_setup' ? 'var(--green)'
+                : reason_code === 'weak_edge' || reason_code === 'conflicting_timeframes' ? 'var(--yellow)'
+                : 'var(--dim)',
+              fontSize: 10,
+            }}>
+              {reason_code.replace(/_/g, ' ')}
+            </span>
+          )}
+          {data_quality?.grade && (
+            <span className="rbadge" style={{
+              color: data_quality.grade === 'good' ? 'var(--green)'
+                : data_quality.grade === 'poor' ? 'var(--red)' : 'var(--dim)',
+              fontSize: 10,
+            }}>
+              data: {data_quality.grade}
+            </span>
+          )}
         </span>
         <span className="reasoning-chevron">{open ? '▲' : '▼'}</span>
       </button>
 
       {open && (
         <div className="reasoning-body">
-          {signals.length > 0 && (
+          {/* v2: summary line */}
+          {summary && (
             <div className="reasoning-section">
-              <div className="reasoning-label">Signals</div>
-              <ul className="reasoning-list">
-                {signals.map((s, i) => <li key={i}>{s}</li>)}
-              </ul>
+              <p style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--text)', margin: 0 }}>{summary}</p>
             </div>
           )}
-          {risk_factors.length > 0 && (
+          {/* v2 evidence with direction/strength; fallback to plain signals list */}
+          {(isV2 ? evidence : signals).length > 0 && (
+            <div className="reasoning-section">
+              <div className="reasoning-label">Evidence</div>
+              {isV2 ? (
+                <ul className="reasoning-list" style={{ listStyle: 'none', paddingLeft: 0 }}>
+                  {evidence.map((e, i) => (
+                    <li key={i} style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginBottom: 4 }}>
+                      <span style={{ fontSize: 10, fontWeight: 700, minWidth: 52, paddingTop: 1,
+                        color: EVIDENCE_DIR_COLOR[e.direction] || 'var(--dim)' }}>
+                        {(e.direction || '').toUpperCase()}
+                      </span>
+                      <span style={{ fontSize: 13 }}>{e.observation}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <ul className="reasoning-list">
+                  {signals.map((s, i) => <li key={i}>{s}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
+          {/* v2 risks with severity; fallback to plain risk_factors */}
+          {(isV2 ? risks : risk_factors).length > 0 && (
             <div className="reasoning-section">
               <div className="reasoning-label risk">Risk Factors</div>
-              <ul className="reasoning-list risk">
-                {risk_factors.map((r, i) => <li key={i}>{r}</li>)}
-              </ul>
+              {isV2 ? (
+                <ul className="reasoning-list risk" style={{ listStyle: 'none', paddingLeft: 0 }}>
+                  {risks.map((r, i) => (
+                    <li key={i} style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginBottom: 4 }}>
+                      <span style={{ fontSize: 10, fontWeight: 700, minWidth: 52, paddingTop: 1,
+                        color: RISK_SEV_COLOR[r.severity] || 'var(--dim)' }}>
+                        {(r.severity || '').toUpperCase()}
+                      </span>
+                      <span style={{ fontSize: 13 }}>{r.observation}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <ul className="reasoning-list risk">
+                  {risk_factors.map((r, i) => <li key={i}>{r}</li>)}
+                </ul>
+              )}
             </div>
           )}
           {(support.length > 0 || resistance.length > 0) && (
@@ -1063,9 +1284,45 @@ const SOURCE_LABEL = {
 }
 
 function SignalCard({ r, expanded, onToggle, onDelete }) {
-  const isLong = r.type === 'long'
-  const conf   = r.confidence ?? 0
+  const isLong   = r.type === 'long'
+  const conf     = r.confidence ?? 0
   const modelTag = r.llm_model || null
+
+  // ── R:R context ──────────────────────────────────────────────────────────
+  // For a long: risk = entry − stop (positive), reward = target − entry
+  // For a short: risk = stop − entry (positive), reward = entry − target
+  const entry  = r.entry  ?? r.price
+  const stop   = r.stop
+  const target = r.target
+  const risk   = (entry != null && stop   != null) ? Math.abs(entry - stop)   : null
+  const reward = (entry != null && target != null) ? Math.abs(target - entry) : null
+  const rr     = (risk && reward && risk > 0) ? (reward / risk) : null
+  // For the proportional mini-bar: risk segment width as % of total bracket
+  const riskPct = (risk != null && reward != null && (risk + reward) > 0)
+    ? Math.round(risk / (risk + reward) * 100) : null
+
+  // ── 52-week range bar ────────────────────────────────────────────────────
+  const w52hi  = r.week52_high
+  const w52lo  = r.week52_low
+  const w52pct = (w52hi != null && w52lo != null && w52hi > w52lo && r.price != null)
+    ? Math.round(Math.max(0, Math.min(1, (r.price - w52lo) / (w52hi - w52lo))) * 100)
+    : null
+
+  // Tooltip strings for each level cell
+  const _noBracket = 'ATR bracket not stored — this was an older signal. New signals include stop & target.'
+  const levelMeta = isLong
+    ? {
+        Price:  'Price at signal time',
+        Entry:  'Open the long position here',
+        Stop:   stop   != null ? `Cut loss if price drops here (−${fmtN(risk)} risk)` : _noBracket,
+        Target: target != null ? `Take profit here (+${fmtN(reward)} reward)`          : _noBracket,
+      }
+    : {
+        Price:  'Price at signal time',
+        Entry:  'Open the short position here',
+        Stop:   stop   != null ? `Cut loss if price rises here (+${fmtN(risk)} risk)` : _noBracket,
+        Target: target != null ? `Take profit here (−${fmtN(reward)} reward)`          : _noBracket,
+      }
 
   return (
     <div className={`signal-card ${r.type ?? 'unknown'}`}>
@@ -1102,16 +1359,66 @@ function SignalCard({ r, expanded, onToggle, onDelete }) {
         </div>
       </div>
 
-      {/* price grid */}
+      {/* price grid — color-coded with semantic tooltips */}
       <div className="signal-levels-grid">
-        {[['Price', r.price], ['Entry', r.entry], ['Stop', r.stop], ['Target', r.target]].map(([lbl, val]) => (
-          <div key={lbl} className="signal-level-cell">
+        {[
+          ['Price',  r.price,  null,            levelMeta.Price],
+          ['Entry',  r.entry,  null,            levelMeta.Entry],
+          ['Stop',   r.stop,   'var(--red)',    levelMeta.Stop],
+          ['Target', r.target, 'var(--green)',  levelMeta.Target],
+        ].map(([lbl, val, color, tip]) => (
+          <div key={lbl} className="signal-level-cell" title={tip}>
             <span className="signal-level-label">{lbl}</span>
-            <span className="signal-level-value">{fmtN(val)}</span>
+            <span
+              className="signal-level-value"
+              style={val != null ? (color ? { color } : {}) : { color: 'var(--text-dim)', opacity: 0.45 }}
+            >
+              {fmtN(val)}
+            </span>
           </div>
         ))}
-
       </div>
+
+      {/* R:R bracket row */}
+      {riskPct != null && (
+        <div className="signal-rr-row" title={`Risk ${fmtN(risk)} · Reward ${fmtN(reward)} · R:R ${rr?.toFixed(1)}`}>
+          <div className="signal-rr-bar">
+            <div
+              className="signal-rr-risk"
+              style={{ width: `${riskPct}%` }}
+            />
+            <div
+              className="signal-rr-reward"
+              style={{ width: `${100 - riskPct}%` }}
+            />
+          </div>
+          <div className="signal-rr-labels">
+            <span className="signal-rr-risk-lbl">Risk {isLong ? '−' : '+'}{fmtN(risk)}</span>
+            {rr != null && <span className="signal-rr-ratio">{rr.toFixed(1)}:1</span>}
+            <span className="signal-rr-reward-lbl">Reward {isLong ? '+' : '−'}{fmtN(reward)}</span>
+          </div>
+        </div>
+      )}
+
+      {/* 52-week range bar */}
+      {w52pct != null && (
+        <div
+          className="signal-52w-row"
+          title={`52w range: ${fmtN(w52lo)} – ${fmtN(w52hi)} · signal at ${w52pct}% of range`}
+        >
+          <span className="signal-52w-label">52w</span>
+          <div className="signal-52w-wrap">
+            <div className="signal-52w-track">
+              <div className="signal-52w-fill" style={{ width: `${w52pct}%` }} />
+              <div className="signal-52w-dot"  style={{ left: `${w52pct}%` }} />
+            </div>
+            <div className="signal-52w-caption">
+              <span className="signal-52w-pct">{w52pct}%</span>
+              <span className="signal-52w-range">{fmtN(w52lo)} – {fmtN(w52hi)}</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* source chips */}
       {r.source && (
@@ -1276,10 +1583,11 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
   const result    = streamResult ?? initialResult
   const mkt       = result?.market_data
   const price     = mkt?.price
-  const analysis  = result?.analysis
-  const opps      = result?.opportunities ?? []
-  const actionable = result?.actionable ?? []
-  const errors    = result?.errors ?? []
+  const analysis    = result?.analysis
+  const opps        = result?.opportunities ?? []
+  const actionable  = result?.actionable ?? []
+  const errors      = result?.errors ?? []
+  const rulesChecked = result?.rules_checked ?? null  // always present even when no opps fire
 
   const handleRun = () => run(ticker)
 
@@ -1337,10 +1645,12 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
             <span className="section-label">Pipeline walkthrough</span>
           </div>
           <p className="section-desc">
-            Every analysis runs three steps: <strong>fetch</strong> live market data from yfinance
-            and TradingView, <strong>analyze</strong> it with the local AI model (no data leaves your
-            machine), then <strong>detect</strong> opportunities by combining AI output with
-            rule-based checks (RSI extremes, MACD crossovers, volume spikes).
+            Every analysis runs three steps: <strong>fetch</strong> live market data,{' '}
+            <strong>analyze</strong> — the backend pre-computes candidate trade plans, then the
+            configured LLM classifies the setup and selects a plan (entry/stop/target are
+            backend-computed, not LLM-invented), then <strong>detect</strong> opportunities by
+            combining the AI signal with rule-based checks (RSI extremes, MACD crossovers, volume
+            spikes, valuation).
           </p>
           {steps
             ? <AnalysisStepper steps={steps} />
@@ -1484,35 +1794,86 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
           <summary className="section-header">
             <span className="section-badge">News</span>
             <span className="section-label">Recent headlines</span>
+            {(() => {
+              const sent = mkt.news_sentiment
+              if (!sent || sent.score == null) return null
+              const { label, score } = sent
+              const color = label === 'Bullish' ? 'var(--green)'
+                          : label === 'Bearish' ? 'var(--red)'
+                          : label === 'Mixed'   ? 'var(--yellow)'
+                          : 'var(--dim)'
+              const bg = label === 'Bullish' ? 'var(--long-bg)'
+                       : label === 'Bearish' ? 'var(--short-bg)'
+                       : 'var(--surface-2)'
+              // confidence pts from the first opportunity's score_breakdown, if available
+              const sentDelta = result?.opportunities?.[0]?.score_breakdown?.sentiment_delta ?? null
+              return (
+                <span className="rbadge" style={{ color, background: bg, marginLeft: 8, border: `1px solid ${color}33` }}>
+                  {label} {score >= 0 ? '+' : ''}{score.toFixed(2)}
+                  {sentDelta != null && (
+                    <span style={{ opacity: 0.75, marginLeft: 4 }}>
+                      ({sentDelta > 0 ? '+' : ''}{sentDelta} pts)
+                    </span>
+                  )}
+                </span>
+              )
+            })()}
             <span className="section-chevron">›</span>
           </summary>
           <p className="section-desc">
-            Last 7 days of company news from Finnhub. Headlines are included in the AI prompt
-            so the model can factor in recent events. Requires a free{' '}
-            <code>FINNHUB_API_KEY</code> in <code>.env</code>.
+            Last 7 days of company news from <strong>Google News RSS</strong> (always active)
+            and <strong>Finnhub</strong> (optional, requires <code>FINNHUB_API_KEY</code>).
+            Each headline is VADER-scored; the aggregate sentiment is included in the AI prompt.
           </p>
           {mkt.news?.length > 0 ? (
             <ul className="news-list">
-              {mkt.news.map((item, i) => (
-                <li key={i} className="news-item">
-                  <a
-                    className="news-headline"
-                    href={item.url}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    {item.headline}
-                  </a>
-                  <span className="news-meta">
-                    {item.source && <span>{item.source}</span>}
-                    {item.datetime && <span>{fmtNewsDate(item.datetime)}</span>}
-                  </span>
-                </li>
-              ))}
+              {mkt.news.map((item, i) => {
+                const sc = item.sentiment_score
+                const sentLabel = sc == null ? null
+                  : sc > 0.15 ? 'Bullish'
+                  : sc < -0.15 ? 'Bearish'
+                  : sc > 0.05 ? 'Positive'
+                  : sc < -0.05 ? 'Negative'
+                  : 'Neutral'
+                const sentColor = sc == null ? null
+                  : sc > 0.05 ? 'var(--green)'
+                  : sc < -0.05 ? 'var(--red)'
+                  : 'var(--dim)'
+                const sentBg = sc == null ? null
+                  : sc > 0.05 ? 'var(--long-bg)'
+                  : sc < -0.05 ? 'var(--short-bg)'
+                  : 'var(--surface-2)'
+                return (
+                  <li key={i} className="news-item">
+                    <a
+                      className="news-headline"
+                      href={item.url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {item.headline}
+                    </a>
+                    <span className="news-meta">
+                      {item.source && <span className="news-source">{item.source}</span>}
+                      {item.channel && <span className="news-channel">{item.channel}</span>}
+                      {sc != null && sentLabel && (
+                        <span style={{
+                          padding: '1px 6px', borderRadius: 4, fontSize: 11,
+                          background: sentBg, color: sentColor,
+                          fontVariantNumeric: 'tabular-nums',
+                        }}>
+                          {sentLabel} {sc >= 0 ? '+' : ''}{sc.toFixed(2)}
+                        </span>
+                      )}
+                      {item.datetime && <span>{fmtNewsDate(item.datetime)}</span>}
+                    </span>
+                  </li>
+                )
+              })}
             </ul>
           ) : (
             <div className="text-dim" style={{ fontSize: 12 }}>
-              No recent headlines — set <code>FINNHUB_API_KEY</code> in <code>.env</code> to enable.
+              No recent headlines found for this ticker.
             </div>
           )}
         </details>
@@ -1674,23 +2035,96 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
           {opps.length === 0 && (
             <div className="score-comp-empty">
               <p className="score-comp-empty-title">No rule checks fired this scan</p>
-              <p className="score-comp-empty-sub">All 5 rules ran and found no signal for this ticker — thresholds not met.</p>
-              <div className="rule-checks" style={{marginTop:'10px'}}>
-                {[
-                  { label: 'AI model',        note: 'type: none or confidence below floor' },
-                  { label: 'RSI extreme',     note: 'no timeframe below 30 or above 70' },
-                  { label: 'volume spike',    note: 'ratio <2× or price move <2%' },
-                  { label: 'MACD crossover',  note: '1D and 4H histograms disagree or flat' },
-                  { label: 'valuation P/E',   note: 'P/E in normal range (8–60×)' },
-                ].map(r => (
-                  <div key={r.label} className="rule-check miss">
-                    <span className="rule-check-icon">✗</span>
-                    <span className="rule-check-name">{r.label}</span>
-                    <span className="rule-check-val" style={{opacity:0.45}}>—</span>
-                    <span className="rule-check-rule">{r.note}</span>
+              <p className="score-comp-empty-sub">All 5 rules ran and found no signal — thresholds not met.</p>
+              {rulesChecked ? (() => {
+                const rc = rulesChecked
+                const RULES = [
+                  {
+                    key: 'ai', label: 'AI model', fired: rc.ai?.fired,
+                    value: rc.ai?.type == null ? '—'
+                      : analysis?.confidence_band
+                        ? `${rc.ai.type} · conf ${rc.ai.confidence ?? '?'} (${(analysis.confidence_band||'').replace(/_/g,' ')})`
+                        : `type: ${rc.ai.type} | conf: ${rc.ai.confidence ?? '?'}`,
+                    rule: rc.ai?.type == null ? 'no analysis run'
+                      : rc.ai?.type === 'none'
+                        ? `AI found no clear setup${analysis?.reason_code ? ' — ' + analysis.reason_code.replace(/_/g,' ') : ''}`
+                        : rc.ai?.fired ? 'above confidence floor → fired' : 'below confidence floor → not fired',
+                  },
+                  {
+                    key: 'rsi', label: 'RSI extreme', fired: rc.rsi_extreme?.fired,
+                    value: (() => {
+                      const vals = rc.rsi_extreme?.values ?? {}
+                      return Object.entries(vals).filter(([,v]) => v != null)
+                        .map(([tf,v]) => `${tf}: ${v}`).join(' | ') || '—'
+                    })(),
+                    rule: (() => {
+                      const lo = rc.rsi_extreme?.threshold_low ?? 30
+                      const hi = rc.rsi_extreme?.threshold_high ?? 70
+                      if (rc.rsi_extreme?.fired) return `<${lo} or >${hi} on 2+ TFs → fired`
+                      const n = (rc.rsi_extreme?.oversold?.length ?? 0) + (rc.rsi_extreme?.overbought?.length ?? 0)
+                      return `need <${lo} or >${hi} on 2+ TFs${n === 1 ? ' — only 1 TF triggered' : ''}`
+                    })(),
+                  },
+                  {
+                    key: 'vol', label: 'Volume spike', fired: rc.volume_spike?.fired,
+                    value: (() => {
+                      const r = rc.volume_spike?.ratio, c = rc.volume_spike?.change_pct
+                      if (r == null) return 'no data'
+                      return `ratio ${r.toFixed(1)}× | move ${c != null ? (c > 0 ? '+' : '') + c.toFixed(1) : '?'}%`
+                    })(),
+                    rule: (() => {
+                      const tr = rc.volume_spike?.threshold_ratio ?? 2, tm = rc.volume_spike?.threshold_move ?? 2
+                      return rc.volume_spike?.fired ? `≥${tr}× AND ≥${tm}% → fired` : `need ratio ≥${tr}× AND move ≥${tm}%`
+                    })(),
+                  },
+                  {
+                    key: 'macd', label: 'MACD crossover', fired: rc.macd_crossover?.fired,
+                    value: (() => {
+                      const h1 = rc.macd_crossover?.hist_1d, h4 = rc.macd_crossover?.hist_4h
+                      if (h1 == null || h4 == null) return 'no data'
+                      return `hist 1D: ${h1 > 0 ? '+' : ''}${h1.toFixed(3)} | 4H: ${h4 > 0 ? '+' : ''}${h4.toFixed(3)}`
+                    })(),
+                    rule: rc.macd_crossover?.fired ? 'both TFs same-sign → fired' : 'need both TFs same-sign histogram',
+                  },
+                  {
+                    key: 'val', label: 'Valuation P/E', fired: rc.valuation?.fired,
+                    value: rc.valuation?.pe == null ? 'P/E n/a' : `P/E ${rc.valuation.pe}×`,
+                    rule: (() => {
+                      const lo = rc.valuation?.threshold_low ?? 8, hi = rc.valuation?.threshold_high ?? 60
+                      return rc.valuation?.fired ? `<${lo} or >${hi} → fired` : `P/E in normal range (${lo}–${hi}×)`
+                    })(),
+                  },
+                ]
+                return (
+                  <div className="rule-checks" style={{marginTop:'10px'}}>
+                    {RULES.map(r => (
+                      <div key={r.key} className={`rule-check ${r.fired ? 'fired' : 'miss'}`}>
+                        <span className="rule-check-icon">{r.fired ? '✓' : '✗'}</span>
+                        <span className="rule-check-name">{r.label}</span>
+                        <span className="rule-check-val">{r.value}</span>
+                        <span className="rule-check-rule">{r.rule}</span>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                )
+              })() : (
+                <div className="rule-checks" style={{marginTop:'10px'}}>
+                  {[
+                    { label: 'AI model',       note: 'type: none or confidence below floor' },
+                    { label: 'RSI extreme',    note: 'no timeframe below 30 or above 70' },
+                    { label: 'Volume spike',   note: 'ratio <2× or price move <2%' },
+                    { label: 'MACD crossover', note: '1D and 4H histograms disagree or flat' },
+                    { label: 'Valuation P/E',  note: 'P/E in normal range (8–60×)' },
+                  ].map(r => (
+                    <div key={r.label} className="rule-check miss">
+                      <span className="rule-check-icon">✗</span>
+                      <span className="rule-check-name">{r.label}</span>
+                      <span className="rule-check-val" style={{opacity:0.45}}>—</span>
+                      <span className="rule-check-rule">{r.note}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
           <div className="score-comp-list">
@@ -1701,8 +2135,9 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
                   a => a.type === opp.type && Math.abs((a.confidence ?? 0) - (opp.confidence ?? 0)) < 0.5
                 )
                 const bd = opp.score_breakdown
-                const hasBonus = bd && (bd.bonus ?? 0) > 0
-                const hasMacro = bd && (bd.macro_delta ?? 0) !== 0
+                const hasBonus     = bd && (bd.bonus ?? 0) > 0
+                const hasMacro     = bd && (bd.macro_delta ?? 0) !== 0
+                const hasSentiment = bd && (bd.sentiment_delta ?? 0) !== 0
                 return (
                   <div key={i} className={`score-comp-card ${isActionable ? 'score-comp-ok' : 'score-comp-sub'}`}>
                     <div className="score-comp-header">
@@ -1776,7 +2211,18 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
                             ) : (
                               <span className="score-comp-op score-comp-op-dim">(no macro adj)</span>
                             )}
-                            {/* Step 4: final */}
+                            {/* Step 4: news sentiment adjustment */}
+                            {hasSentiment ? (
+                              <>
+                                <span className={`score-comp-step macro ${(bd.sentiment_delta ?? 0) < 0 ? 'neg' : 'pos'}`}>
+                                  {(bd.sentiment_delta ?? 0) > 0 ? '+' : ''}{(bd.sentiment_delta ?? 0).toFixed(0)} sentiment
+                                </span>
+                                <span className="score-comp-op">→</span>
+                              </>
+                            ) : (
+                              <span className="score-comp-op score-comp-op-dim">(no sentiment adj)</span>
+                            )}
+                            {/* Step 5: final */}
                             <span className="score-comp-step final">
                               <strong>{(bd.final ?? opp.confidence ?? 0).toFixed(0)}</strong> final
                             </span>
@@ -1792,11 +2238,13 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
                               fired: rc.ai?.fired,
                               value: rc.ai?.type == null
                                 ? '—'
-                                : `type: ${rc.ai.type} | conf: ${rc.ai.confidence ?? '?'}`,
+                                : analysis?.confidence_band
+                                  ? `${rc.ai.type} · conf ${rc.ai.confidence ?? '?'} (${(analysis.confidence_band || '').replace(/_/g,' ')})`
+                                  : `type: ${rc.ai.type} | conf: ${rc.ai.confidence ?? '?'}`,
                               rule: rc.ai?.type == null
                                 ? 'no analysis run'
                                 : rc.ai?.type === 'none'
-                                  ? 'AI found no clear setup'
+                                  ? `AI found no clear setup${analysis?.reason_code ? ' — ' + analysis.reason_code.replace(/_/g,' ') : ''}`
                                   : rc.ai?.fired
                                     ? 'above confidence floor → fired'
                                     : 'below confidence floor → not fired',
@@ -1868,6 +2316,24 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
                                 return `extreme: <${lo} undervalued or >${hi} overvalued`
                               })(),
                             },
+                            {
+                              key: 'sentiment',
+                              label: 'news sentiment',
+                              fired: rc.sentiment?.applied && (rc.sentiment?.score ?? 0) !== 0
+                                && !['Neutral', 'Mixed'].includes(rc.sentiment?.label ?? ''),
+                              value: (() => {
+                                const s = rc.sentiment
+                                if (!s?.applied || s.score == null) return 'no data'
+                                return `${s.label ?? 'Neutral'} ${s.score >= 0 ? '+' : ''}${s.score.toFixed(3)} (${s.article_count ?? 0} articles)`
+                              })(),
+                              rule: (() => {
+                                const s = rc.sentiment
+                                if (!s?.applied) return 'no news data available'
+                                const delta = bd?.sentiment_delta ?? 0
+                                if (delta === 0) return `${s.label ?? 'Neutral'} — no confidence adjustment`
+                                return `${s.label} → ${delta > 0 ? '+' : ''}${delta} pts confidence`
+                              })(),
+                            },
                           ]
                           return (
                             <div className="score-comp-row">
@@ -1886,7 +2352,67 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
                           )
                         })()}
 
-                        {opp.reasons && opp.reasons.length > 0 && (
+                        {/* v2: LLM signal metrics — evidence + risks from the AI model */}
+                        {analysis?.schema_version && (analysis?.evidence?.length > 0 || analysis?.risks?.length > 0) && (
+                          <div className="score-comp-row">
+                            <span className="score-comp-label">LLM metrics</span>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                              {analysis.data_quality?.grade && (
+                                <div style={{ fontSize: 11, color: 'var(--dim)', marginBottom: 2 }}>
+                                  Data quality: <strong style={{
+                                    color: analysis.data_quality.grade === 'good' ? 'var(--green)'
+                                      : analysis.data_quality.grade === 'poor' ? 'var(--red)' : 'var(--text)',
+                                  }}>{analysis.data_quality.grade}</strong>
+                                  {analysis.data_quality.warnings?.length > 0 && (
+                                    <span style={{ marginLeft: 8 }}>⚠ {analysis.data_quality.warnings.join('; ')}</span>
+                                  )}
+                                </div>
+                              )}
+                              {(analysis.evidence ?? []).length > 0 && (
+                                <div>
+                                  <div className="score-comp-hint" style={{ marginBottom: 4 }}>AI evidence (direction · strength → observation)</div>
+                                  <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 3 }}>
+                                    {analysis.evidence.map((e, j) => (
+                                      <li key={j} style={{ fontSize: 12, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                                        <span style={{ minWidth: 52, fontSize: 10, fontWeight: 700, paddingTop: 1,
+                                          color: EVIDENCE_DIR_COLOR[e.direction] || 'var(--dim)' }}>
+                                          {(e.direction||'').toUpperCase()}
+                                        </span>
+                                        <span style={{ minWidth: 50, fontSize: 10, color: 'var(--dim)', paddingTop: 1 }}>
+                                          {e.strength}
+                                        </span>
+                                        <span>{e.observation}</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                              {(analysis.risks ?? []).length > 0 && (
+                                <div>
+                                  <div className="score-comp-hint" style={{ marginBottom: 4 }}>AI risk factors (severity → observation)</div>
+                                  <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 3 }}>
+                                    {analysis.risks.map((r, j) => (
+                                      <li key={j} style={{ fontSize: 12, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                                        <span style={{ minWidth: 52, fontSize: 10, fontWeight: 700, paddingTop: 1,
+                                          color: RISK_SEV_COLOR[r.severity] || 'var(--dim)' }}>
+                                          {(r.severity||'').toUpperCase()}
+                                        </span>
+                                        <span>{r.observation}</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                              {analysis.summary && (
+                                <p style={{ fontSize: 12, color: 'var(--dim)', fontStyle: 'italic', margin: 0 }}>
+                                  → {analysis.summary}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                        {/* Legacy v1 reasons */}
+                        {!analysis?.schema_version && opp.reasons && opp.reasons.length > 0 && (
                           <div className="score-comp-row">
                             <span className="score-comp-label">Evidence</span>
                             <div>
@@ -1926,7 +2452,43 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
             <div className="error-list">{errors.map((e, i) => <div key={i}>⚠ {e}</div>)}</div>
           )}
           {opps.length === 0 ? (
-            <div className="text-dim">No signals detected — no rule checks fired for this ticker.</div>
+            <div>
+              <div className="text-dim" style={{ marginBottom: 10 }}>
+                No signals detected — no rule checks fired for this ticker.
+              </div>
+
+              {/* AI score summary + pointer to Section 5 & 6 for full detail */}
+              {analysis && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+                  padding: '8px 12px', background: 'var(--surface-2)',
+                  border: '1px solid var(--border)', borderRadius: 6,
+                }}>
+                  <span style={{ fontSize: 12, color: 'var(--dim)' }}>AI score:</span>
+                  <span style={{ fontSize: 13, fontWeight: 700 }}>
+                    {analysis.confidence_raw ?? analysis.opportunity?.confidence ?? '—'}
+                    <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--dim)', marginLeft: 4 }}>/90</span>
+                  </span>
+                  {analysis.confidence_band && (
+                    <span style={{
+                      fontSize: 11, padding: '2px 7px', borderRadius: 99, fontWeight: 600,
+                      color: CONF_BAND_COLOR[analysis.confidence_band] || 'var(--dim)',
+                      background: (CONF_BAND_COLOR[analysis.confidence_band] || 'var(--dim)') + '22',
+                    }}>
+                      {analysis.confidence_band.replace(/_/g, ' ')}
+                    </span>
+                  )}
+                  {analysis.reason_code && (
+                    <span style={{ fontSize: 11, color: 'var(--dim)' }}>
+                      {analysis.reason_code.replace(/_/g, ' ')}
+                    </span>
+                  )}
+                  <span style={{ fontSize: 11, color: 'var(--dim)', marginLeft: 'auto', fontStyle: 'italic' }}>
+                    ↑ Section 5 for AI reasoning · Section 6 for rule-check values
+                  </span>
+                </div>
+              )}
+            </div>
           ) : (
             <>
               <div className="signals-summary">
@@ -2061,8 +2623,8 @@ function EduSection({ id, title, badge, children, defaultOpen = false }) {
   return (
     <details id={id} className="edu-section" open={defaultOpen}>
       <summary className="edu-summary">
-        {badge && <span className="section-badge">{badge}</span>}
         <span className="edu-summary-title">{title}</span>
+        {badge && <span className="section-badge edu-badge-right">{badge}</span>}
         <span className="edu-chevron">›</span>
       </summary>
       <div className="edu-section-body">{children}</div>
@@ -2076,6 +2638,8 @@ const EDU_SECTIONS = [
   { id: 'edu-fundamentals',  label: 'Fundamentals' },
   { id: 'edu-rules',         label: 'Rules' },
   { id: 'edu-signals',       label: 'How scores work' },
+  { id: 'edu-backtesting',   label: 'Backtesting' },
+  { id: 'edu-paper-trading', label: 'Paper Trading' },
   { id: 'edu-glossary',      label: 'Glossary' },
   { id: 'edu-further',       label: 'Further reading' },
 ]
@@ -2115,19 +2679,23 @@ function EducationPage() {
       <EduSection id="edu-pipeline" title="The analysis pipeline" badge="Pipeline">
         <p className="section-desc">
           Every analysis — whether triggered by the scheduler or an ad-hoc run — flows
-          through the same six steps:
+          through the same eight steps:
         </p>
         <ol className="edu-steps">
           <li>
             <strong>yfinance</strong> — fetches live price, volume, day change, fundamentals
             (name, sector, industry, market cap, P/E trailing + forward) and 20-day averages.
             Free, no API key. The annual balance sheet is also fetched here (daily cache).
+            Price data is cached permanently per day — within a trading session the same
+            snapshot is returned instantly, and the data is kept for backtesting replay.
           </li>
           <li>
             <strong>yfinance + ta library</strong> — OHLCV history is downloaded for three
             timeframes (1H, 4H, 1D) and all indicators (RSI, MACD, EMA 20/50/200, Bollinger
             Bands, Stochastic) are computed locally using the open-source{' '}
             <code>ta</code> library. No account or API key needed; fully offline.
+            Indicator results are cached permanently per day — the RSI/MACD/EMA values
+            seen during a scan are stored as the historical snapshot for that date.
           </li>
           <li>
             <strong>FRED + multpl.com</strong> — US macro context is fetched from the Federal
@@ -2135,8 +2703,14 @@ function EducationPage() {
             Shiller CAPE from multpl.com. Cached globally for 6 hours across all tickers.
           </li>
           <li>
-            <strong>Finnhub</strong> (optional) — recent company news headlines including
-            source and date. Requires a free <code>FINNHUB_API_KEY</code>.
+            <strong>Google News RSS + Finnhub</strong> — recent company news from two
+            channels. <strong>Google News RSS</strong> is always active and requires no API
+            key. <strong>Finnhub</strong> (optional) adds additional headlines when a free{' '}
+            <code>FINNHUB_API_KEY</code> is set. Both feeds are deduplicated, then each
+            headline is scored by <strong>VADER</strong> (a lexicon-based sentiment model
+            that runs fully offline). The aggregate sentiment (Bullish / Bearish / Mixed /
+            Neutral) and score are injected into the AI prompt, and a ±1–3 pt confidence
+            adjustment is applied to matching opportunities.
           </li>
           <li>
             <strong>Local Ollama AI</strong> — all of the above (price, indicators, balance
@@ -2441,18 +3015,23 @@ function EducationPage() {
       {/* Section 5 — Opportunity detection rules */}
       <EduSection id="edu-rules" title="How opportunities are detected" badge="Rules">
         <p className="section-desc">
-          After the AI analysis runs, four independent rule-based checks are applied to the
+          After the AI analysis runs, five independent rule-based checks are applied to the
           same market data. Any check that fires creates a candidate signal. Candidates for the
-          same ticker are merged and their confidence scores are combined.
+          same ticker are merged and their confidence scores are combined. Two post-merge
+          adjusters (macro regime and news sentiment) then fine-tune the final score.
         </p>
 
         <div className="edu-rules">
           {[
             {
               num: 1, icon: '🤖', title: 'AI signal',
-              side: 'both', conf: '65–95',
-              trigger: 'LLM returns long/short with confidence ≥ floor',
-              body: <>The local model returns a <code>long</code> or <code>short</code> direction with a confidence value. If confidence ≥ the floor (default: 65), a candidate is raised with the AI's entry, stop and target suggestions.</>,
+              side: 'both', conf: '20–90 (ordinal)',
+              trigger: 'LLM selects a backend-precomputed plan with confidence ≥ floor',
+              body: <>
+                The backend pre-computes two candidate trade plans (long and short) using the current price and an ATR-based stop estimate. The LLM classifies the setup as <code>long</code>, <code>short</code>, or <code>none</code>, assigns a raw confidence score (20–90, multiples of 5), and selects a <code>plan_id</code> — it never calculates price levels itself.
+                {' '}Entry, stop, and target are resolved from the selected plan. The confidence band (very_low → very_high) and reason code are returned alongside the score.
+                {' '}If confidence ≥ the floor (default: 65) and a plan is selected, a candidate is raised.
+              </>,
             },
             {
               num: 2, icon: '📊', title: 'RSI extreme (multi-timeframe)',
@@ -2484,6 +3063,18 @@ function EducationPage() {
               trigger: 'Post-merge confidence adjuster — yield curve, CAPE, CPI',
               body: <><strong>Yield curve inverted</strong>: long −8, short +3. <strong>CAPE &gt; 35</strong>: long −5, short +3. <strong>CAPE &lt; 15</strong>: long +5, short −3. <strong>CPI &gt; 5%</strong>: long −5. Clamped to 0–100; confidence floor applies afterwards.</>,
             },
+            {
+              num: 7, icon: '📰', title: 'News sentiment (VADER)',
+              side: 'adjust', conf: '±1 to ±3',
+              trigger: 'Post-merge confidence adjuster — Google News RSS + Finnhub, VADER-scored',
+              body: <>Headlines from <strong>Google News RSS</strong> (always active) and <strong>Finnhub</strong> (optional) are deduplicated, then scored by <strong>VADER</strong> — a lexicon-based sentiment model that runs fully offline. The aggregate compound score (−1.0 to +1.0) adjusts confidence:
+                {' '}<strong>score &gt; +0.35</strong>: long +3, short −3 (strong bullish).
+                {' '}<strong>score &gt; +0.15</strong>: long +1, short −1 (mild bullish).
+                {' '}<strong>score &lt; −0.15</strong>: long −1, short +1 (mild bearish).
+                {' '}<strong>score &lt; −0.35</strong>: long −3, short +3 (strong bearish).
+                {' '}<strong>Mixed</strong> or <strong>Neutral</strong> → no adjustment. The aggregate score is also injected into the AI prompt so the model weighs it qualitatively.
+              </>,
+            },
           ].map(({ num, icon, title, side, conf, trigger, body }) => (
             <div key={num} className="edu-rule edu-rule-v2">
               <div className="edu-rule-header">
@@ -2503,8 +3094,8 @@ function EducationPage() {
 
         <p className="section-desc" style={{ marginTop: 16 }}>
           When multiple rules fire for the same ticker, signals are merged and confidence scores
-          are boosted by each additional agreeing rule. Rule 6 runs post-merge. The final score
-          must still clear the confidence floor to be actionable.
+          are boosted by each additional agreeing rule. Rules 6 and 7 run post-merge as adjusters.
+          The final score must still clear the confidence floor to be actionable.
         </p>
       </EduSection>
 
@@ -2512,7 +3103,7 @@ function EducationPage() {
       <EduSection id="edu-signals" title="How confidence scores are built" badge="Scores">
         <p className="section-desc">
           Every opportunity goes through a transparent, auditable scoring pipeline.
-          The final confidence is built in four steps:
+          The final confidence is built in five steps:
         </p>
 
         <div className="edu-score-steps">
@@ -2521,7 +3112,7 @@ function EducationPage() {
             <div>
               <strong>Individual rule checks</strong> — each fires independently with its own raw confidence:
               <ul className="edu-ind-levels" style={{ marginTop: 8 }}>
-                <li><strong>AI model</strong> — self-assessed 0–100; must beat the floor.</li>
+                <li><strong>AI model</strong> — ordinal 20–90 (multiples of 5); mapped from confidence_band: very_low 20–35, low 40–50, moderate 55–65, high 70–80, very_high 85–90. Must beat the floor.</li>
                 <li><strong>RSI extreme</strong> — 55 + 10 × count (2+ timeframes oversold/overbought). Max 85.</li>
                 <li><strong>Volume spike</strong> — 55 + min(ratio, 5) × 3. Max 80.</li>
                 <li><strong>MACD crossover</strong> — fixed 62 (both 1D and 4H must agree).</li>
@@ -2555,12 +3146,30 @@ function EducationPage() {
                   <tr><td>CPI YoY &gt; 5%</td><td className="macro-neg">−5</td><td>no change</td></tr>
                 </tbody>
               </table>
-              Continuing the AAPL example: CAPE 37 → −5. Final = <strong>80</strong>
+              Continuing the AAPL example: CAPE 37 → −5. Post-macro = <strong>80</strong>
             </div>
           </div>
 
           <div className="edu-score-step">
             <span className="edu-score-num">4</span>
+            <div>
+              <strong>News sentiment filter (VADER)</strong> — adjusted ±pts based on VADER aggregate score:
+              <table className="edu-macro-table">
+                <thead><tr><th>Condition</th><th>Long</th><th>Short</th></tr></thead>
+                <tbody>
+                  <tr><td>Score &gt; +0.35 (strong bullish)</td><td className="macro-pos">+3</td><td className="macro-neg">−3</td></tr>
+                  <tr><td>Score &gt; +0.15 (mild bullish)</td><td className="macro-pos">+1</td><td className="macro-neg">−1</td></tr>
+                  <tr><td>Score &lt; −0.15 (mild bearish)</td><td className="macro-neg">−1</td><td className="macro-pos">+1</td></tr>
+                  <tr><td>Score &lt; −0.35 (strong bearish)</td><td className="macro-neg">−3</td><td className="macro-pos">+3</td></tr>
+                  <tr><td>Mixed or Neutral</td><td>no change</td><td>no change</td></tr>
+                </tbody>
+              </table>
+              Continuing the AAPL example: Bullish sentiment +0.38 → +3. Final = <strong>83</strong>
+            </div>
+          </div>
+
+          <div className="edu-score-step">
+            <span className="edu-score-num">5</span>
             <div>
               <strong>Confidence floor filter</strong> — any signal below the floor (default: 65) is
               discarded and never stored or alerted. This is why the valuation rule (40–42) cannot
@@ -2572,10 +3181,14 @@ function EducationPage() {
         <div className="edu-callout">
           <strong>See it live:</strong> open any analysis in the <em>Analysis Explorer</em> and
           scroll to <em>Opportunity score computation</em> — every rule contribution, corroboration
-          bonus, and macro adjustment is shown per signal.
+          bonus, macro adjustment, and sentiment adjustment is shown per signal.
         </div>
 
-        <h4 className="edu-h4">Confidence range reference</h4>
+        <h4 className="edu-h4">Final opportunity score reference</h4>
+        <p className="section-desc" style={{ marginBottom: 8 }}>
+          The merged opportunity score (0–100) is built from rule contributions and the corroboration bonus.
+          The AI's raw score (20–90) feeds into this as one input.
+        </p>
         <table className="edu-table">
           <thead><tr><th>Score</th><th>Interpretation</th></tr></thead>
           <tbody>
@@ -2586,9 +3199,239 @@ function EducationPage() {
             <tr><td style={{color:'var(--green)'}}>95–100</td><td>Very strong — near-perfect alignment; rare</td></tr>
           </tbody>
         </table>
+        <h4 className="edu-h4" style={{ marginTop: 16 }}>AI confidence band reference (20–90 ordinal scale)</h4>
+        <table className="edu-table">
+          <thead><tr><th>Raw score</th><th>Band</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td style={{color:'var(--red)'}}>20–35</td><td>very_low</td><td>Invalid, sparse, stale, or strongly contradictory data</td></tr>
+            <tr><td style={{color:'var(--yellow)'}}>40–50</td><td>low</td><td>Weak or single-timeframe evidence; normally decision=none</td></tr>
+            <tr><td>55–65</td><td>moderate</td><td>Usable setup with limited confirmation</td></tr>
+            <tr><td style={{color:'var(--green)'}}>70–80</td><td>high</td><td>Two+ timeframes and two independent categories agree</td></tr>
+            <tr><td style={{color:'var(--green)'}}>85–90</td><td>very_high</td><td>Broad, unusually clean agreement — use rarely</td></tr>
+          </tbody>
+        </table>
       </EduSection>
 
-      {/* Section 7 — Glossary with live search */}
+      {/* Section 6 — Backtesting */}
+      <EduSection id="edu-backtesting" title="Backtesting — measuring signal quality" badge="Backtesting">
+        <p className="section-desc">
+          Backtesting replays the signal-detection pipeline over historical data so you
+          can measure whether the system's signals have real edge — before risking any
+          capital on them. Think of it as a practice exam: you already know the answers
+          (the historical prices), so you can score the system honestly.
+        </p>
+
+        <h4 className="edu-sub-heading">What it does — a concrete example</h4>
+        <p className="section-desc">
+          The engine pretends it's the past. On each replayed day it assembles a market snapshot
+          using only data available on that day (no peek into the future), runs the same rules
+          used live, and records every signal. It then fast-forwards to see what actually happened.
+        </p>
+        <p className="section-desc">
+          Suppose a signal fires on AAPL with <strong>entry $170, stop $167, target $176</strong>.
+          Three outcomes are possible:
+        </p>
+        <ul className="edu-steps">
+          <li>Price rises to <strong>$176</strong> within 10 days → <span style={{ color: 'var(--green)' }}>Win</span> (+$6/share)</li>
+          <li>Price falls to <strong>$167</strong> within 10 days → <span style={{ color: 'var(--red)' }}>Loss</span> (−$3/share)</li>
+          <li>Neither happens in 10 days → <strong>Timeout</strong> — exits at day-10 price (e.g. $172 = +$2/share)</li>
+        </ul>
+
+        <h4 className="edu-sub-heading">R-multiple — the universal measuring stick</h4>
+        <p className="section-desc">
+          Raw dollar gains are misleading. A $500 profit on a $500 bet is very different from
+          a $500 profit on a $10,000 bet. Instead we express every trade as a multiple of the
+          initial risk (entry − stop). We call this <strong>R</strong>.
+        </p>
+        <ul className="edu-steps">
+          <li><strong>Formula (long):</strong> R = (exit − entry) / (entry − stop)</li>
+          <li><strong>AAPL example:</strong> risk = $170 − $167 = <strong>$3</strong> (= 1R). Hitting target $176 → R = ($176−$170)/$3 = <strong>+2R</strong>. Stop hit → R = ($167−$170)/$3 = <strong>−1R</strong>.</li>
+          <li><strong>Key insight:</strong> at a 2:1 bracket you only need to be right <strong>34 %</strong> of the time to break even — one +2R win cancels two −1R losses.</li>
+        </ul>
+
+        <h4 className="edu-sub-heading">Reading the metrics</h4>
+        <ul className="edu-steps">
+          <li><strong>Win rate</strong> — fraction of trades that hit target. 50 % is roughly random. With a 2:1 bracket, 40 % is already profitable (4×+2R + 6×−1R = +2R net).</li>
+          <li><strong>Avg R-multiple</strong> — the average R across all trades. Any positive number means the system makes money in expectation. Above +0.3R is solid for a rules-based system.</li>
+          <li><strong>Sharpe ratio</strong> — avg R ÷ standard deviation of R. Measures consistency. A Sharpe of 1.0 means the average win equals the variability — reliable, not lucky.</li>
+          <li><strong>Max drawdown</strong> — the worst peak-to-trough fall in the cumulative-R curve. If you were up +8R and then fell to +3R, the drawdown is 5R. Ask: could you stomach that losing streak without quitting?</li>
+          <li><strong>False-positive rate</strong> — fraction of signals that lost. Complement of win rate, calculated on floor-filtered trades only.</li>
+        </ul>
+
+        <h4 className="edu-sub-heading">Stop &amp; target: the ATR bracket</h4>
+        <p className="section-desc">
+          Rule-based signals give a direction and entry price but no stop or target. The engine
+          builds a bracket from <strong>ATR (Average True Range)</strong> — how much the price
+          typically moves per day over the last 14 days.
+        </p>
+        <ul className="edu-steps">
+          <li><strong>ATR(14)</strong> = 14-day rolling average of the daily price range. If AAPL swings ~$3/day, ATR ≈ $3.</li>
+          <li><strong>Stop (long)</strong> = entry − ATR_multiple × ATR. At the default 2.0× and ATR $3: stop = $170 − $6 = $164.</li>
+          <li><strong>Target (long)</strong> = entry + R:R × |entry − stop|. At R:R 2.0: target = $170 + 2 × $6 = $182.</li>
+        </ul>
+        <p className="section-desc" style={{ fontSize: 12, color: 'var(--dim)', marginTop: 4 }}>
+          When live ATR is unavailable the engine estimates it from Bollinger Band width: <code>ATR ≈ (bb_upper − bb_lower) / 4</code>. If no band data exists either, the fallback is 2 % of current price.
+        </p>
+
+        <h4 className="edu-sub-heading">Choosing your ATR multiple</h4>
+        <ul className="edu-steps">
+          <li><strong>1.0×</strong> — tight stop ($3 away on AAPL). Cheaper losses but the trade gets shaken out by normal daily noise more often.</li>
+          <li><strong>1.5×</strong> — narrower. Good for lower-volatility stocks where small moves are meaningful.</li>
+          <li><strong>2.0× (default)</strong> — gives the trade two full ATR days of breathing room. Fewer premature exits, larger loss per stop. Recommended starting point.</li>
+          <li>Use the <strong>Experiment Advisor</strong> to test other multiples on your data — look for the multiple that lifts avg-R without reducing trade count below ~20.</li>
+        </ul>
+
+        <h4 className="edu-sub-heading">Confidence-floor tuning</h4>
+        <p className="section-desc">
+          The engine records every signal regardless of confidence. After a run you can drag the
+          floor slider and watch metrics recalculate instantly — no re-run needed.
+          The sweep chart shows win-rate, avg-R, and trade count at every threshold from 0 to 100.
+        </p>
+        <p className="section-desc">
+          <strong>Example:</strong> at floor 60 % you see 50 trades with 48 % win rate and avg R 0.3.
+          At floor 75 %: 22 trades, 58 % win rate, avg R 0.8. At floor 90 %: 4 trades — too few to trust.
+          The sweet spot here is 75 %: highest quality with a meaningful sample.
+        </p>
+
+        <h4 className="edu-sub-heading">Virtual wallet — seeing the dollars</h4>
+        <p className="section-desc">
+          R-metrics tell you the <em>edge</em>. The <strong>virtual wallet</strong> translates that
+          into actual dollars so the results are tangible.
+        </p>
+        <ul className="edu-steps">
+          <li><strong>How it works:</strong> set an initial balance (e.g. $10,000) and a position size (e.g. 10% = $1,000 per trade). Each signal invests exactly $1,000 — if the stop is 2 % away, you risk $20 on that trade.</li>
+          <li><strong>Example:</strong> entry $170, stop $164 (risk $6, ATR 2.0×). Shares bought = $1,000 ÷ $170 ≈ 5.9. Win at $182: profit = 5.9 × $12 ≈ <strong>+$70</strong>. Loss at stop: loss = 5.9 × −$6 ≈ <strong>−$35</strong>.</li>
+          <li><strong>$ equity curve</strong> (Section 6b in results) plots your running portfolio balance over the backtest window, with a buy-and-hold benchmark overlay so you can see at a glance whether the signals added value.</li>
+          <li><strong>Wallet column</strong> in the Past Runs table shows final balance, total P&amp;L, and return % for every past experiment.</li>
+        </ul>
+
+        <h4 className="edu-sub-heading">Cashout rule — lock in gains before a reversal</h4>
+        <p className="section-desc">
+          Suppose a trade is going well — it reaches 1.8R unrealised profit — but then reverses and
+          hits the stop at −1R. You watched a +1.8R winner turn into a −1R loss.
+          The <strong>cashout rule</strong> exits a trade early the moment its unrealised R
+          reaches a threshold you set.
+        </p>
+        <ul className="edu-steps">
+          <li><strong>Example (cashout at 1.5R):</strong> entry $170, stop $164 (risk $6). Cashout price = $170 + 1.5 × $6 = $179. If price hits $179 on day 3, the trade closes with +1.5R — regardless of whether the original target ($182) is ever reached.</li>
+          <li><strong>Without cashout:</strong> price reaches $179.50 on day 3, then falls back to stop $164 on day 5 → −1R. A +1.5R win became a −1R loss.</li>
+          <li><strong>Trade-off:</strong> cashout costs you the upside between the cashout level and the full target on every winning trade. Only enable it if your runs show consistent "near-misses" on the equity curve (peak much higher than final balance).</li>
+          <li>Cashout trades appear in <span style={{ color: 'var(--yellow)' }}>amber</span> in the trade list and are counted as wins in all metrics. The Past Runs table shows how many cashouts fired in each experiment.</li>
+        </ul>
+
+        <h4 className="edu-sub-heading">Saved configurations (profiles)</h4>
+        <p className="section-desc">
+          When you find a set of parameters that works well, give it a name and save it as a
+          <strong> profile</strong>. You can load it in one click for future experiments on new
+          tickers or date windows — no need to re-enter everything manually.
+        </p>
+        <ul className="edu-steps">
+          <li>Click <strong>Save profile</strong> in the params section, type a name (e.g. "Aggressive swing 2R"), and save.</li>
+          <li>Your profiles appear in a list. Click one to load all params. Saving with the same name overwrites the old version.</li>
+          <li>Profiles are stored locally in your browser — they persist across sessions but are not synced to any server.</li>
+        </ul>
+
+        <h4 className="edu-sub-heading">Runs comparator</h4>
+        <p className="section-desc">
+          Select two or more past runs and click <strong>Compare</strong> to see them side by side.
+          The comparator shows a table of all key metrics with the best value highlighted in green,
+          and overlays their $ equity curves on a single chart. Use it to compare
+          e.g. rules-only vs AI mode, or two different floor thresholds.
+        </p>
+
+        <h4 className="edu-sub-heading">Out-of-sample (OOS) validation</h4>
+        <p className="section-desc">
+          Tuning your parameters on a date window and then measuring performance on the <em>same</em>
+          window is like memorising last year's exam answers — you'll score 100 % on the practice
+          but fail the real exam. To get an honest estimate, you need a <em>held-out</em> window.
+        </p>
+        <ul className="edu-steps">
+          <li><strong>Step 1 — Tune (OOS toggle OFF):</strong> run multiple experiments on your training window (e.g. Jan–Jun). Adjust floor, ATR multiple, R:R until metrics look solid.</li>
+          <li><strong>Step 2 — Lock parameters:</strong> write them down (or save as a profile). Do not change them after this point.</li>
+          <li><strong>Step 3 — Validate (OOS toggle ON):</strong> change the date window to a new period (e.g. Jul–Dec), flip the toggle, run once. <em>These</em> are your honest numbers.</li>
+          <li><strong>AI Review uses it</strong> — OOS results get weighted more heavily and can elevate the deployment recommendation to "paper_trade" or "limited_live_candidate".</li>
+        </ul>
+        <p className="section-desc" style={{ fontSize: 12, color: 'var(--dim)', marginTop: 4 }}>
+          ⚠ Run the OOS validation <em>once</em>. Re-running it after adjusting params turns it back into in-sample data.
+        </p>
+
+        <h4 className="edu-sub-heading">Pitfalls to keep in mind</h4>
+        <ul className="edu-steps">
+          <li><strong>Overfitting</strong> — tuning the floor to a historical window and expecting the same results on new data. Always validate on a held-out OOS window.</li>
+          <li><strong>Small samples</strong> — fewer than ~20 trades and the metrics are noise. Widen the date window or loosen the floor before drawing conclusions.</li>
+          <li><strong>Daily-bar resolution</strong> — outcomes are evaluated on daily closing prices. If stop and target both fall inside one day's range, the stop wins (conservative tie-break).</li>
+          <li><strong>Missing context</strong> — fundamentals and macro are not replayed, so those rules are disabled during replay to avoid leaking today's data backwards.</li>
+          <li><strong>1H data limit</strong> — yfinance 1H data only goes back ~730 days; older windows fall back to daily-bar rules only.</li>
+        </ul>
+      </EduSection>
+
+      {/* Section 7 — Paper Trading */}
+      <EduSection id="edu-paper-trading" title="Paper trading with Alpaca" badge="Paper Trading">
+        <p className="section-desc">
+          Paper trading lets you simulate real trades without risking actual money. MarketSage
+          connects to Alpaca's free paper-trading environment — every actionable signal
+          automatically places a bracket order (entry at market price, stop-loss, and
+          take-profit attached) on a virtual $100 k account.
+        </p>
+
+        <h4 className="edu-sub-heading">How it works end-to-end</h4>
+        <ol className="edu-steps">
+          <li>
+            <strong>Signal fires</strong> — the AI + rule engine marks an opportunity as
+            actionable (confidence ≥ your floor, R:R ≥ 1.5, volatility filter passes).
+          </li>
+          <li>
+            <strong>Bracket order placed</strong> — MarketSage POSTs to Alpaca's paper API:
+            market order for <em>position size</em> dollars, with a stop-loss at the signal's
+            stop price and a take-profit limit at the signal's target price.
+          </li>
+          <li>
+            <strong>Order tracked</strong> — every scan, open orders are polled and their
+            status (pending → filled → closed) is synced back to the local DB and shown in
+            the Paper Orders panel on the Dashboard.
+          </li>
+          <li>
+            <strong>P&amp;L computed</strong> — Alpaca returns filled average price and
+            realised P&amp;L. Day equity change is shown in the account summary.
+          </li>
+        </ol>
+
+        <h4 className="edu-sub-heading">Live market data panel</h4>
+        <p className="section-desc">
+          The Dashboard Watchlist shows a live price table updated every 30 seconds during
+          market hours — Price, Day Chg%, VWAP, Volume, High/Low, and last-update timestamp —
+          fetched from Alpaca's free market data API. When the market is closed polling stops
+          and the table shows last-session prices labelled "market closed".
+        </p>
+
+        <h4 className="edu-sub-heading">Settings</h4>
+        <table className="edu-macro-table">
+          <thead><tr><th>Setting</th><th>Default</th><th>What it controls</th></tr></thead>
+          <tbody>
+            <tr><td>Paper trading enabled</td><td>off</td><td>Master toggle — turns off auto order placement while keeping the data panel active</td></tr>
+            <tr><td>Position size per trade</td><td>$500</td><td>Notional dollar amount sent to Alpaca per bracket order</td></tr>
+            <tr><td>Min confidence to trade</td><td>signal floor</td><td>Override the global confidence floor specifically for auto-trading (set higher to trade only your best signals)</td></tr>
+            <tr><td>Alpaca Paper API URL</td><td>https://paper-api.alpaca.markets</td><td>Override if using a different Alpaca region</td></tr>
+          </tbody>
+        </table>
+
+        <h4 className="edu-sub-heading">Getting started</h4>
+        <ol className="edu-steps">
+          <li>Create a free account at <strong>app.alpaca.markets</strong> and click <em>Paper Trading</em>.</li>
+          <li>Copy your <strong>API Key ID</strong> and <strong>Secret Key</strong> from the Alpaca dashboard.</li>
+          <li>Open <strong>Settings → Paper Trading</strong> in MarketSage, paste the keys, and click <em>Save &amp; Test Connection</em>.</li>
+          <li>Enable the <strong>Paper trading enabled</strong> toggle and set your position size.</li>
+          <li>Wait for the next scheduled scan (or trigger one manually) — orders appear in the Paper Orders panel automatically.</li>
+        </ol>
+
+        <div className="edu-callout">
+          <strong>Free tier is sufficient.</strong> Alpaca's free paper-trading account gives
+          full REST API access to both the trading API and the market data API (snapshots,
+          VWAP, volume). No paid subscription is needed to use any feature in MarketSage.
+        </div>
+      </EduSection>
+
+      {/* Section 8 — Glossary with live search */}
       <GlossarySection />
 
       {/* Section 8 — Disclaimer + further reading */}
@@ -2808,202 +3651,522 @@ function AnalysisHistoryPanel({ onOpenInExplorer }) {
   )
 }
 
-// ─── Token Usage section ──────────────────────────────────────────────────────
+// ─── AI Usage section ─────────────────────────────────────────────────────────
 
-function UsageSection({ usage, onRefresh }) {
-  const [quota,      setQuota]      = useState(null)
-  const [quotaLoading, setQuotaLoading] = useState(false)
-  const [quotaErr,   setQuotaErr]   = useState(null)
+const USAGE_PERIODS = [
+  { label: 'Today',  days: 1  },
+  { label: '3 days', days: 3  },
+  { label: '7 days', days: 7  },
+  { label: '30 days',days: 30 },
+  { label: '90 days',days: 90 },
+]
 
-  const checkQuota = async () => {
-    setQuotaLoading(true); setQuotaErr(null); setQuota(null)
-    try {
-      const res = await fetch(`${API}/provider/quota`)
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.detail ?? `HTTP ${res.status}`)
-      setQuota(data)
-    } catch (e) {
-      setQuotaErr(e.message)
-    } finally {
-      setQuotaLoading(false)
-    }
+function UsageSection({ usage: usageProp, onRefresh }) {
+  const [selModel,    setSelModel]    = useState(null)   // null = "All"
+  const [quota,       setQuota]       = useState(null)
+  const [quotaErr,    setQuotaErr]    = useState(null)
+  const [periodDays,  setPeriodDays]  = useState(30)
+  const [localUsage,  setLocalUsage]  = useState(null)
+  const [localLoading,setLocalLoading]= useState(false)
+
+  // Fetch usage for the selected period whenever it changes.
+  const fetchLocalUsage = (days) => {
+    setLocalLoading(true)
+    fetch(`${API}/usage?days=${days}`)
+      .then(r => r.json())
+      .then(d => { setLocalUsage(d); setLocalLoading(false) })
+      .catch(() => setLocalLoading(false))
   }
+  useEffect(() => { fetchLocalUsage(periodDays) }, [periodDays])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The displayed data: local (period-specific) if loaded, otherwise the root prop.
+  const usage = localUsage ?? usageProp
+
+  // Auto-select the active provider+model when usage first loads.
+  const activeKey = usage?.active_provider && usage?.active_model
+    ? `${usage.active_provider}::${usage.active_model}`
+    : null
+  useEffect(() => {
+    if (activeKey && selModel === null) setSelModel(activeKey)
+  }, [activeKey])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-fetch quota once on mount so limits are visible without a button click.
+  useEffect(() => {
+    fetch(`${API}/provider/quota`)
+      .then(r => r.json())
+      .then(setQuota)
+      .catch(e => setQuotaErr(e.message))
+  }, [])
 
   if (!usage) return (
     <p className="text-dim" style={{ fontSize: 13 }}>Loading usage data…</p>
   )
 
-  const { period_days, total_rows, total_prompt_tokens, total_completion_tokens,
-          total_tokens, by_provider, by_day } = usage
+  const { period_days, by_provider = [], by_day = [], by_model_day = [], by_source = [] } = usage
 
-  const recent7 = (by_day ?? []).slice(0, 7)
+  // Build the list of selectable model keys: "provider::model"
+  const modelKeys = by_provider.map(p => `${p.provider}::${p.model}`)
+
+  // Stats for the selected model (or overall totals)
+  const selStats = selModel
+    ? by_provider.find(p => `${p.provider}::${p.model}` === selModel) ?? {}
+    : {
+        total_tokens:      usage.total_tokens      ?? 0,
+        prompt_tokens:     usage.total_prompt_tokens  ?? 0,
+        completion_tokens: usage.total_completion_tokens ?? 0,
+        rows:              usage.total_rows         ?? 0,
+      }
+
+  // Daily chart data — filter by selected model or use all-provider by_day.
+  // Normalise to { date, prompt_tokens, completion_tokens, total_tokens } for the chart.
+  const chartData = (() => {
+    if (!selModel) return [...by_day].reverse()   // oldest → newest; already has `date` key
+    const [sp, sm] = selModel.split('::')
+    const filtered = by_model_day
+      .filter(r => r.provider === sp && r.model === sm)
+      .map(r => ({ ...r, date: r.day ?? r.date }))  // normalise day→date for XAxis
+    return [...filtered].reverse()
+  })()
+
+  // Quota limits for the selected provider (or active provider)
+  const selProvider  = selModel ? selModel.split('::')[0] : quota?.provider
+  const selModelName = selModel ? selModel.split('::')[1] : null
+
+  // Groq live rate-limit headers
+  const groqLimits = quota?.rate_limits
+  // Static free-tier limits (Gemini, Mistral)
+  const freeLimits = quota?.free_tier_limits
+  // Dashboard URL
+  const dashUrl = quota?.dashboard_url
+
+  // ── Per-provider cost tables (rough public pricing, USD per 1M tokens) ──────
+  // Groq free tier = $0; paid tier shown as reference for estimation purposes.
+  const COST_PER_1M = {
+    groq:    { input: 0.05,  output: 0.08,  note: 'Groq paid (varies by model)' },
+    gemini:  { input: 0.075, output: 0.30,  note: 'Gemini Flash free tier = $0; paid ~$0.075/$0.30' },
+    mistral: { input: 0.10,  output: 0.30,  note: 'Mistral free tier; paid varies' },
+    ollama:  { input: 0,     output: 0,     note: 'Local model — no cost' },
+  }
+  const costMeta   = COST_PER_1M[(selProvider ?? '').toLowerCase()] ?? null
+  const estCostUSD = costMeta
+    ? ((selStats.prompt_tokens ?? 0) * costMeta.input +
+       (selStats.completion_tokens ?? 0) * costMeta.output) / 1_000_000
+    : null
+
+  // ── TPM utilisation (uses the active quota limits from /provider/quota) ──────
+  // Best-available limit: live Groq header → free-tier table → null
+  const activeLim = (() => {
+    if (groqLimits?.tokens_limit) return { tpm: null, note: `${groqLimits.tokens_remaining} / ${groqLimits.tokens_limit} tokens remaining (period reset: ${groqLimits.tokens_reset ?? '?'})` }
+    if (freeLimits) {
+      // Prefer exact match; fall back to the most-restrictive entry so the gauge is safe.
+      const exact = selModelName ? freeLimits[selModelName] : null
+      const l = exact ?? Object.values(freeLimits).sort((a, b) => (a.tpm ?? 0) - (b.tpm ?? 0))[0]
+      if (l) return { tpm: l.tpm, rpm: l.rpm, rpd: l.rpd }
+    }
+    return null
+  })()
+  // Average daily calls (from by_day rows count)
+  const avgDailyCalls  = chartData.length
+    ? chartData.reduce((s, d) => s + (d.rows ?? 0), 0) / chartData.length
+    : 0
+  const avgDailyTokens = chartData.length
+    ? chartData.reduce((s, d) => s + (d.prompt_tokens ?? 0) + (d.completion_tokens ?? 0), 0) / chartData.length
+    : 0
 
   return (
     <div>
-      {/* ── Summary row ───────────────────────────────────────────────── */}
-      <div className="usage-summary-row">
-        <div className="usage-stat-card">
-          <span className="usage-stat-label">Total tokens</span>
-          <span className="usage-stat-value">{(total_tokens ?? 0).toLocaleString()}</span>
-          <span className="usage-stat-sub">last {period_days}d</span>
-        </div>
-        <div className="usage-stat-card">
-          <span className="usage-stat-label">Prompt</span>
-          <span className="usage-stat-value">{(total_prompt_tokens ?? 0).toLocaleString()}</span>
-          <span className="usage-stat-sub">input tokens</span>
-        </div>
-        <div className="usage-stat-card">
-          <span className="usage-stat-label">Completion</span>
-          <span className="usage-stat-value">{(total_completion_tokens ?? 0).toLocaleString()}</span>
-          <span className="usage-stat-sub">output tokens</span>
-        </div>
-        <div className="usage-stat-card">
-          <span className="usage-stat-label">Analyses run</span>
-          <span className="usage-stat-value">{total_rows ?? 0}</span>
-          <span className="usage-stat-sub">last {period_days}d</span>
-        </div>
-        <button className="btn-ghost btn-sm" style={{ alignSelf: 'center' }} onClick={onRefresh}>
+      {/* ── Period selector ───────────────────────────────────────────── */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
+        <span className="text-dim" style={{ fontSize: 12, marginRight: 4 }}>Period:</span>
+        {USAGE_PERIODS.map(({ label, days }) => (
+          <button
+            key={days}
+            className={`filter-btn${periodDays === days ? ' active' : ''}`}
+            onClick={() => setPeriodDays(days)}
+            style={{ fontSize: 12, padding: '3px 10px' }}
+          >
+            {label}
+          </button>
+        ))}
+        {localLoading && <span className="text-dim" style={{ fontSize: 11, marginLeft: 4 }}>↻</span>}
+      </div>
+
+      {/* ── Model selector chips ──────────────────────────────────────── */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
+        {/* "All" chip */}
+        <button
+          className={`live-chip live-chip-model ${!selModel ? 'active' : ''}`}
+          style={{
+            cursor: 'pointer', border: !selModel ? '1px solid var(--purple)' : undefined,
+            opacity: 1, background: !selModel ? 'rgba(139,92,246,0.15)' : undefined,
+          }}
+          onClick={() => setSelModel(null)}
+        >
+          All models
+        </button>
+        {modelKeys.map(key => {
+          const p = by_provider.find(p => `${p.provider}::${p.model}` === key)
+          const active = selModel === key
+          return (
+            <button key={key}
+              className="live-chip live-chip-model"
+              style={{
+                cursor: 'pointer',
+                border: active ? '1px solid var(--purple)' : undefined,
+                background: active ? 'rgba(139,92,246,0.15)' : undefined,
+                opacity: 1,
+              }}
+              onClick={() => setSelModel(active ? null : key)}
+            >
+              {key.replace('::', ' · ')}
+              <span style={{ marginLeft: 6, fontSize: 10, color: 'var(--dim)' }}>
+                {fmtTokens(p?.total_tokens ?? 0)}
+              </span>
+            </button>
+          )
+        })}
+        <button className="btn-ghost btn-sm" style={{ marginLeft: 'auto' }}
+          onClick={() => { onRefresh(); fetchLocalUsage(periodDays) }}>
           ↺ Refresh
         </button>
       </div>
 
-      {/* ── By provider ───────────────────────────────────────────────── */}
-      {by_provider?.length > 0 && (
-        <div style={{ marginTop: 16 }}>
-          <div className="settings-label" style={{ marginBottom: 8 }}>By provider / model</div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Provider</th>
-                  <th>Model</th>
-                  <th style={{ textAlign: 'right' }}>Runs</th>
-                  <th style={{ textAlign: 'right' }}>Prompt tok</th>
-                  <th style={{ textAlign: 'right' }}>Completion tok</th>
-                  <th style={{ textAlign: 'right' }}>Total tok</th>
-                </tr>
-              </thead>
-              <tbody>
-                {by_provider.map((p, i) => (
-                  <tr key={i}>
-                    <td><span className="live-chip live-chip-model" style={{ fontSize: 11 }}>{p.provider}</span></td>
-                    <td className="text-dim" style={{ fontSize: 12 }}>{p.model}</td>
-                    <td style={{ textAlign: 'right' }}>{p.rows}</td>
-                    <td style={{ textAlign: 'right' }}>{p.prompt_tokens.toLocaleString()}</td>
-                    <td style={{ textAlign: 'right' }}>{p.completion_tokens.toLocaleString()}</td>
-                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{p.total_tokens.toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      {/* ── Summary stat cards ────────────────────────────────────────── */}
+      <div className="usage-summary-row" style={{ marginBottom: 16 }}>
+        <div className="usage-stat-card">
+          <span className="usage-stat-label">Total tokens</span>
+          <span className="usage-stat-value">{fmtTokens(selStats.total_tokens ?? 0)}</span>
+          <span className="usage-stat-sub">last {period_days}d</span>
         </div>
-      )}
-
-      {/* ── Last 7 days ───────────────────────────────────────────────── */}
-      {recent7.length > 0 && (
-        <div style={{ marginTop: 16 }}>
-          <div className="settings-label" style={{ marginBottom: 8 }}>Last 7 days</div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th style={{ textAlign: 'right' }}>Prompt tok</th>
-                  <th style={{ textAlign: 'right' }}>Completion tok</th>
-                  <th style={{ textAlign: 'right' }}>Total tok</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recent7.map((d, i) => (
-                  <tr key={i}>
-                    <td className="text-dim" style={{ fontSize: 12 }}>{d.date}</td>
-                    <td style={{ textAlign: 'right' }}>{d.prompt_tokens.toLocaleString()}</td>
-                    <td style={{ textAlign: 'right' }}>{d.completion_tokens.toLocaleString()}</td>
-                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{d.total_tokens.toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        <div className="usage-stat-card">
+          <span className="usage-stat-label">Prompt</span>
+          <span className="usage-stat-value">{fmtTokens(selStats.prompt_tokens ?? 0)}</span>
+          <span className="usage-stat-sub">input</span>
         </div>
-      )}
-
-      {/* ── Live quota check ──────────────────────────────────────────── */}
-      <div style={{ marginTop: 20, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <button
-          className="btn-primary btn-sm"
-          onClick={checkQuota}
-          disabled={quotaLoading}
-        >
-          {quotaLoading ? 'Checking…' : '⚡ Check live quota'}
-        </button>
-        {quotaErr && <span className="settings-err">✗ {quotaErr}</span>}
+        <div className="usage-stat-card">
+          <span className="usage-stat-label">Completion</span>
+          <span className="usage-stat-value">{fmtTokens(selStats.completion_tokens ?? 0)}</span>
+          <span className="usage-stat-sub">output</span>
+        </div>
+        <div className="usage-stat-card">
+          <span className="usage-stat-label">LLM calls</span>
+          <span className="usage-stat-value">{(selStats.rows ?? 0).toLocaleString()}</span>
+          <span className="usage-stat-sub">last {period_days}d · ~{Math.round(avgDailyCalls)}/day</span>
+        </div>
+        {estCostUSD !== null && (
+          <div className="usage-stat-card" style={{ borderColor: 'rgba(251,191,36,0.3)' }}>
+            <span className="usage-stat-label">Est. cost</span>
+            <span className="usage-stat-value" style={{ color: estCostUSD < 0.001 ? 'var(--green)' : 'var(--yellow)' }}>
+              {estCostUSD < 0.001 ? '$0' : `$${estCostUSD.toFixed(4)}`}
+            </span>
+            <span className="usage-stat-sub">{costMeta.note}</span>
+          </div>
+        )}
       </div>
 
-      {quota && (
-        <div className="usage-quota-box">
-          <div className="usage-quota-provider">
-            <span className="live-chip live-chip-model">{quota.provider}</span>
-            {quota.note && <span className="text-dim" style={{ fontSize: 12, marginLeft: 8 }}>{quota.note}</span>}
-          </div>
-
-          {/* Groq rate-limit headers */}
-          {quota.rate_limits && (
-            <div className="table-wrap" style={{ marginTop: 10 }}>
-              <table>
-                <thead><tr><th>Metric</th><th style={{ textAlign: 'right' }}>Value</th></tr></thead>
-                <tbody>
-                  {[
-                    ['Tokens limit',      quota.rate_limits.tokens_limit],
-                    ['Tokens remaining',  quota.rate_limits.tokens_remaining],
-                    ['Tokens reset',      quota.rate_limits.tokens_reset],
-                    ['Requests limit',    quota.rate_limits.requests_limit],
-                    ['Requests remaining',quota.rate_limits.requests_remaining],
-                    ['Requests reset',    quota.rate_limits.requests_reset],
-                  ].filter(([, v]) => v != null).map(([label, val], i) => (
-                    <tr key={i}>
-                      <td className="text-dim" style={{ fontSize: 12 }}>{label}</td>
-                      <td style={{ textAlign: 'right', fontWeight: 600 }}>{val}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+      {/* ── By-source breakdown ──────────────────────────────────────── */}
+      {/* "Signals / Explorer" = AI analysis runs from Dashboard/Explorer scans */}
+      {/* "Backtesting" = LLM-mode backtest runs */}
+      {by_source.length > 0 && (
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
+          {by_source.map(s => (
+            <div key={s.source} className="usage-stat-card" style={{ flex: '1 1 140px' }}>
+              <span className="usage-stat-label">{s.label}</span>
+              <span className="usage-stat-value" style={{ fontSize: 15 }}>
+                {fmtTokens(s.total_tokens)}
+              </span>
+              <span className="usage-stat-sub">
+                {s.rows} call{s.rows !== 1 ? 's' : ''} · {fmtTokens(s.prompt_tokens)} in / {fmtTokens(s.completion_tokens)} out
+              </span>
+            </div>
+          ))}
+          {!by_source.find(s => s.source === 'signal') && (
+            <div className="usage-stat-card" style={{ flex: '1 1 140px', opacity: 0.45 }}>
+              <span className="usage-stat-label">Signals / Explorer</span>
+              <span className="usage-stat-value" style={{ fontSize: 15 }}>0</span>
+              <span className="usage-stat-sub">no AI scans yet this period</span>
             </div>
           )}
-
-          {/* Mistral usage */}
-          {quota.provider === 'mistral' && !quota.rate_limits && (
-            <pre className="usage-quota-json">{JSON.stringify(quota, null, 2)}</pre>
-          )}
-
-          {/* Gemini static limits */}
-          {quota.free_tier_limits && (
-            <div className="table-wrap" style={{ marginTop: 10 }}>
-              <table>
-                <thead><tr><th>Model</th><th style={{ textAlign: 'right' }}>RPM</th><th style={{ textAlign: 'right' }}>TPM</th><th style={{ textAlign: 'right' }}>RPD</th></tr></thead>
-                <tbody>
-                  {Object.entries(quota.free_tier_limits).map(([model, limits], i) => (
-                    <tr key={i}>
-                      <td className="text-dim" style={{ fontSize: 12 }}>{model}</td>
-                      <td style={{ textAlign: 'right' }}>{limits.rpm?.toLocaleString()}</td>
-                      <td style={{ textAlign: 'right' }}>{limits.tpm?.toLocaleString()}</td>
-                      <td style={{ textAlign: 'right' }}>{limits.rpd?.toLocaleString()}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          {!by_source.find(s => s.source === 'backtest_review') && (
+            <div className="usage-stat-card" style={{ flex: '1 1 140px', opacity: 0.45 }}>
+              <span className="usage-stat-label">AI Review</span>
+              <span className="usage-stat-value" style={{ fontSize: 15 }}>0</span>
+              <span className="usage-stat-sub">no reviews yet this period</span>
             </div>
           )}
-          {quota.dashboard_url && (
-            <p style={{ marginTop: 8, fontSize: 12 }}>
-              <a href={quota.dashboard_url} target="_blank" rel="noreferrer" className="text-blue-link">
-                → Open Google AI Studio dashboard ↗
-              </a>
-            </p>
+          {!by_source.find(s => s.source === 'backtest_experiment_advisor') && (
+            <div className="usage-stat-card" style={{ flex: '1 1 140px', opacity: 0.45 }}>
+              <span className="usage-stat-label">Experiment Advisor</span>
+              <span className="usage-stat-value" style={{ fontSize: 15 }}>0</span>
+              <span className="usage-stat-sub">no suggestions yet this period</span>
+            </div>
+          )}
+          {!by_source.find(s => s.source === 'backtest_compare') && (
+            <div className="usage-stat-card" style={{ flex: '1 1 140px', opacity: 0.45 }}>
+              <span className="usage-stat-label">Run Compare</span>
+              <span className="usage-stat-value" style={{ fontSize: 15 }}>0</span>
+              <span className="usage-stat-sub">no comparisons yet this period</span>
+            </div>
           )}
         </div>
       )}
+
+      {/* ── Daily usage chart ─────────────────────────────────────────── */}
+      {chartData.length > 0 ? (
+        <div style={{ marginBottom: 20 }}>
+          <div className="settings-label" style={{ marginBottom: 8 }}>
+            Daily token usage{selModel ? ` — ${selModel.replace('::', ' · ')}` : ' — all models'}
+          </div>
+          <ResponsiveContainer width="100%" height={160}>
+            {chartData.length < 3 ? (
+              /* BarChart for sparse data (1–2 days) — AreaChart needs ≥3 points to draw a line */
+              <BarChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false} />
+                <XAxis dataKey="date" tick={AXIS_TICK} tickFormatter={v => v?.slice(5)} />
+                <YAxis tick={AXIS_TICK} tickFormatter={v => fmtTokens(v)} width={52} />
+                <Tooltip
+                  {...CHART_TOOLTIP_STYLE}
+                  formatter={(v, name) => [v.toLocaleString(), name === 'prompt_tokens' ? 'Prompt' : 'Completion']}
+                  labelFormatter={l => `Date: ${l}`}
+                />
+                <Bar dataKey="prompt_tokens"     fill="#a855f7" name="prompt_tokens"     stackId="a" />
+                <Bar dataKey="completion_tokens" fill="#818cf8" name="completion_tokens" stackId="a" radius={[3,3,0,0]} />
+              </BarChart>
+            ) : (
+              <AreaChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="usageGradPrompt" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%"  stopColor="#a855f7" stopOpacity={0.35} />
+                    <stop offset="95%" stopColor="#a855f7" stopOpacity={0.03} />
+                  </linearGradient>
+                  <linearGradient id="usageGradCompl" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%"  stopColor="#818cf8" stopOpacity={0.25} />
+                    <stop offset="95%" stopColor="#818cf8" stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                <XAxis dataKey="date" tick={AXIS_TICK} tickFormatter={v => v?.slice(5)} />
+                <YAxis tick={AXIS_TICK} tickFormatter={v => fmtTokens(v)} width={52} />
+                <Tooltip
+                  {...CHART_TOOLTIP_STYLE}
+                  formatter={(v, name) => [v.toLocaleString(), name === 'prompt_tokens' ? 'Prompt' : name === 'completion_tokens' ? 'Completion' : 'Total']}
+                  labelFormatter={l => `Date: ${l}`}
+                />
+                <Area type="monotone" dataKey="prompt_tokens"
+                      stroke="#a855f7" strokeWidth={2} fill="url(#usageGradPrompt)"
+                      dot={{ r: 3, fill: '#a855f7' }} name="prompt_tokens" />
+                <Area type="monotone" dataKey="completion_tokens"
+                      stroke="#818cf8" strokeWidth={1.5} fill="url(#usageGradCompl)"
+                      dot={{ r: 2, fill: '#818cf8' }} name="completion_tokens" />
+              </AreaChart>
+            )}
+          </ResponsiveContainer>
+        </div>
+      ) : (
+        <p className="text-dim" style={{ fontSize: 12, marginBottom: 16 }}>
+          No usage data for this period.{' '}
+          {selModel && <span>Try selecting <strong>All models</strong>.</span>}
+        </p>
+      )}
+
+      {/* ── Daily LLM calls chart ─────────────────────────────────────── */}
+      {chartData.length > 0 && chartData.some(d => (d.rows ?? 0) > 0) && (
+        <div style={{ marginBottom: 20 }}>
+          <div className="settings-label" style={{ marginBottom: 8 }}>
+            LLM calls per day{selModel ? ` — ${selModel.replace('::', ' · ')}` : ' — all models'}
+          </div>
+          <ResponsiveContainer width="100%" height={110}>
+            <BarChart data={[...chartData]} margin={{ top: 2, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false} />
+              <XAxis dataKey="date" tick={AXIS_TICK} tickFormatter={v => v?.slice(5)} />
+              <YAxis tick={AXIS_TICK} allowDecimals={false} width={32} />
+              <Tooltip
+                {...CHART_TOOLTIP_STYLE}
+                formatter={(v) => [v, 'Calls']}
+                labelFormatter={l => `Date: ${l}`}
+              />
+              <Bar dataKey="rows" fill="#34d399" radius={[3, 3, 0, 0]} name="Calls" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* ── TPM / quota utilisation bar ───────────────────────────────── */}
+      {activeLim?.tpm && avgDailyTokens > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div className="settings-label" style={{ marginBottom: 6 }}>TPM headroom</div>
+          {(() => {
+            // Rough: avg daily tokens ÷ active trading hours (7h) ÷ 60min
+            const estTpm = Math.round(avgDailyTokens / (7 * 60))
+            const pct    = Math.min(100, Math.round(estTpm / activeLim.tpm * 100))
+            const color  = pct >= 80 ? '#f87171' : pct >= 50 ? '#fbbf24' : '#34d399'
+            return (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--dim)', marginBottom: 4 }}>
+                  <span>~{estTpm.toLocaleString()} TPM avg (7h trading day)</span>
+                  <span>limit {activeLim.tpm.toLocaleString()} TPM · <strong style={{ color }}>{pct}% used</strong></span>
+                </div>
+                <div style={{ height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+                  <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 3, transition: 'width .4s' }} />
+                </div>
+                {activeLim.rpm && (
+                  <p className="text-dim" style={{ fontSize: 11, marginTop: 4 }}>
+                    RPM limit: {activeLim.rpm} · RPD limit: {activeLim.rpd?.toLocaleString() ?? '—'}
+                  </p>
+                )}
+              </div>
+            )
+          })()}
+        </div>
+      )}
+      {activeLim?.note && (
+        <div style={{ marginBottom: 16, padding: '8px 10px', background: 'rgba(255,255,255,0.04)', borderRadius: 6, fontSize: 11, color: 'var(--dim)' }}>
+          📊 {activeLim.note}
+        </div>
+      )}
+
+      {/* ── Quota / limits panel ──────────────────────────────────────── */}
+      {quota && (() => {
+        // Use selProvider (chip selection) so note/URL update when the user switches models;
+        // fall back to quota.provider (active backend provider) if nothing is selected.
+        const prov = (selProvider ?? quota.provider ?? '').toLowerCase()
+        // Per-provider console URLs and documented free-tier limits
+        const PROVIDER_META = {
+          groq:    { url: 'https://console.groq.com/settings/limits',      label: 'Groq console',
+                     note: 'Free tier: 30 RPM / 6,000 TPM / 14,400 RPD (model-dependent). Probe may return null headers on free plan.',
+                     docLimits: [{ model: 'any', rpm: 30, tpm: 6000, rpd: 14400 }] },
+          gemini:  { url: 'https://aistudio.google.com/app/apikey',        label: 'Google AI Studio',
+                     note: 'Free tier: 15 RPM / 1M TPM / 1,500 RPD for gemini-3.5-flash family (see table for all models). Google AI Studio does not expose a programmatic quota API — check live usage at the link above.' },
+          mistral: { url: 'https://console.mistral.ai/usage/',             label: 'Mistral console',
+                     note: 'Free-tier (La Plateforme trial): 30 RPM / 100k TPM / 500 RPD per model. Mistral does not expose a usage API — monitor consumption at the console link above.' },
+          ollama:  { url: null, label: null, note: 'Local model — no rate limits apply.' },
+        }
+        const meta = PROVIDER_META[prov] ?? { url: null, label: 'Provider dashboard', note: null }
+
+        // Live rate-limit headers (Groq)
+        const liveRows = groqLimits
+          ? [
+              ['Tokens limit',       groqLimits.tokens_limit],
+              ['Tokens remaining',   groqLimits.tokens_remaining],
+              ['Tokens reset',       groqLimits.tokens_reset],
+              ['Requests limit',     groqLimits.requests_limit],
+              ['Requests remaining', groqLimits.requests_remaining],
+              ['Requests reset',     groqLimits.requests_reset],
+            ].filter(([, v]) => v != null)
+          : []
+
+        // Free-tier model limits (Gemini, Mistral).
+        // Show ALL entries regardless of chip selection so the table is always visible;
+        // the row matching the selected model is highlighted.
+        const freeLimitEntries = freeLimits ? Object.entries(freeLimits) : []
+
+        return (
+          <div className="usage-quota-box">
+            {/* Header row: provider chip + note + dashboard link */}
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+              <span className="live-chip live-chip-model">{selProvider ?? quota.provider}</span>
+              {meta.url && (
+                <a href={meta.url} target="_blank" rel="noreferrer"
+                   className="text-blue-link" style={{ fontSize: 12, marginLeft: 'auto', whiteSpace: 'nowrap' }}>
+                  {meta.label} ↗
+                </a>
+              )}
+              {/* Show our friendly meta note first; demote the raw probe note to footnote */}
+              {meta.note && (
+                <p className="text-dim" style={{ fontSize: 11, width: '100%', margin: '4px 0 0 0', lineHeight: 1.5 }}>
+                  {meta.note}
+                </p>
+              )}
+              {/* Only show the raw backend note when the chip matches the active backend provider,
+                  so switching to a different chip doesn't bleed in stale provider messages. */}
+              {quota.note && quota.note !== meta.note
+               && (!selProvider || selProvider.toLowerCase() === (quota.provider ?? '').toLowerCase())
+               && (
+                <p className="text-dim" style={{ fontSize: 10, width: '100%', margin: '2px 0 0 0', opacity: 0.6 }}>
+                  ℹ︎ {quota.note}
+                </p>
+              )}
+            </div>
+
+            {/* Live rate-limit headers (Groq — when available) */}
+            {liveRows.length > 0 && (
+              <div className="table-wrap" style={{ marginTop: 10 }}>
+                <table>
+                  <thead><tr><th>Live metric</th><th style={{ textAlign: 'right' }}>Value</th></tr></thead>
+                  <tbody>
+                    {liveRows.map(([label, val], i) => (
+                      <tr key={i}>
+                        <td className="text-dim" style={{ fontSize: 12 }}>{label}</td>
+                        <td style={{ textAlign: 'right', fontWeight: 600 }}>{val}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Free-tier documented limits (Gemini, Mistral) */}
+            {freeLimitEntries.length > 0 && (
+              <div className="table-wrap" style={{ marginTop: 10 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th style={{ textAlign: 'right' }}>RPM</th>
+                      <th style={{ textAlign: 'right' }}>TPM</th>
+                      <th style={{ textAlign: 'right' }}>RPD</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {freeLimitEntries.map(([model, lim], i) => (
+                      <tr key={i} style={{ background: model === selModelName ? 'rgba(168,85,247,0.08)' : undefined }}>
+                        <td className="text-dim" style={{ fontSize: 12 }}>{model}</td>
+                        <td style={{ textAlign: 'right' }}>{lim.rpm?.toLocaleString() ?? '—'}</td>
+                        <td style={{ textAlign: 'right' }}>{lim.tpm?.toLocaleString() ?? '—'}</td>
+                        <td style={{ textAlign: 'right' }}>{lim.rpd?.toLocaleString() ?? '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Groq: no live data — show documented fallback */}
+            {groqLimits && liveRows.length === 0 && meta.docLimits && (
+              <div className="table-wrap" style={{ marginTop: 10 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Documented free-tier limit</th>
+                      <th style={{ textAlign: 'right' }}>RPM</th>
+                      <th style={{ textAlign: 'right' }}>TPM</th>
+                      <th style={{ textAlign: 'right' }}>RPD</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {meta.docLimits.map((lim, i) => (
+                      <tr key={i}>
+                        <td className="text-dim" style={{ fontSize: 12 }}>{selModelName ?? lim.model}</td>
+                        <td style={{ textAlign: 'right' }}>{lim.rpm?.toLocaleString() ?? '—'}</td>
+                        <td style={{ textAlign: 'right' }}>{lim.tpm?.toLocaleString() ?? '—'}</td>
+                        <td style={{ textAlign: 'right' }}>{lim.rpd?.toLocaleString() ?? '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* quota field (Ollama / custom) */}
+            {!groqLimits && !freeLimits && quota.quota && quota.quota !== 'n/a' && (
+              <p className="text-dim" style={{ fontSize: 12, marginTop: 8 }}>
+                Quota: <strong style={{ color: '#f8fafc' }}>{quota.quota}</strong>
+              </p>
+            )}
+          </div>
+        )
+      })()}
+      {quotaErr && <p className="settings-err" style={{ marginTop: 8 }}>✗ Quota: {quotaErr}</p>}
     </div>
   )
 }
@@ -3011,10 +4174,12 @@ function UsageSection({ usage, onRefresh }) {
 // ─── Settings page ────────────────────────────────────────────────────────────
 
 const SETTINGS_SECTIONS = [
-  { id: 'settings-scheduler',   icon: '🕐', label: 'Scheduler' },
-  { id: 'settings-alerts',      icon: '🔔', label: 'Alerts' },
+  { id: 'settings-signal',       icon: '📡', label: 'Signal Config' },
+  { id: 'settings-paper',        icon: '📈', label: 'Paper Trading' },
   { id: 'settings-ai-provider', icon: '🧠', label: 'AI Provider' },
-  { id: 'settings-usage',       icon: '⚡', label: 'Token Usage' },
+  { id: 'settings-usage',       icon: '⚡', label: 'AI Usage' },
+  { id: 'settings-perf',        icon: '🚀', label: 'Performance' },
+  { id: 'settings-cache',       icon: '💾', label: 'Data Cache' },
   { id: 'settings-data',        icon: '🗑️', label: 'Data' },
 ]
 
@@ -3039,7 +4204,7 @@ function SaveRow({ status, errMsg, onSave, label = 'Save' }) {
   )
 }
 
-function SettingsPage({ usage, onUsageRefresh }) {
+function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
   // ── LLM Provider ────────────────────────────────────────────────────────────
   const [llmProvider,  setLlmProvider]  = useState('ollama')
   const [llmApiKey,    setLlmApiKey]    = useState('')
@@ -3059,6 +4224,28 @@ function SettingsPage({ usage, onUsageRefresh }) {
   const [llmReasoningEffort,   setLlmReasoningEffort]   = useState('none')
   const [providerModels,       setProviderModels]       = useState([])
   const [modelChoice,          setModelChoice]          = useState('')
+
+  // ── Signal-scan LLM switch ──────────────────────────────────────────────────
+  const [signalLlmEnabled,     setSignalLlmEnabled]     = useState(true)
+  const [signalLlmSaveStatus,  setSignalLlmSaveStatus]  = useState(null)   // null|'saving'|'ok'|'error'
+
+  const saveSignalLlmEnabled = async (enabled) => {
+    setSignalLlmSaveStatus('saving')
+    try {
+      const r = await fetch(`${API}/settings/signal-scan-llm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      setSignalLlmEnabled(enabled)
+      setSignalLlmSaveStatus('ok')
+      setTimeout(() => setSignalLlmSaveStatus(null), 3000)
+    } catch (e) {
+      setSignalLlmSaveStatus('error')
+      setTimeout(() => setSignalLlmSaveStatus(null), 4000)
+    }
+  }
 
   const cloudModelSuggestions = {
     groq: ['qwen/qwen3.6-27b'],
@@ -3088,6 +4275,102 @@ function SettingsPage({ usage, onUsageRefresh }) {
   // regardless of whether the "Use .env defaults" checkbox is ticked.
   const savedApiKeyMask = (llmApiKeySet || llmApiKeyEnvSet) ? '••••••••••••' : ''
 
+  // ── Paper trading settings ──────────────────────────────────────────────────
+  const [paperEnabled,        setPaperEnabled]        = useState(false)
+  const [alpacaUrl,           setAlpacaUrl]           = useState('https://paper-api.alpaca.markets')
+  const [alpacaKeyId,         setAlpacaKeyId]         = useState('')
+  const [alpacaKeyIdSet,      setAlpacaKeyIdSet]      = useState(false)
+  const [showAlpacaKeyId,     setShowAlpacaKeyId]     = useState(false)
+  const [alpacaSecret,        setAlpacaSecret]        = useState('')
+  const [alpacaSecretSet,     setAlpacaSecretSet]     = useState(false)
+  const [showAlpacaSecret,    setShowAlpacaSecret]    = useState(false)
+  const [paperPositionSize,   setPaperPositionSize]   = useState(500)
+  const [paperMinConf,        setPaperMinConf]        = useState(75)
+  const [paperSaveStatus,     setPaperSaveStatus]     = useState(null)
+  const [alpacaTestResult,    setAlpacaTestResult]    = useState(null)  // null | {equity,buying_power} | 'error'
+  const [alpacaTestLoading,   setAlpacaTestLoading]   = useState(false)
+  const [useAlpacaEnvDefaults,setUseAlpacaEnvDefaults]= useState(false)
+  const [alpacaKeyIdEnvSet,   setAlpacaKeyIdEnvSet]   = useState(false)
+  const [alpacaSecretEnvSet,  setAlpacaSecretEnvSet]  = useState(false)
+
+  const savePaperSettings = async () => {
+    setPaperSaveStatus('saving')
+    try {
+      const body = {
+        enabled: paperEnabled,
+        paper_url: alpacaUrl,
+        position_size: parseFloat(paperPositionSize) || 500,
+        min_confidence: parseFloat(paperMinConf) || 75,
+      }
+      if (useAlpacaEnvDefaults) {
+        // Signal the backend to clear DB credentials and fall back to .env vars.
+        body.use_env = true
+        body.key_id = ''
+        body.secret_key = ''
+      } else {
+        if (alpacaKeyId)  body.key_id    = alpacaKeyId
+        if (alpacaSecret) body.secret_key = alpacaSecret
+      }
+      const r = await fetch(`${API}/settings/alpaca`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      if (!useAlpacaEnvDefaults) {
+        if (alpacaKeyId)  setAlpacaKeyIdSet(true)
+        if (alpacaSecret) setAlpacaSecretSet(true)
+      }
+      // Keep Key ID visible after save (it's not secret); clear secret
+      setAlpacaSecret('')
+      setShowAlpacaSecret(false)
+      setPaperSaveStatus('ok')
+      setTimeout(() => setPaperSaveStatus(null), 3000)
+    } catch (e) {
+      setPaperSaveStatus('error')
+      setTimeout(() => setPaperSaveStatus(null), 4000)
+    }
+  }
+
+  const testAlpacaConnection = async () => {
+    setAlpacaTestLoading(true)
+    setAlpacaTestResult(null)
+    try {
+      // POST currently-typed credentials so the test works before saving.
+      // Empty strings are omitted — backend falls back to DB / env values.
+      const body = {}
+      if (alpacaUrl)   body.paper_url   = alpacaUrl
+      if (alpacaKeyId) body.key_id      = alpacaKeyId
+      if (alpacaSecret) body.secret_key = alpacaSecret
+      const r = await fetch(`${API}/settings/alpaca/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      const d = await r.json()
+      setAlpacaTestResult(d.account ?? 'error')
+    } catch (e) {
+      setAlpacaTestResult('error')
+    } finally {
+      setAlpacaTestLoading(false)
+    }
+  }
+
+  const revealAlpacaSecret = async () => {
+    try {
+      const r = await fetch(`${API}/settings/alpaca/secret`, {
+        headers: { 'X-Admin-Token': adminToken },
+      })
+      if (!r.ok) throw new Error('Unauthorized')
+      const d = await r.json()
+      setAlpacaSecret(d.secret || '')
+      setShowAlpacaSecret(true)
+    } catch (e) {
+      setAlpacaSecret('')
+    }
+  }
+
   // ── Scheduler + scan interval ───────────────────────────────────────────────
   const [schedulerRunning,  setSchedulerRunning]  = useState(true)
   const [scanInterval,      setScanInterval]      = useState('15')
@@ -3100,6 +4383,64 @@ function SettingsPage({ usage, onUsageRefresh }) {
 
   // ── Data reset ──────────────────────────────────────────────────────────────
   const [resetStatus, setResetStatus] = useState(null)
+
+  // ── Performance / parallelism ────────────────────────────────────────────────
+  const [perfSettings,     setPerfSettings]     = useState(null)
+  const [perfRateLimits,   setPerfRateLimits]   = useState(null)
+  const [concTickers,      setConcTickers]      = useState(4)
+  const [concLlm,          setConcLlm]          = useState(2)
+  const [perfSaveStatus,   setPerfSaveStatus]   = useState(null)
+
+  const loadPerfSettings = async () => {
+    try {
+      const r = await fetch(`${API}/settings/performance`)
+      if (!r.ok) return
+      const d = await r.json()
+      setPerfSettings(d)
+      setPerfRateLimits(d.rate_limits)
+      setConcTickers(d.concurrent_tickers ?? 4)
+      setConcLlm(d.concurrent_llm ?? 2)
+    } catch (e) { /* best-effort */ }
+  }
+
+  const savePerfSettings = async () => {
+    setPerfSaveStatus('saving')
+    try {
+      const r = await fetch(
+        `${API}/settings/performance?concurrent_tickers=${concTickers}&concurrent_llm=${concLlm}`,
+        { method: 'POST' }
+      )
+      if (!r.ok) throw new Error(await r.text())
+      setPerfSaveStatus('ok')
+      setTimeout(() => setPerfSaveStatus(null), 3000)
+    } catch (e) { setPerfSaveStatus('error') }
+  }
+
+  // ── Data cache ──────────────────────────────────────────────────────────────
+  const [cacheStats,       setCacheStats]       = useState(null)
+  const [cacheStatsErr,    setCacheStatsErr]    = useState(null)
+  const [cacheEvictStatus, setCacheEvictStatus] = useState(null)
+
+  const loadCacheStats = async () => {
+    setCacheStatsErr(null)
+    try {
+      const r = await fetch(`${API}/data/cache/stats`)
+      if (!r.ok) throw new Error(await r.text())
+      setCacheStats(await r.json())
+    } catch (e) { setCacheStatsErr(String(e)) }
+  }
+
+  const evictCache = async (hours) => {
+    setCacheEvictStatus('clearing')
+    try {
+      const r = await fetch(`${API}/data/cache?older_than_hours=${hours}`, { method: 'DELETE' })
+      if (!r.ok) throw new Error(await r.text())
+      const d = await r.json()
+      setCacheEvictStatus(`ok:${d.deleted}`)
+      loadCacheStats()
+      setTimeout(() => setCacheEvictStatus(null), 4000)
+    } catch (e) { setCacheEvictStatus('error') }
+  }
 
   // Load on mount
   useEffect(() => {
@@ -3126,7 +4467,20 @@ function SettingsPage({ usage, onUsageRefresh }) {
       setScanInterval(String(cfg.scan_interval_minutes ?? 15))
       setSchedulerRunning(cfg.scheduler_running ?? true)
       setAlertsOn(cfg.alerts_enabled ?? true)
+      setSignalLlmEnabled(cfg.signal_scan_llm_enabled ?? true)
+      // Paper trading
+      setPaperEnabled(cfg.paper_trading_enabled ?? false)
+      setAlpacaUrl(cfg.alpaca_paper_url ?? 'https://paper-api.alpaca.markets')
+      setAlpacaKeyId(cfg.alpaca_key_id ?? '')          // pre-fill; Key ID is not secret
+      setAlpacaKeyIdSet(cfg.alpaca_key_id_set ?? false)
+      setAlpacaSecretSet(cfg.alpaca_secret_set ?? false)
+      setAlpacaKeyIdEnvSet(cfg.alpaca_key_id_env_set ?? false)
+      setAlpacaSecretEnvSet(cfg.alpaca_secret_env_set ?? false)
+      setPaperPositionSize(cfg.paper_trade_position_size ?? 500)
+      if (cfg.paper_trade_min_confidence != null) setPaperMinConf(cfg.paper_trade_min_confidence)
     }).catch(() => {})
+    loadCacheStats()
+    loadPerfSettings()
   }, [])
 
   const loadProviderSettings = async (provider) => {
@@ -3168,6 +4522,7 @@ function SettingsPage({ usage, onUsageRefresh }) {
       if (llmApiKey) { setLlmApiKey(''); setLlmApiKeySet(true) }
       if (envDefaultsActive) { setLlmApiKeySet(false); setLlmModel(''); setLlmBaseUrl('') }
       setLlmStatus('ok')
+      onHealthRefresh?.()   // refresh header chip immediately — no page reload needed
       setTimeout(() => setLlmStatus(null), 3000)
     } catch (e) { setLlmStatus('error'); setLlmErr(e.message) }
   }
@@ -3184,6 +4539,7 @@ function SettingsPage({ usage, onUsageRefresh }) {
       })
       if (!r.ok) throw new Error(await r.text())
       setOllamaStatus('ok')
+      onHealthRefresh?.()   // refresh header chip immediately — no page reload needed
       setTimeout(() => setOllamaStatus(null), 3000)
     } catch (e) { setOllamaStatus('error'); setOllamaErr(e.message) }
   }
@@ -3259,12 +4615,16 @@ function SettingsPage({ usage, onUsageRefresh }) {
 
       <div className="settings-page">
 
-      {/* ── Scheduler ─────────────────────────────────────────────────────── */}
-      <SettingSection id="settings-scheduler" title="Scheduler" icon="🕐">
-        <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
-          The scheduler automatically scans every ticker in your watchlist while
-          the US market is open. You can pause it without stopping the container.
+      {/* ── Signal Configuration ──────────────────────────────────────────── */}
+      <SettingSection id="settings-signal" title="Signal Configuration" icon="📡">
+        <p className="text-dim" style={{ fontSize: 13, marginBottom: 18 }}>
+          Control how the system scans for signals: when it runs, who gets notified,
+          and whether AI analysis is applied.
         </p>
+
+        {/* ─ Scheduler ─ */}
+        <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                      letterSpacing: '0.09em', marginBottom: 10 }}>⏰ Scheduler</div>
 
         <div className="settings-row">
           <div className="settings-row-label">
@@ -3298,19 +4658,18 @@ function SettingsPage({ usage, onUsageRefresh }) {
           </div>
         </div>
         <SaveRow status={schedStatus} errMsg={schedErr} onSave={saveScheduler} label="Apply interval" />
-      </SettingSection>
 
-      {/* ── Alerts ────────────────────────────────────────────────────────── */}
-      <SettingSection id="settings-alerts" title="Alerts" icon="🔔">
-        <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
-          Enable or disable outbound alert dispatch (email, Slack, Telegram).
-          Toggling here is instant — no restart required.
-        </p>
+        <div style={{ borderTop: '1px solid var(--border)', margin: '18px 0', opacity: 0.4 }} />
+
+        {/* ─ Alerts ─ */}
+        <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                      letterSpacing: '0.09em', marginBottom: 10 }}>🔔 Alerts</div>
+
         <div className="settings-row">
           <div className="settings-row-label">
             <span>Alert dispatch</span>
             <span className="text-dim" style={{ fontSize: 12 }}>
-              {alertsOn ? 'Alerts will be sent on actionable signals' : 'All alert channels suppressed'}
+              {alertsOn ? 'Enabled — alerts sent on actionable signals (email / Slack / Telegram)' : 'Suppressed — all alert channels silenced'}
             </span>
           </div>
           <button
@@ -3323,6 +4682,194 @@ function SettingsPage({ usage, onUsageRefresh }) {
         {alertsStatus === 'ok' && (
           <div className="settings-ok" style={{ marginTop: 8 }}>✓ Updated</div>
         )}
+
+        <div style={{ borderTop: '1px solid var(--border)', margin: '18px 0', opacity: 0.4 }} />
+
+        {/* ─ AI Analysis ─ */}
+        <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                      letterSpacing: '0.09em', marginBottom: 10 }}>🤖 AI Analysis</div>
+
+        <div className="settings-row">
+          <div className="settings-row-label">
+            <span style={{ color: signalLlmEnabled ? undefined : 'var(--dim)' }}>
+              {signalLlmEnabled ? 'LLM enabled' : 'Rules-only (LLM disabled)'}
+            </span>
+            <span className="text-dim" style={{ fontSize: 12 }}>
+              {signalLlmEnabled
+                ? 'AI analysis runs on every scan and on-demand call — consumes provider quota'
+                : 'LLM skill skipped globally — no API quota used during signal scanning'}
+            </span>
+          </div>
+          <button
+            className={`settings-toggle ${signalLlmEnabled ? 'on' : 'off'}`}
+            onClick={() => saveSignalLlmEnabled(!signalLlmEnabled)}
+            disabled={signalLlmSaveStatus === 'saving'}
+            title={signalLlmEnabled ? 'Click to disable LLM for signal scanning' : 'Click to enable LLM for signal scanning'}
+          >
+            <span className="settings-toggle-knob" />
+          </button>
+        </div>
+        {signalLlmSaveStatus === 'saving' && <span style={{ fontSize: 12, color: 'var(--dim)', marginTop: 8, display: 'block' }}>Saving…</span>}
+        {signalLlmSaveStatus === 'ok'     && <span className="settings-ok" style={{ marginTop: 8, display: 'block' }}>✓ Saved</span>}
+        {signalLlmSaveStatus === 'error'  && <span className="settings-err" style={{ marginTop: 8, display: 'block' }}>✗ Failed</span>}
+      </SettingSection>
+
+      {/* ── Paper Trading ─────────────────────────────────────────────────── */}
+      <SettingSection id="settings-paper" title="Paper Trading" icon="📈">
+        <p className="text-dim" style={{ fontSize: 13, marginBottom: 16 }}>
+          Automatically place bracket orders on your <strong>Alpaca paper account</strong> whenever
+          an actionable signal fires. No real money is involved — paper trading is a free simulation.
+          Get API keys at <a href="https://app.alpaca.markets/paper-trading" target="_blank" rel="noreferrer"
+            style={{ color: 'var(--accent)' }}>app.alpaca.markets</a>.
+        </p>
+
+        {/* Enable toggle */}
+        <div className="settings-row" style={{ marginBottom: 18 }}>
+          <div className="settings-row-label">
+            <span style={{ fontWeight: 600 }}>
+              {paperEnabled ? '📈 Paper trading active' : 'Paper trading disabled'}
+            </span>
+            <span className="text-dim" style={{ fontSize: 12 }}>
+              {paperEnabled
+                ? 'Bracket orders placed automatically on each actionable signal'
+                : 'Toggle on to start placing paper orders automatically'}
+            </span>
+          </div>
+          <button className={`settings-toggle ${paperEnabled ? 'on' : 'off'}`}
+                  onClick={() => setPaperEnabled(v => !v)}>
+            <span className="settings-toggle-knob" />
+          </button>
+        </div>
+
+        <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                      letterSpacing: '0.09em', marginBottom: 12 }}>🔑 Alpaca Connection</div>
+
+        <button
+          type="button"
+          className={`settings-env-btn${useAlpacaEnvDefaults ? ' active' : ''}`}
+          onClick={() => {
+            setUseAlpacaEnvDefaults(v => !v)
+            setAlpacaKeyId('')
+            setAlpacaSecret('')
+            setShowAlpacaSecret(false)
+          }}
+        >
+          {useAlpacaEnvDefaults ? '✓ Using environment defaults' : '↩ Load Environment Default Values'}
+          <span className="settings-env-btn-sub">
+            {useAlpacaEnvDefaults
+              ? '(click to clear and enter values manually)'
+              : '(if set in .env — ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY)'}
+          </span>
+        </button>
+
+        <div className="settings-field" style={{ marginBottom: 12, marginTop: 12 }}>
+          <label className="settings-label">Paper API URL</label>
+          <input type="text" value={alpacaUrl} onChange={e => setAlpacaUrl(e.target.value)}
+                 className="settings-select" placeholder="https://paper-api.alpaca.markets"
+                 style={{ marginTop: 4 }} />
+        </div>
+
+        <div className="settings-field" style={{ marginBottom: 12 }}>
+          <label className="settings-label">API Key ID</label>
+          <div className="settings-secret-field" style={{ marginTop: 4 }}>
+            <input
+              type={showAlpacaKeyId ? 'text' : 'password'}
+              value={useAlpacaEnvDefaults ? '' : (alpacaKeyId || (alpacaKeyIdSet && !showAlpacaKeyId ? '••••••••••••' : ''))}
+              onFocus={() => { if (!alpacaKeyId && alpacaKeyIdSet) setAlpacaKeyId('') }}
+              onChange={e => setAlpacaKeyId(e.target.value)}
+              disabled={useAlpacaEnvDefaults}
+              className="settings-select"
+              autoComplete="new-password"
+              placeholder={
+                useAlpacaEnvDefaults
+                  ? (alpacaKeyIdEnvSet ? 'Using Key ID from .env' : 'No Key ID set in .env')
+                  : (alpacaKeyIdSet ? 'Key saved — focus to replace' : 'PKxxxxxxxxxxxxxxxxxxxxxx')
+              }
+            />
+            <button type="button" className="settings-secret-toggle"
+                    disabled={useAlpacaEnvDefaults}
+                    onClick={() => setShowAlpacaKeyId(v => !v)}>
+              {showAlpacaKeyId ? 'Hide' : 'Show'}
+            </button>
+          </div>
+        </div>
+
+        <div className="settings-field" style={{ marginBottom: 16 }}>
+          <label className="settings-label">API Secret Key</label>
+          <div className="settings-secret-field" style={{ marginTop: 4 }}>
+            <input type={showAlpacaSecret ? 'text' : 'password'}
+                   value={useAlpacaEnvDefaults ? '' : (alpacaSecret || (alpacaSecretSet && !showAlpacaSecret ? '••••••••••••' : ''))}
+                   onFocus={() => { if (!alpacaSecret && alpacaSecretSet) setAlpacaSecret('') }}
+                   onChange={e => setAlpacaSecret(e.target.value)}
+                   disabled={useAlpacaEnvDefaults}
+                   className="settings-select"
+                   placeholder={
+                     useAlpacaEnvDefaults
+                       ? (alpacaSecretEnvSet ? 'Using Secret from .env' : 'No Secret set in .env')
+                       : (alpacaSecretSet ? 'Secret saved — focus to replace' : 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')
+                   } />
+            <button type="button" className="settings-secret-toggle"
+                    disabled={useAlpacaEnvDefaults}
+                    onClick={async () => {
+                      if (showAlpacaSecret) { setAlpacaSecret(''); setShowAlpacaSecret(false) }
+                      else { await revealAlpacaSecret() }
+                    }}>
+              {showAlpacaSecret ? 'Hide' : 'Show'}
+            </button>
+          </div>
+        </div>
+
+        <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0 16px', opacity: 0.4 }} />
+        <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                      letterSpacing: '0.09em', marginBottom: 12 }}>💵 Trade Sizing</div>
+
+        <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 16 }}>
+          <div className="settings-field">
+            <label className="settings-label" title="Fixed dollar amount invested per signal">
+              Position size per trade
+            </label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+              <span style={{ color: 'var(--dim)', fontSize: 13 }}>$</span>
+              <input type="number" min={1} step={50} value={paperPositionSize}
+                     onChange={e => setPaperPositionSize(e.target.value)}
+                     className="settings-num-input" style={{ width: 100 }} />
+            </div>
+          </div>
+          <div className="settings-field" style={{ minWidth: 200 }}>
+            <label className="settings-label"
+                   title="Minimum signal confidence to place an order (can be set higher than the alert floor)">
+              Min confidence to trade: <strong>{paperMinConf}%</strong>
+            </label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+              <input type="range" min={0} max={100} step={5} value={paperMinConf}
+                     onChange={e => setPaperMinConf(Number(e.target.value))}
+                     className="filter-range" style={{ flex: 1 }} />
+              <span className="filter-val">{paperMinConf}%</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Save + Test Connection side-by-side with status messages */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10 }}>
+          <button className="btn-primary btn-sm" onClick={savePaperSettings}
+                  disabled={paperSaveStatus === 'saving'}>
+            {paperSaveStatus === 'saving' ? 'Saving…' : 'Save'}
+          </button>
+          <button className="btn-secondary btn-sm" onClick={testAlpacaConnection}
+                  disabled={alpacaTestLoading}>
+            {alpacaTestLoading ? 'Testing…' : 'Test Connection'}
+          </button>
+          {paperSaveStatus === 'ok'    && <span className="settings-ok">✓ Saved</span>}
+          {paperSaveStatus === 'error' && <span className="settings-err">✗ Save failed</span>}
+          {alpacaTestResult && alpacaTestResult !== 'error' && (
+            <span className="settings-ok" style={{ fontSize: 12 }}>
+              ✓ Connected · Equity ${parseFloat(alpacaTestResult.equity ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+            </span>
+          )}
+          {alpacaTestResult === 'error' && (
+            <span className="settings-err" style={{ fontSize: 12 }}>✗ Connection failed — check credentials</span>
+          )}
+        </div>
       </SettingSection>
 
       {/* ── AI Provider ───────────────────────────────────────────────────── */}
@@ -3575,9 +5122,176 @@ function SettingsPage({ usage, onUsageRefresh }) {
         />
       </SettingSection>
 
-      {/* ── Token Usage ───────────────────────────────────────────────────── */}
-      <SettingSection id="settings-usage" title="Token Usage" icon="⚡">
+      {/* ── AI Usage ─────────────────────────────────────────────────────── */}
+      <SettingSection id="settings-usage" title="AI Usage" icon="⚡">
         <UsageSection usage={usage} onRefresh={onUsageRefresh} />
+      </SettingSection>
+
+      {/* ── Performance ───────────────────────────────────────────────────── */}
+      <SettingSection id="settings-perf" title="Performance" icon="🚀">
+        <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
+          Control parallelism for <strong>both live signal scanning and backtesting</strong>.
+          Higher concurrency finishes faster but must stay within provider rate limits.
+          Changes take effect immediately — no restart needed.
+        </p>
+
+        {/* Sliders */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 18, marginBottom: 20 }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <label style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>Concurrent tickers</label>
+              <span style={{ fontSize: 10, background: 'var(--accent)', color: '#fff', borderRadius: 4, padding: '1px 6px' }}>Signals</span>
+              <span style={{ fontSize: 10, background: 'var(--accent)', color: '#fff', borderRadius: 4, padding: '1px 6px' }}>Backtest</span>
+              <span style={{ fontWeight: 700, color: 'var(--accent)', minWidth: 24, textAlign: 'right' }}>{concTickers}</span>
+            </div>
+            <input type="range" min={1} max={20} value={concTickers}
+              onChange={e => setConcTickers(Number(e.target.value))}
+              style={{ width: '100%' }} />
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--dim)', marginTop: 2 }}>
+              <span>1 (sequential)</span><span>4 (default)</span><span>20</span>
+            </div>
+            <p className="text-dim" style={{ fontSize: 12, marginTop: 6 }}>
+              How many tickers are analysed simultaneously. For <strong>signals</strong>: the
+              scheduler's concurrency cap (controls how many TickerAgent calls run at once, each
+              making one LLM call). For <strong>backtests</strong>: the replay thread pool size.
+              With the OHLCV cache most data is instant — 4–8 is a good range.
+            </p>
+          </div>
+
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <label style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>Concurrent LLM calls</label>
+              <span style={{ fontSize: 10, background: 'var(--dim)', color: 'var(--bg)', borderRadius: 4, padding: '1px 6px' }}>Backtest only</span>
+              <span style={{ fontWeight: 700, color: 'var(--accent)', minWidth: 24, textAlign: 'right' }}>{concLlm}</span>
+            </div>
+            <input type="range" min={1} max={10} value={concLlm}
+              onChange={e => setConcLlm(Number(e.target.value))}
+              style={{ width: '100%' }} />
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--dim)', marginTop: 2 }}>
+              <span>1</span><span>2 (default)</span><span>10</span>
+            </div>
+            <p className="text-dim" style={{ fontSize: 12, marginTop: 6 }}>
+              Backtest LLM mode only. Max LLM requests in-flight simultaneously across all
+              ticker threads. Signals don't need this — each TickerAgent already maps to one LLM
+              call, so <em>Concurrent tickers</em> above is the effective limit for signals.
+              Keep this ≤ your provider's RPM ÷ 15 to stay within rate limits.
+            </p>
+          </div>
+        </div>
+
+        <div className="settings-save-row" style={{ marginBottom: 20 }}>
+          <button className="btn-primary btn-sm" onClick={savePerfSettings} disabled={perfSaveStatus === 'saving'}>
+            {perfSaveStatus === 'saving' ? 'Saving…' : 'Save defaults'}
+          </button>
+          {perfSaveStatus === 'ok'    && <span className="settings-ok">✓ Saved</span>}
+          {perfSaveStatus === 'error' && <span className="settings-err">✗ Save failed</span>}
+        </div>
+
+        {/* Rate limits reference */}
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--fg)', marginBottom: 8 }}>Rate limit reference</div>
+        <table style={{ fontSize: 12, color: 'var(--dim)', borderCollapse: 'collapse', width: '100%' }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left', paddingBottom: 4, paddingRight: 16, color: 'var(--fg)' }}>Source</th>
+              <th style={{ textAlign: 'left', paddingBottom: 4, color: 'var(--fg)' }}>Limit</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[
+              ['yfinance', 'No official limit — 3–4 concurrent safe. Cache makes most calls instant.'],
+              ['Finnhub (news)', '60 req/min free tier. Date-keyed cache = 1 call/ticker/day max.'],
+              ['Gemini free', '15 RPM · 1 500 RPD · 1M TPM'],
+              ['Groq', '30–60 RPM (model-dependent) — check console.groq.com'],
+              ['OpenAI', 'Tier-dependent — check platform.openai.com/usage'],
+              ['Mistral', '30 RPM · 500 RPD'],
+              ['Ollama', 'Local inference — no external rate limits'],
+            ].map(([src, lim]) => (
+              <tr key={src}>
+                <td style={{ padding: '4px 16px 4px 0', whiteSpace: 'nowrap', fontWeight: 500, color: 'var(--fg)' }}>{src}</td>
+                <td style={{ padding: '4px 0' }}>{lim}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </SettingSection>
+
+      <SettingSection id="settings-cache" title="Data Cache" icon="💾">
+        <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
+          Every market data fetch is stored permanently in the local database, keyed by
+          ticker and date. The price, indicator, and news snapshot from each trading day
+          is preserved exactly as seen — so backtests can replay the same market state
+          without making network calls. OHLCV bars for completed sessions never change.
+        </p>
+
+        {/* Stats row */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+          {cacheStats ? (
+            <>
+              <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 14px', minWidth: 120, textAlign: 'center' }}>
+                <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--accent)' }}>{cacheStats.entry_count}</div>
+                <div style={{ fontSize: 11, color: 'var(--dim)' }}>cache entries</div>
+              </div>
+              <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 14px', minWidth: 120, textAlign: 'center' }}>
+                <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--accent)' }}>{cacheStats.total_kb} KB</div>
+                <div style={{ fontSize: 11, color: 'var(--dim)' }}>stored</div>
+              </div>
+              {cacheStats.oldest && (
+                <div style={{ fontSize: 12, color: 'var(--dim)' }}>
+                  Oldest: {cacheStats.oldest?.slice(0, 16).replace('T', ' ')}<br />
+                  Newest: {cacheStats.newest?.slice(0, 16).replace('T', ' ')}
+                </div>
+              )}
+              <button className="btn-sm" style={{ marginLeft: 'auto' }} onClick={loadCacheStats}>↻ Refresh</button>
+            </>
+          ) : cacheStatsErr ? (
+            <span className="settings-err" style={{ fontSize: 12 }}>⚠ Could not load cache stats</span>
+          ) : (
+            <span className="text-dim" style={{ fontSize: 12 }}>Loading…</span>
+          )}
+        </div>
+
+        {/* TTL reference */}
+        <table style={{ fontSize: 12, color: 'var(--dim)', borderCollapse: 'collapse', marginBottom: 16, width: '100%' }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left', fontWeight: 600, paddingBottom: 4, paddingRight: 16, color: 'var(--fg)' }}>Data type</th>
+              <th style={{ textAlign: 'left', fontWeight: 600, paddingBottom: 4, color: 'var(--fg)' }}>Cache TTL</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[
+              ['Price + fundamentals', '♾ Permanent (keyed by date)'],
+              ['Technical indicators (RSI, MACD, …)', '♾ Permanent (keyed by date)'],
+              ['News headlines (Finnhub)', '♾ Permanent (keyed by date)'],
+              ['OHLCV bars (all windows)', '♾ Permanent (keyed by start/end/interval)'],
+              ['Macro data (FRED / CAPE)', '6 hours / 24 hours (global, rarely changes)'],
+              ['Balance sheet', '24 hours (daily, quarterly filings)'],
+            ].map(([label, ttl]) => (
+              <tr key={label}>
+                <td style={{ padding: '3px 16px 3px 0' }}>{label}</td>
+                <td style={{ padding: '3px 0', color: ttl.startsWith('♾') ? 'var(--green)' : undefined }}>{ttl}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        {/* Evict controls */}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <button className="btn-sm" onClick={() => evictCache(168)} disabled={cacheEvictStatus === 'clearing'}>
+            Clear entries &gt; 7 days
+          </button>
+          <button className="btn-sm" onClick={() => evictCache(24)} disabled={cacheEvictStatus === 'clearing'}>
+            Clear entries &gt; 24 h
+          </button>
+          <button className="btn-danger btn-sm" onClick={() => evictCache(1)} disabled={cacheEvictStatus === 'clearing'}>
+            Clear all cache
+          </button>
+          {cacheEvictStatus === 'clearing' && <span className="text-dim" style={{ fontSize: 12 }}>Clearing…</span>}
+          {cacheEvictStatus?.startsWith('ok:') && (
+            <span className="settings-ok">✓ {cacheEvictStatus.split(':')[1]} entries removed</span>
+          )}
+          {cacheEvictStatus === 'error' && <span className="settings-err">✗ Evict failed</span>}
+        </div>
       </SettingSection>
 
       {/* ── Data ──────────────────────────────────────────────────────────── */}
@@ -3600,20 +5314,2513 @@ function SettingsPage({ usage, onUsageRefresh }) {
   )
 }
 
+// ─── BacktestPage ─────────────────────────────────────────────────────────────
+
+const BT_PRESETS = [
+  { label: '30D', days: 30 },
+  { label: '3M', days: 91 },
+  { label: '6M', days: 182 },
+  { label: '1Y', days: 365 },
+  { label: '2Y', days: 730 },
+]
+
+function fmtPct(v) { return v == null ? '—' : (v * 100).toFixed(1) + '%' }
+function fmtR(v)   { return v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(2) + 'R' }
+function fmtNum(v) { return v == null ? '—' : v.toLocaleString() }
+
+const BT_COMPARATOR_COLORS = ['#58a6ff','#34d399','#fbbf24','#f87171','#a855f7','#22d3ee']
+
+function BacktestPage({ wl, usage }) {
+  // ── Form state ────────────────────────────────────────────────────────────
+  const watchlistTickers = (wl?.watchlist ?? wl?.tickers ?? [])
+
+  // Distinct tickers from active signals + past backtest runs — for quick-add
+  const [signalTickers, setSignalTickers] = useState([])
+  useEffect(() => {
+    fetch(`${API}/signals?limit=500`)
+      .then(r => r.json())
+      .then(d => {
+        const fromSignals = (d.signals ?? []).map(s => s.ticker).filter(Boolean)
+        setSignalTickers(prev => {
+          const combined = [...new Set([...fromSignals, ...prev])].sort()
+          return combined
+        })
+      })
+      .catch(() => {})
+  }, [])
+  const [selTickers, setSelTickers] = useState([])
+  const [addTickerInput, setAddTickerInput] = useState('')
+  const [preset, setPreset] = useState('3M')
+  const [startDate, setStartDate] = useState(() => {
+    const d = new Date(); d.setMonth(d.getMonth() - 3); return d.toISOString().slice(0,10)
+  })
+  const [endDate, setEndDate] = useState(() => new Date().toISOString().slice(0,10))
+  const [confFloor, setConfFloor] = useState(75)
+  const [maxHold, setMaxHold]       = useState(10)
+  const [scanInterval, setScanInterval] = useState(1440)  // minutes; 1440 = end-of-day
+  const [useLlm, setUseLlm]         = useState(false)
+  const [isOos, setIsOos]           = useState(false)
+  const [atrMult, setAtrMult]     = useState(2.0)
+  const [rrRatio, setRrRatio]     = useState(2.0)
+  const [rpm, setRpm]             = useState('')
+  const [initBalance, setInitBalance] = useState(10000)
+  const [posSizePct, setPosSizePct] = useState(10)  // % of balance per trade
+
+  // ── Saved param profiles (localStorage) ──────────────────────────────────
+  const [profiles, setProfiles] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('bt_profiles') || '[]') } catch { return [] }
+  })
+  const [profileNameInput, setProfileNameInput] = useState('')
+  const [showProfileSave, setShowProfileSave] = useState(false)
+
+  const _saveProfile = () => {
+    const name = profileNameInput.trim()
+    if (!name) return
+    const p = {
+      id: Date.now(),
+      name,
+      createdAt: new Date().toISOString().slice(0, 10),
+      params: {
+        tickers: selTickers,
+        confFloor, maxHold, scanInterval, useLlm, isOos,
+        atrMult, rrRatio, rpm, initBalance, posSizePct, cashoutR,
+      },
+    }
+    const next = [p, ...profiles.filter(x => x.name !== name)]  // replace same name
+    setProfiles(next)
+    try { localStorage.setItem('bt_profiles', JSON.stringify(next)) } catch {}
+    setProfileNameInput('')
+    setShowProfileSave(false)
+  }
+
+  const _loadProfile = (p) => {
+    const q = p.params
+    if (q.tickers?.length) setSelTickers(q.tickers)
+    if (q.confFloor != null) setConfFloor(q.confFloor)
+    if (q.maxHold   != null) setMaxHold(q.maxHold)
+    if (q.scanInterval != null) setScanInterval(q.scanInterval)
+    if (q.useLlm   != null) setUseLlm(q.useLlm)
+    if (q.isOos    != null) setIsOos(q.isOos)
+    if (q.atrMult  != null) setAtrMult(q.atrMult)
+    if (q.rrRatio  != null) setRrRatio(q.rrRatio)
+    if (q.rpm      != null) setRpm(q.rpm)
+    if (q.initBalance != null) setInitBalance(q.initBalance)
+    if (q.posSizePct  != null) setPosSizePct(q.posSizePct)
+    setCashoutR(q.cashoutR ?? null)
+  }
+
+  const _deleteProfile = (id) => {
+    const next = profiles.filter(x => x.id !== id)
+    setProfiles(next)
+    try { localStorage.setItem('bt_profiles', JSON.stringify(next)) } catch {}
+  }
+  const [cashoutR, setCashoutR] = useState(null)     // null = disabled; number = R level
+
+  // ── Run state ─────────────────────────────────────────────────────────────
+  const [running, setRunning]   = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [progressLabel, setProgressLabel] = useState('')
+  const [notices, setNotices]   = useState([])   // fallback / quota_stop events
+  const [report, setReport]     = useState(null) // current run result
+  const [runError, setRunError] = useState(null)
+
+  // ── Results floor slider (client-side re-filter) ──────────────────────────
+  const [liveFloor, setLiveFloor] = useState(75)
+
+  // ── Loaded past run persistence ───────────────────────────────────────────
+  // Track which past run is currently open so the row stays highlighted and
+  // the run is automatically reloaded after a page refresh.
+  const [loadedRunId, setLoadedRunId] = useState(() => {
+    try { return parseInt(localStorage.getItem('bt_loaded_run_id') || '', 10) || null }
+    catch { return null }
+  })
+  const loadRun = useCallback((runId) => {
+    fetch(`${API}/backtest/${runId}`)
+      .then(res => res.json())
+      .then(d => {
+        setReport(d)
+        setLiveFloor(d.confidence_floor ?? 75)
+        setAiReview(null); setAiReviewError(null)
+        setFloorSuggest(null); setFloorSuggestError(null)
+        setLoadedRunId(runId)
+        try { localStorage.setItem('bt_loaded_run_id', String(runId)) } catch {}
+      })
+  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
+  // On mount, if a run was previously loaded restore it (once past runs are available).
+  const _restoredRef = useRef(false)
+
+  // ── Past runs ─────────────────────────────────────────────────────────────
+  const { data: pastRunsData, reload: reloadRuns } = usePolling('/backtest', 30_000)
+  const pastRuns = pastRunsData?.runs ?? []
+
+  // Merge past-run tickers into signalTickers so users can quick-add tickers
+  // they've previously backtested even when the signals table is empty.
+  useEffect(() => {
+    if (!pastRuns.length) return
+    const fromRuns = pastRuns.flatMap(r => r.tickers ?? []).filter(Boolean)
+    setSignalTickers(prev => [...new Set([...fromRuns, ...prev])].sort())
+    // Restore the last-loaded run once the list is available.
+    if (!_restoredRef.current && loadedRunId && !report) {
+      const exists = pastRuns.some(r => r.id === loadedRunId)
+      if (exists) { _restoredRef.current = true; loadRun(loadedRunId) }
+    }
+  }, [pastRuns.length])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Comparator ────────────────────────────────────────────────────────────
+  const [compareSel, setCompareSel] = useState(new Set())
+  const [compareData, setCompareData] = useState({})   // run_id -> run dict
+
+  // Reset AI compare result whenever the selection changes.
+  useEffect(() => { setAiCompare(null); setAiCompareError(null) }, [compareSel])
+
+  // ── Pre-flight LLM notifier ───────────────────────────────────────────────
+  const [quotaInfo, setQuotaInfo] = useState(null)
+  useEffect(() => {
+    if (!useLlm) return
+    fetch(`${API}/provider/quota`).then(r => r.json()).then(setQuotaInfo).catch(() => {})
+  }, [useLlm])
+
+  // ── Feature 2: model/provider change detection (no refresh needed) ────────
+  const knownModelRef = useRef(null)
+  const [modelBanner, setModelBanner] = useState(null)  // { from, to } when model changed
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const h = await fetch(`${API}/health`).then(r => r.json())
+        const provider  = h?.llm_provider ?? null
+        const modelName = h?.llm_model ?? h?.ollama_model ?? null
+        if (!provider || !modelName) return
+        const key = `${provider}::${modelName}`
+        if (knownModelRef.current === null) { knownModelRef.current = key; return }
+        if (knownModelRef.current !== key) {
+          const prev = knownModelRef.current.replace('::', ' · ')
+          const next = key.replace('::', ' · ')
+          setModelBanner({ from: prev, to: next })
+          knownModelRef.current = key
+        }
+      } catch {}
+    }
+    poll()
+    const id = setInterval(poll, 20_000)
+    return () => clearInterval(id)
+  }, [])
+
+  // ── Feature 3: tokens consumed during a run ───────────────────────────────
+  const [runTokenDelta, setRunTokenDelta] = useState(null)
+
+  // ── Feature 4: AI review of run results ──────────────────────────────────
+  const [aiReview, setAiReview]               = useState(null)
+  const [aiReviewLoading, setAiReviewLoading] = useState(false)
+  const [aiReviewError, setAiReviewError]     = useState(null)
+
+  // ── Feature 5: Experiment Advisor ────────────────────────────────────────
+  const [floorSuggest,        setFloorSuggest]        = useState(null)
+  const [floorSuggestLoading, setFloorSuggestLoading] = useState(false)
+  const [floorSuggestError,   setFloorSuggestError]   = useState(null)
+
+  // ── Feature 6: AI run comparator ─────────────────────────────────────────
+  const [aiCompare,        setAiCompare]        = useState(null)
+  const [aiCompareLoading, setAiCompareLoading] = useState(false)
+  const [aiCompareError,   setAiCompareError]   = useState(null)
+
+  const estDays = (() => {
+    if (!startDate || !endDate) return 0
+    const ms = new Date(endDate) - new Date(startDate)
+    return Math.max(0, Math.round(ms / 86400000 * 5 / 7))
+  })()
+  // Scans per trading day depends on scan interval.
+  // NYSE session = 390 min; ceil(390 / interval) + 1 to include both endpoints.
+  const scansPerDay = scanInterval >= 1440 ? 1 : Math.ceil(390 / scanInterval) + 1
+  const estRequests = selTickers.length * estDays * scansPerDay
+  const avgTokens = (() => {
+    // Prefer analysis_log history; fall back to backtest run averages when no live scans yet
+    if (usage && (usage.total_rows ?? 0) > 0) {
+      return Math.round(
+        (usage.total_prompt_tokens + usage.total_completion_tokens) / Math.max(usage.total_rows, 1)
+      )
+    }
+    const runs = pastRunsData?.runs ?? []
+    const btCalls = runs.reduce((s, r) => s + (r.llm_calls ?? 0), 0)
+    const btTokens = runs.reduce((s, r) => s + (r.llm_prompt_tokens ?? 0) + (r.llm_completion_tokens ?? 0), 0)
+    if (btCalls > 0) return Math.round(btTokens / btCalls)
+    return 0
+  })()
+  const estTokens   = estRequests * avgTokens
+  const rpmCap      = parseInt(rpm) || null
+  const estMinutes  = rpmCap ? Math.ceil(estRequests / rpmCap) : null
+  const provLimits  = quotaInfo?.rate_limits ?? quotaInfo?.free_tier_limits?.[Object.keys(quotaInfo?.free_tier_limits ?? {})[0]] ?? null
+  const overRpd     = provLimits?.rpd != null && estRequests > provLimits.rpd
+  const overTpm     = provLimits?.tpm != null && rpmCap && (rpmCap * avgTokens) > provLimits.tpm
+
+  // ── Ticker add / remove ────────────────────────────────────────────────────
+  const addTicker = (t) => {
+    const u = t.trim().toUpperCase()
+    if (u && !selTickers.includes(u)) setSelTickers(s => [...s, u])
+    setAddTickerInput('')
+  }
+  const removeTicker = (t) => setSelTickers(s => s.filter(x => x !== t))
+
+  // ── Date preset ───────────────────────────────────────────────────────────
+  const applyPreset = (p) => {
+    setPreset(p.label)
+    const end = new Date()
+    const start = new Date(); start.setDate(start.getDate() - p.days)
+    setStartDate(start.toISOString().slice(0,10))
+    setEndDate(end.toISOString().slice(0,10))
+  }
+
+  // ── Run ───────────────────────────────────────────────────────────────────
+  const runBacktest = async () => {
+    if (!selTickers.length) return
+    setRunning(true); setProgress(0); setProgressLabel(''); setNotices([]); setReport(null); setRunError(null)
+    setRunTokenDelta(null); setAiReview(null); setAiReviewError(null)
+    setFloorSuggest(null); setFloorSuggestError(null)
+    const body = {
+      tickers: selTickers, start_date: startDate, end_date: endDate,
+      initial_balance: parseFloat(initBalance) || 10000,
+      position_size_pct: posSizePct / 100,
+      cashout_r: cashoutR,
+      confidence_floor: confFloor, max_hold_days: parseInt(maxHold) || 10,
+      use_llm: useLlm, atr_multiple: parseFloat(atrMult) || 1.5,
+      reward_risk: parseFloat(rrRatio) || 2.0,
+      requests_per_minute: rpmCap,
+      scan_interval_minutes: scanInterval,
+      is_out_of_sample: isOos,
+    }
+    try {
+      for await (const evt of readSSEStream(`${API}/backtest/stream`, body)) {
+        if (evt.type === 'progress') {
+          setProgress(evt.pct ?? 0)
+          setProgressLabel(evt.ticker + (evt.day ? ' · ' + evt.day : ''))
+        } else if (evt.type === 'fallback') {
+          setNotices(n => [...n, { kind: 'fallback', msg: `Provider switched: ${evt.from} → ${evt.to} (${evt.reason ?? 'quota/error'})` }])
+        } else if (evt.type === 'quota_stop') {
+          setNotices(n => [...n, { kind: 'quota', msg: `Quota exhausted on ${evt.ticker} ${evt.day}: ${evt.msg}. Partial results saved.` }])
+        } else if (evt.type === 'result') {
+          setReport(evt.report)
+          setLiveFloor(confFloor)
+          reloadRuns()
+          // Feature 3: token counts come directly from the report (accumulated in run_backtest)
+          const pt  = evt.report?.llm_prompt_tokens ?? 0
+          const ct  = evt.report?.llm_completion_tokens ?? 0
+          const lc  = evt.report?.llm_calls ?? 0
+          if (pt + ct > 0 || lc > 0) setRunTokenDelta({ calls: lc, prompt: pt, completion: ct, total: pt + ct })
+        } else if (evt.type === 'error') {
+          setRunError(evt.msg ?? 'Backtest failed.')
+        }
+      }
+    } catch (e) {
+      setRunError(e.message ?? 'Stream error.')
+    } finally {
+      setRunning(false); setProgress(100)
+    }
+  }
+
+  // ── Live floor filtering ──────────────────────────────────────────────────
+  const filteredTrades = report?.trades?.filter(t => (t.confidence ?? 0) >= liveFloor) ?? []
+
+  // ── Dollar P&L helpers (requires wallet to be present) ───────────────────
+  const walletPosSz = report?.metrics?.wallet?.position_size ?? 0
+  const tradeDollarPnl = (t) => {
+    if (!walletPosSz) return null
+    const entry = t.entry || 1
+    const stop = t.stop
+    const riskFrac = stop != null && entry ? Math.abs(entry - stop) / entry : 0.02
+    return walletPosSz * riskFrac * (t.r_multiple ?? 0)
+  }
+  // Per-ticker dollar P&L map: { AAPL: 312.5, MSFT: -45.2, ... }
+  const perTickerDollarPnl = (() => {
+    if (!walletPosSz) return {}
+    const map = {}
+    filteredTrades.forEach(t => {
+      if (t.r_multiple == null || !t.exit_date) return  // only closed trades
+      const pnl = tradeDollarPnl(t)
+      if (pnl == null) return
+      map[t.ticker] = (map[t.ticker] ?? 0) + pnl
+    })
+    return map
+  })()
+
+  const liveMetrics    = (() => {
+    if (!report?.metrics?.floor_sweep) return report?.metrics ?? null
+    const entry = report.metrics.floor_sweep.find(e => e.floor === Math.round(liveFloor / 5) * 5) ?? null
+    // Full recompute happens server-side; for live slider, show counts from sweep + base metrics at initial floor
+    return { ...(report.metrics), ...entry }
+  })()
+  const cumR = (() => {
+    if (!report?.trades) return []
+    const sorted = [...filteredTrades].sort((a,b) => (a.signal_date??'').localeCompare(b.signal_date??''))
+    let sum = 0
+    return sorted.map(t => { sum += t.r_multiple ?? 0; return { date: t.signal_date?.slice(5), r: +sum.toFixed(3) } })
+  })()
+
+  // ── Comparator ────────────────────────────────────────────────────────────
+  const toggleCompare = async (runId) => {
+    const next = new Set(compareSel)
+    if (next.has(runId)) { next.delete(runId) }
+    else {
+      next.add(runId)
+      if (!compareData[runId]) {
+        const data = await fetch(`${API}/backtest/${runId}`).then(r => r.json()).catch(() => null)
+        if (data) setCompareData(prev => ({...prev, [runId]: data}))
+      }
+    }
+    setCompareSel(next)
+  }
+
+  const compareRuns = [...compareSel].map(id => compareData[id]).filter(Boolean)
+
+  const compareChartData = (() => {
+    if (!compareRuns.length) return []
+    const maxLen = Math.max(...compareRuns.map(r => (r.trades?.length ?? 0)))
+    return Array.from({ length: maxLen }, (_, i) => {
+      const pt = { i }
+      compareRuns.forEach((r, ri) => {
+        const trades = [...(r.trades ?? [])].sort((a,b) => (a.signal_date??'').localeCompare(b.signal_date??''))
+        let sum = 0
+        for (let j = 0; j <= i && j < trades.length; j++) sum += trades[j].r_multiple ?? 0
+        pt[`run_${r.id}`] = i < trades.length ? +sum.toFixed(3) : undefined
+      })
+      return pt
+    })
+  })()
+
+  // $ equity curve chart data — merge dollar_equity_curve arrays across runs on date union
+  const compareDollarChartData = (() => {
+    const runsWithWallet = compareRuns.filter(r => r.metrics?.wallet?.dollar_equity_curve?.length)
+    if (runsWithWallet.length < 1) return []
+    // Collect all dates across runs
+    const dateSet = new Set()
+    runsWithWallet.forEach(r => r.metrics.wallet.dollar_equity_curve.forEach(p => { if (p.date) dateSet.add(p.date) }))
+    const dates = [...dateSet].sort()
+    return dates.map(date => {
+      const pt = { date: date.slice(5) }
+      runsWithWallet.forEach(r => {
+        const pts = r.metrics.wallet.dollar_equity_curve
+        // Forward-fill: last known equity up to this date
+        let val = null
+        for (const p of pts) { if (p.date <= date && p.equity != null) val = p.equity }
+        if (val != null) pt[`run_${r.id}`] = val
+      })
+      return pt
+    })
+  })()
+
+  const deleteRun = async (runId) => {
+    await fetch(`${API}/backtest/${runId}`, { method: 'DELETE' })
+    reloadRuns()
+    setCompareSel(s => { const n = new Set(s); n.delete(runId); return n })
+  }
+
+  // Feature 4: request an AI verdict on the currently loaded report
+  // Fresh runs have report.run_id (from backtest.py); past runs loaded via GET /backtest/{id}
+  // have report.id (DB column name). Accept either.
+  const reportRunId = report?.run_id ?? report?.id ?? null
+  const runAiReview = async () => {
+    if (!reportRunId) return
+    setAiReviewLoading(true); setAiReview(null); setAiReviewError(null)
+    try {
+      const res = await fetch(`${API}/backtest/${reportRunId}/review`, { method: 'POST' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setAiReview(await res.json())
+    } catch (e) {
+      setAiReviewError(e.message ?? 'Review failed.')
+    } finally {
+      setAiReviewLoading(false)
+    }
+  }
+
+  const runFloorSuggest = async () => {
+    if (!reportRunId) return
+    setFloorSuggestLoading(true); setFloorSuggestError(null)
+    try {
+      const res = await fetch(`${API}/backtest/${reportRunId}/experiment-advisor`, { method: 'POST' })
+      if (!res.ok) throw new Error(await res.text())
+      setFloorSuggest(await res.json())
+    } catch (e) { setFloorSuggestError(e.message) }
+    finally { setFloorSuggestLoading(false) }
+  }
+
+  const runAiCompare = async () => {
+    if (compareSel.size < 2) return
+    setAiCompareLoading(true); setAiCompareError(null)
+    try {
+      const res = await fetch(`${API}/backtest/compare`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ run_ids: [...compareSel] }),
+      })
+      if (!res.ok) throw new Error(await res.text())
+      setAiCompare(await res.json())
+    } catch (e) { setAiCompareError(e.message) }
+    finally { setAiCompareLoading(false) }
+  }
+
+  const cloneRunParams = (run, flipLlm = false) => {
+    setSelTickers(run.tickers ?? [])
+    setStartDate(run.start_date ?? '')
+    setEndDate(run.end_date ?? '')
+    setConfFloor(run.confidence_floor ?? 75)
+    setMaxHold(run.max_hold_days ?? 10)
+    setUseLlm(flipLlm ? run.signal_mode !== 'llm' : run.signal_mode === 'llm')
+    setIsOos(run.is_out_of_sample ?? false)
+    setAtrMult(run.atr_multiple ?? 2.0)
+    setRrRatio(run.reward_risk ?? 2.0)
+    setRpm(run.requests_per_minute ?? '')
+    setScanInterval(run.scan_interval_minutes ?? 1440)
+    // Restore position size from stored wallet metrics if available
+    const storedPos = run.metrics?.wallet?.position_size_pct
+    if (storedPos != null) setPosSizePct(Math.round(storedPos * 100))
+    // Restore cashout_r from stored metrics (it lives at top-level of metrics or wallet)
+    setCashoutR(run.metrics?.cashout_r ?? null)
+    document.querySelector('.bt-params-section')?.scrollIntoView({ behavior: 'smooth' })
+  }
+
+  return (
+    <div className="explorer-page">
+
+      {/* ── Model-change banner (Feature 2) ──────────────────────────────────── */}
+      {modelBanner && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px',
+          background: 'rgba(251,191,36,0.12)', border: '1px solid rgba(251,191,36,0.3)',
+          borderRadius: 8, fontSize: 13, marginBottom: 12,
+        }}>
+          <span>🔄 LLM model changed: <strong>{modelBanner.from}</strong> → <strong>{modelBanner.to}</strong></span>
+          <button className="btn-ghost btn-sm" style={{ marginLeft: 'auto' }}
+                  onClick={() => setModelBanner(null)}>Dismiss</button>
+        </div>
+      )}
+
+      {/* ── Token usage summary (Feature 1) ──────────────────────────────────── */}
+      {/* Computed from backtest run records, not analysis_log, so every LLM     */}
+      {/* backtest call is reflected here even if no live signal scans were done. */}
+      {(() => {
+        const runs = pastRunsData?.runs ?? []
+        const todayIso = new Date().toISOString().slice(0, 10)
+        const btTotalPt  = runs.reduce((s, r) => s + (r.llm_prompt_tokens     ?? 0), 0)
+        const btTotalCt  = runs.reduce((s, r) => s + (r.llm_completion_tokens ?? 0), 0)
+        const btTotalCalls = runs.reduce((s, r) => s + (r.llm_calls           ?? 0), 0)
+        const btTodayTokens = runs
+          .filter(r => (r.created_at ?? '').slice(0, 10) === todayIso)
+          .reduce((s, r) => s + (r.llm_prompt_tokens ?? 0) + (r.llm_completion_tokens ?? 0), 0)
+        return (
+          <div className="usage-summary-row" style={{ marginBottom: 16 }}>
+            <div className="usage-stat-card">
+              <span className="usage-stat-label">Today</span>
+              <span className="usage-stat-value">{btTodayTokens.toLocaleString()}</span>
+              <span className="usage-stat-sub">backtest tokens today</span>
+            </div>
+            <div className="usage-stat-card">
+              <span className="usage-stat-label">Total tokens</span>
+              <span className="usage-stat-value">{(btTotalPt + btTotalCt).toLocaleString()}</span>
+              <span className="usage-stat-sub">all backtest runs</span>
+            </div>
+            <div className="usage-stat-card">
+              <span className="usage-stat-label">Prompt</span>
+              <span className="usage-stat-value">{btTotalPt.toLocaleString()}</span>
+              <span className="usage-stat-sub">input tokens</span>
+            </div>
+            <div className="usage-stat-card">
+              <span className="usage-stat-label">Completion</span>
+              <span className="usage-stat-value">{btTotalCt.toLocaleString()}</span>
+              <span className="usage-stat-sub">output tokens</span>
+            </div>
+            <div className="usage-stat-card">
+              <span className="usage-stat-label">LLM calls</span>
+              <span className="usage-stat-value">{btTotalCalls.toLocaleString()}</span>
+              <span className="usage-stat-sub">across {runs.filter(r => r.llm_calls > 0).length} run{runs.filter(r => r.llm_calls > 0).length !== 1 ? 's' : ''}</span>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* ── Section 1: Parameters ──────────────────────────────────────────── */}
+      <div className="explorer-section bt-params-section">
+        <div className="section-header">
+          <span className="section-badge">1</span>
+          <span className="section-label">Parameters</span>
+          <span className="section-desc">Configure and run a backtest</span>
+        </div>
+
+        {/* Ticker multiselect */}
+        <div className="settings-field" style={{ marginBottom: 12 }}>
+          <label className="settings-label">Tickers</label>
+          <div className="chip-list">
+            {selTickers.map(t => (
+              <span key={t} className="chip">
+                {t}
+                <button className="chip-remove" onClick={() => removeTicker(t)}>×</button>
+              </span>
+            ))}
+          </div>
+          <div className="add-ticker-row" style={{ marginTop: 6 }}>
+            <input
+              className="ticker-input"
+              placeholder="Add ticker…"
+              value={addTickerInput}
+              onChange={e => setAddTickerInput(e.target.value.toUpperCase())}
+              onKeyDown={e => { if (e.key === 'Enter') addTicker(addTickerInput) }}
+            />
+            <button className="btn-primary btn-sm" onClick={() => addTicker(addTickerInput)}>Add</button>
+          </div>
+          {/* Quick-add rows: Dashboard watchlist + signal/backtest history */}
+          {watchlistTickers.length > 0 && (
+            <div style={{ marginTop: 6, fontSize: 12, color: 'var(--dim)' }}>
+              <span style={{ marginRight: 4, fontWeight: 500 }}>Dashboard:</span>
+              {watchlistTickers.map(t => (
+                <button key={t} className="btn-ghost btn-sm" style={{ marginRight: 4 }}
+                        onClick={() => addTicker(t)} disabled={selTickers.includes(t)}
+                        title={`Add ${t} from watchlist`}>{t}</button>
+              ))}
+              <button className="btn-ghost btn-sm"
+                      style={{ marginLeft: 4, opacity: 0.6 }}
+                      title="Add all watchlist tickers"
+                      onClick={() => watchlistTickers.forEach(t => addTicker(t))}>
+                + all
+              </button>
+            </div>
+          )}
+          {signalTickers.filter(t => !watchlistTickers.includes(t)).length > 0 && (
+            <div style={{ marginTop: 4, fontSize: 12, color: 'var(--dim)' }}>
+              <span style={{ marginRight: 4, fontWeight: 500 }}>From past runs / signals:</span>
+              {signalTickers.filter(t => !watchlistTickers.includes(t)).map(t => (
+                <button key={t} className="btn-ghost btn-sm" style={{ marginRight: 4 }}
+                        onClick={() => addTicker(t)} disabled={selTickers.includes(t)}
+                        title={`Add ${t} (from signals or past backtest)`}>{t}</button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Time period */}
+        <div className="settings-field" style={{ marginBottom: 12 }}>
+          <label className="settings-label">Time period</label>
+          <div className="filter-group" style={{ marginBottom: 8 }}>
+            {BT_PRESETS.map(p => (
+              <button key={p.label}
+                className={`filter-btn ${preset === p.label ? 'active' : ''}`}
+                onClick={() => applyPreset(p)}>{p.label}</button>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div>
+              <label className="settings-label" style={{ fontSize: 11 }}>From</label>
+              <input type="date" className="settings-select" value={startDate}
+                     onChange={e => { setStartDate(e.target.value); setPreset('') }} />
+            </div>
+            <div>
+              <label className="settings-label" style={{ fontSize: 11 }}>To</label>
+              <input type="date" className="settings-select" value={endDate}
+                     onChange={e => { setEndDate(e.target.value); setPreset('') }} />
+            </div>
+          </div>
+          {startDate && new Date(startDate) < new Date(new Date().setFullYear(new Date().getFullYear() - 2)) && (
+            <p style={{ fontSize: 11, color: 'var(--yellow)', marginTop: 6 }}>
+              ⚠ Window exceeds ~2 years — 1H/4H indicators unavailable; only daily-bar rules will fire.
+            </p>
+          )}
+        </div>
+
+        {/* Params — three labeled groups */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 0, marginBottom: 12 }}>
+
+          {/* ── Group 1: Signal Filtering ── */}
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                          letterSpacing: '0.09em', marginBottom: 8 }}>
+              Signal Filtering
+            </div>
+            <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+              <div className="settings-field" style={{ minWidth: 200 }}>
+                <label className="settings-label"
+                       title="Minimum AI confidence (0–100%) for a signal to be included in the backtest. Higher = fewer but stronger signals.">
+                  Confidence floor: <strong>{confFloor}%</strong>
+                </label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                  <input type="range" min={0} max={100} step={5} value={confFloor}
+                         onChange={e => setConfFloor(Number(e.target.value))} className="filter-range"
+                         style={{ flex: 1 }} />
+                  <span className="filter-val">{confFloor}%</span>
+                </div>
+              </div>
+              <div className="settings-field">
+                <label className="settings-label"
+                       title="How often to scan for signals within each trading day. EOD = once per day at close (fastest). Finer intervals increase LLM call count proportionally.">
+                  Scan interval
+                </label>
+                <div className="filter-group" style={{ marginTop: 4 }}>
+                  {[
+                    { label: 'EOD', val: 1440, tip: 'Once per day at market close' },
+                    { label: '4h',  val: 240,  tip: '~2 scans/day' },
+                    { label: '1h',  val: 60,   tip: '~7 scans/day' },
+                    { label: '30m', val: 30,   tip: '~14 scans/day' },
+                    { label: '15m', val: 15,   tip: '~27 scans/day' },
+                  ].map(({ label, val, tip }) => (
+                    <button key={val}
+                            className={`filter-btn ${scanInterval === val ? 'active' : ''}`}
+                            title={tip}
+                            onClick={() => setScanInterval(val)}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ borderTop: '1px solid var(--border)', marginBottom: 14, opacity: 0.4 }} />
+
+          {/* ── Group 2: Trade Setup ── */}
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                          letterSpacing: '0.09em', marginBottom: 8 }}>
+              Trade Setup
+            </div>
+            <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+              <div className="settings-field">
+                <label className="settings-label"
+                       title="Stop distance = ATR × this multiple. Larger = wider stop, fewer premature exits but bigger losses when wrong.">
+                  ATR multiple
+                </label>
+                <input type="number" min={0.1} step={0.1} value={atrMult}
+                       onChange={e => setAtrMult(e.target.value)} className="settings-num-input"
+                       style={{ marginTop: 4 }} />
+              </div>
+              <div className="settings-field">
+                <label className="settings-label"
+                       title="Target distance = stop distance × this ratio. E.g. 2.0 means you aim to win twice what you risk.">
+                  Reward : Risk
+                </label>
+                <input type="number" min={0.1} step={0.1} value={rrRatio}
+                       onChange={e => setRrRatio(e.target.value)} className="settings-num-input"
+                       style={{ marginTop: 4 }} />
+              </div>
+              <div className="settings-field">
+                <label className="settings-label"
+                       title="If neither stop nor target is hit after this many days, the trade closes at the current price.">
+                  Max hold days
+                </label>
+                <input type="number" min={1} max={120} value={maxHold}
+                       onChange={e => setMaxHold(e.target.value)} className="settings-num-input"
+                       style={{ marginTop: 4 }} />
+              </div>
+            </div>
+          </div>
+
+          <div style={{ borderTop: '1px solid var(--border)', marginBottom: 14, opacity: 0.4 }} />
+
+          {/* ── Group 3: Virtual Wallet ── */}
+          <div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                          letterSpacing: '0.09em', marginBottom: 8 }}>
+              Virtual Wallet
+            </div>
+            <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+              <div className="settings-field">
+                <label className="settings-label"
+                       title="Starting balance for the virtual wallet simulation">
+                  Initial balance ($)
+                </label>
+                <input type="number" min={100} step={100} value={initBalance}
+                       onChange={e => setInitBalance(e.target.value)} className="settings-num-input"
+                       style={{ width: 100, marginTop: 4 }} />
+              </div>
+              <div className="settings-field" style={{ minWidth: 200 }}>
+                <label className="settings-label"
+                       title="Fraction of initial balance invested per signal (fixed-fractional sizing). E.g. 10% of $10,000 = $1,000 per trade.">
+                  Position size: <strong>{posSizePct}%</strong>
+                  <span style={{ marginLeft: 6, color: 'var(--dim)', fontSize: 11 }}>
+                    = ${Math.round((parseFloat(initBalance) || 10000) * posSizePct / 100).toLocaleString()}/trade
+                  </span>
+                </label>
+                <input type="range" min={1} max={25} step={1} value={posSizePct}
+                       onChange={e => setPosSizePct(Number(e.target.value))}
+                       className="filter-range" style={{ width: '100%', marginTop: 4 }} />
+              </div>
+              <div className="settings-field" style={{ minWidth: 210 }}>
+                <label className="settings-label"
+                       title="Cashout rule: exit a trade early when its unrealised R reaches this level, locking in profit before a reversal. Slide to 0 or press 'off' to disable.">
+                  Cashout at R:{' '}
+                  <strong style={{ color: cashoutR != null ? 'var(--yellow)' : undefined }}>
+                    {cashoutR != null ? cashoutR + 'R' : 'off'}
+                  </strong>
+                  {cashoutR != null && rrRatio > 0 && (
+                    <span style={{ marginLeft: 6, color: 'var(--dim)', fontSize: 11 }}>
+                      (target is {Number(rrRatio).toFixed(1)}R)
+                    </span>
+                  )}
+                </label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                  <input type="range" min={0} max={20} step={1}
+                         value={cashoutR != null ? Math.round(cashoutR * 4) : 0}
+                         onChange={e => {
+                           const v = Number(e.target.value)
+                           setCashoutR(v === 0 ? null : +(v / 4).toFixed(2))
+                         }}
+                         className="filter-range" style={{ flex: 1 }} />
+                  {cashoutR != null && (
+                    <button onClick={() => setCashoutR(null)}
+                            style={{ fontSize: 10, padding: '1px 6px', background: 'var(--surface-2)',
+                                     border: '1px solid var(--border)', borderRadius: 4, cursor: 'pointer',
+                                     color: 'var(--dim)' }}>off</button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        {/* LLM toggle + RPM + OOS */}
+        <div style={{ display: 'flex', gap: 16, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 14 }}>
+          <div className="settings-field">
+            <label className="settings-label">LLM mode</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button className={`settings-toggle ${useLlm ? 'on' : 'off'}`} onClick={() => setUseLlm(v => !v)}>
+                <span className="settings-toggle-knob" />
+              </button>
+              <span style={{ fontSize: 12, color: 'var(--dim)' }}>{useLlm ? 'AI analysis on each day' : 'Rules only (faster)'}</span>
+            </div>
+          </div>
+          {useLlm && (
+            <div className="settings-field">
+              <label className="settings-label">Requests/min cap</label>
+              <input type="number" min={1} value={rpm} placeholder="no cap"
+                     onChange={e => setRpm(e.target.value)} className="settings-num-input" />
+            </div>
+          )}
+          <div className="settings-field">
+            <label className="settings-label"
+                   title="Mark this window as a held-out test set — AI Review will note it as out-of-sample evidence">
+              Out-of-sample
+            </label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button className={`settings-toggle ${isOos ? 'on' : 'off'}`} onClick={() => setIsOos(v => !v)}>
+                <span className="settings-toggle-knob" />
+              </button>
+              <span style={{ fontSize: 12, color: 'var(--dim)' }}>{isOos ? 'OOS holdout' : 'In-sample / training'}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* ── Saved configurations ──────────────────────────────────────────── */}
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            {/* Existing profile chips */}
+            {profiles.map(p => (
+              <span key={p.id} style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                padding: '3px 10px', borderRadius: 20, fontSize: 12, cursor: 'pointer',
+                background: 'var(--surface-2)', border: '1px solid var(--border)',
+                color: 'var(--text)',
+              }}
+                title={`Created ${p.createdAt} · ${(p.params.tickers??[]).join(', ')} · Floor ${p.params.confFloor}% · ATR ${p.params.atrMult}× · R:R ${p.params.rrRatio}:1 · Hold ${p.params.maxHold}d`}
+                onClick={() => _loadProfile(p)}>
+                📋 {p.name}
+                <button onClick={e => { e.stopPropagation(); _deleteProfile(p.id) }}
+                        style={{ background:'none', border:'none', cursor:'pointer',
+                                 color:'var(--dim)', fontSize:12, padding:'0 0 0 2px', lineHeight:1 }}
+                        title="Delete this profile">×</button>
+              </span>
+            ))}
+
+            {/* Save current params */}
+            {showProfileSave ? (
+              <span style={{ display:'inline-flex', alignItems:'center', gap:6 }}>
+                <input autoFocus value={profileNameInput} onChange={e => setProfileNameInput(e.target.value)}
+                       onKeyDown={e => { if (e.key === 'Enter') _saveProfile(); if (e.key === 'Escape') setShowProfileSave(false) }}
+                       placeholder="Profile name…"
+                       style={{ fontSize:12, padding:'3px 8px', borderRadius:6,
+                                background:'var(--surface-1)', border:'1px solid var(--accent)',
+                                color:'var(--text)', outline:'none', width:140 }} />
+                <button className="btn-primary btn-sm" onClick={_saveProfile}
+                        disabled={!profileNameInput.trim()}>Save</button>
+                <button className="btn-sm" onClick={() => setShowProfileSave(false)}
+                        style={{ background:'var(--surface-2)', border:'1px solid var(--border)', color:'var(--dim)', borderRadius:6, padding:'3px 10px', cursor:'pointer', fontSize:12 }}>
+                  Cancel
+                </button>
+              </span>
+            ) : (
+              <button onClick={() => setShowProfileSave(true)}
+                      style={{ background:'none', border:'1px dashed var(--border)', color:'var(--dim)',
+                               borderRadius:20, padding:'3px 12px', fontSize:12, cursor:'pointer' }}
+                      title="Save current parameters as a named profile">
+                + Save as profile
+              </button>
+            )}
+          </div>
+        </div>
+
+        <button className="btn-primary" onClick={runBacktest}
+                disabled={running || !selTickers.length}>
+          {running ? 'Running…' : '▶ Run Backtest'}
+        </button>
+        {runError && <p style={{ color: 'var(--red)', marginTop: 8, fontSize: 13 }}>✗ {runError}</p>}
+      </div>
+
+      {/* ── Section 2: LLM pre-flight notifier (LLM mode only) ─────────────── */}
+      {useLlm && (
+        <div className="explorer-section">
+          <div className="section-header">
+            <span className="section-badge">2</span>
+            <span className="section-label">LLM Quota Estimate</span>
+            <span className="section-desc">Approximate cost before running</span>
+          </div>
+          <div className="usage-summary-row" style={{ flexWrap: 'wrap', gap: 12 }}>
+            <div className="usage-stat-card">
+              <span className="usage-stat-label">Est. requests</span>
+              <span className="usage-stat-value">{estRequests.toLocaleString()}</span>
+              <span className="usage-stat-sub">
+                {selTickers.length} ticker × ~{estDays} days × {scansPerDay} scan{scansPerDay !== 1 ? 's' : ''}/day
+              </span>
+            </div>
+            <div className="usage-stat-card">
+              <span className="usage-stat-label">Est. tokens</span>
+              <span className="usage-stat-value">{avgTokens ? (estTokens/1000).toFixed(1)+'k' : '—'}</span>
+              <span className="usage-stat-sub">{avgTokens ? `~${avgTokens} tok/call avg` : 'no usage history'}</span>
+            </div>
+            {rpmCap && (
+              <div className="usage-stat-card">
+                <span className="usage-stat-label">Est. duration</span>
+                <span className="usage-stat-value">{estMinutes}m</span>
+                <span className="usage-stat-sub">at {rpmCap} req/min</span>
+              </div>
+            )}
+            {provLimits?.rpd && (
+              <div className={`usage-stat-card ${overRpd ? 'usage-stat-card-warn' : ''}`}>
+                <span className="usage-stat-label">Daily limit (RPD)</span>
+                <span className="usage-stat-value" style={{ color: overRpd ? 'var(--red)' : undefined }}>
+                  {provLimits.rpd.toLocaleString()}
+                </span>
+                <span className="usage-stat-sub">{overRpd ? '⚠ may exceed limit' : 'within limit'}</span>
+              </div>
+            )}
+            {provLimits?.tpm && rpmCap && (
+              <div className={`usage-stat-card ${overTpm ? 'usage-stat-card-warn' : ''}`}>
+                <span className="usage-stat-label">TPM limit</span>
+                <span className="usage-stat-value" style={{ color: overTpm ? 'var(--red)' : undefined }}>
+                  {(provLimits.tpm/1000).toFixed(0)}k
+                </span>
+                <span className="usage-stat-sub">{overTpm ? '⚠ may throttle' : 'within limit'}</span>
+              </div>
+            )}
+          </div>
+          {(overRpd || overTpm) && (
+            <p style={{ color: 'var(--yellow)', fontSize: 12, marginTop: 8 }}>
+              ⚠ Estimated usage exceeds provider limits. Reduce tickers/window or lower RPM cap to stay within quota. Auto-fallback will engage if configured.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* ── Section 3: Progress ────────────────────────────────────────────── */}
+      {(running || progress > 0) && (
+        <div className="explorer-section">
+          <div className="section-header">
+            <span className="section-badge">3</span>
+            <span className="section-label">Progress</span>
+          </div>
+          <div className="stepper">
+            <div className="stepper-bar-track">
+              <div className="stepper-bar-fill" style={{ width: `${progress}%` }} />
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--dim)', marginTop: 6 }}>
+              {progressLabel || (running ? 'Starting…' : 'Complete')} — {progress}%
+            </div>
+          </div>
+          {notices.map((n, i) => (
+            <div key={i} style={{
+              marginTop: 8, padding: '6px 10px', borderRadius: 6, fontSize: 12,
+              background: n.kind === 'quota' ? 'rgba(248,113,113,0.12)' : 'rgba(251,191,36,0.12)',
+              color: n.kind === 'quota' ? 'var(--red)' : 'var(--yellow)',
+            }}>
+              {n.kind === 'fallback' ? '🔄' : '⚠'} {n.msg}
+            </div>
+          ))}
+          {/* Token usage shown in Section 4 Metrics once report loads */}
+        </div>
+      )}
+
+      {/* ── Sections 4–8: Results (once a report is loaded) ────────────────── */}
+      {report && (
+        <>
+          {/* ── Missing-metrics warning (orphaned run) ───────────────────── */}
+          {!report.metrics && (
+            <div style={{
+              margin: '0 0 16px', padding: '10px 14px', borderRadius: 8,
+              background: 'rgba(251,191,36,0.10)', border: '1px solid var(--yellow)',
+              display: 'flex', gap: 10, alignItems: 'flex-start',
+            }}>
+              <span style={{ fontSize: 16 }}>⚠</span>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--yellow)', marginBottom: 3 }}>
+                  No metrics for this run
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--dim)' }}>
+                  This run was saved without metrics — it may have been interrupted or created by an older
+                  version. Re-run the backtest with the same parameters to generate full results.
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── Section 4: Metric tiles ──────────────────────────────────── */}
+          <div className="explorer-section">
+            <div className="section-header">
+              <span className="section-badge">4</span>
+              <span className="section-label">Metrics</span>
+              <span className="section-desc">
+                {(() => {
+                  const si = report.scan_interval_minutes ?? 1440
+                  const siLbl = si >= 1440 ? 'EOD' : si >= 60 ? `${si / 60}h` : `${si}m`
+                  const cashoutPart = report.metrics?.cashout_r != null ? ` · Cashout ${report.metrics.cashout_r}R` : ''
+                  return `Scan ${siLbl} · Floor ${report.confidence_floor ?? '?'}% · ATR ${report.atr_multiple ?? '?'}× · R:R ${report.reward_risk ?? '?'}:1 · Hold ${report.max_hold_days ?? '?'}d${cashoutPart}`
+                })()}
+              </span>
+            </div>
+            <div className="usage-summary-row" style={{ flexWrap: 'wrap', gap: 12, marginBottom: 8 }}>
+              <div className="usage-stat-card">
+                <span className="usage-stat-label">Win rate</span>
+                <span className="usage-stat-value">{fmtPct(liveMetrics?.win_rate)}</span>
+                <span className="usage-stat-sub">{liveMetrics?.total_trades ?? 0} trades</span>
+              </div>
+              <div className="usage-stat-card">
+                <span className="usage-stat-label">Avg R-multiple</span>
+                <span className="usage-stat-value"
+                      style={{ color: (liveMetrics?.avg_r_multiple ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                  {fmtR(liveMetrics?.avg_r_multiple)}
+                </span>
+              </div>
+              <div className="usage-stat-card">
+                <span className="usage-stat-label">Sharpe ratio</span>
+                <span className="usage-stat-value">{liveMetrics?.sharpe != null ? liveMetrics.sharpe.toFixed(2) : '—'}</span>
+              </div>
+              <div className="usage-stat-card">
+                <span className="usage-stat-label">Max drawdown</span>
+                <span className="usage-stat-value" style={{ color: 'var(--red)' }}>
+                  {liveMetrics?.max_drawdown != null ? liveMetrics.max_drawdown.toFixed(2) + 'R' : '—'}
+                </span>
+              </div>
+              <div className="usage-stat-card">
+                <span className="usage-stat-label">False-positive rate</span>
+                <span className="usage-stat-value">{fmtPct(liveMetrics?.false_positive_rate)}</span>
+              </div>
+              {(liveMetrics?.cashout_count ?? 0) > 0 && (
+                <div className="usage-stat-card" title="Trades exited early by the cashout rule">
+                  <span className="usage-stat-label">💰 Cashouts</span>
+                  <span className="usage-stat-value" style={{ color: 'var(--yellow)' }}>
+                    {liveMetrics.cashout_count}
+                  </span>
+                  <span className="usage-stat-sub">
+                    of {liveMetrics.total_trades} trades · {report.metrics?.cashout_r}R rule
+                  </span>
+                </div>
+              )}
+            </div>
+            {/* LLM usage row — always shown; shows 0 for rule-mode runs */}
+            <div className="usage-summary-row" style={{ flexWrap: 'wrap', gap: 12, marginTop: 10 }}>
+              <div className="usage-stat-card">
+                <span className="usage-stat-label">LLM calls</span>
+                <span className="usage-stat-value">{(report?.llm_calls ?? 0).toLocaleString()}</span>
+                <span className="usage-stat-sub">{(report?.llm_calls ?? 0) === 0 ? 'rule mode' : 'analyze() calls'}</span>
+              </div>
+              <div className="usage-stat-card">
+                <span className="usage-stat-label">Run tokens</span>
+                <span className="usage-stat-value">
+                  {((report?.llm_prompt_tokens ?? 0) + (report?.llm_completion_tokens ?? 0)).toLocaleString()}
+                </span>
+                <span className="usage-stat-sub">prompt + completion</span>
+              </div>
+              <div className="usage-stat-card">
+                <span className="usage-stat-label">Prompt tokens</span>
+                <span className="usage-stat-value">{(report?.llm_prompt_tokens ?? 0).toLocaleString()}</span>
+                <span className="usage-stat-sub">input</span>
+              </div>
+              <div className="usage-stat-card">
+                <span className="usage-stat-label">Completion tokens</span>
+                <span className="usage-stat-value">{(report?.llm_completion_tokens ?? 0).toLocaleString()}</span>
+                <span className="usage-stat-sub">output</span>
+              </div>
+              <div className="usage-stat-card">
+                <span className="usage-stat-label">Model</span>
+                {/* value = provider name; sub = full model string */}
+                <span className="usage-stat-value" style={{ fontSize: 13 }}
+                      title={report?.llm_provider
+                        ? `${report.llm_provider} · ${report.llm_model ?? 'model unknown'}`
+                        : 'rule-based (no LLM)'}>
+                  {report?.llm_provider ?? 'rule-based'}
+                </span>
+                <span className="usage-stat-sub" style={{ wordBreak: 'break-all' }}>
+                  {report?.llm_model ?? (report?.llm_provider ? 'model unknown' : 'no LLM')}
+                </span>
+              </div>
+            </div>
+            {report?.warnings?.length > 0 && (
+              <ul style={{ fontSize: 12, color: 'var(--yellow)', margin: '8px 0 0 0', paddingLeft: 18 }}>
+                {report.warnings.map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
+            )}
+
+            {/* ── Virtual wallet summary tiles ── */}
+            {report.metrics?.wallet && (() => {
+              const w = report.metrics.wallet
+              const bh = w.buy_and_hold
+              const ret = w.total_return_pct ?? 0
+              const bhRet = bh?.return_pct ?? null
+              const alpha = (bhRet != null) ? round2(ret - bhRet) : null
+              const fmtDollar = v => v != null
+                ? `$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
+                : '—'
+              const fmtRetPct = v => v != null ? `${v >= 0 ? '+' : ''}${v.toFixed(2)}%` : '—'
+              function round2(v) { return Math.round(v * 100) / 100 }
+              return (
+                <div style={{ marginTop: 12 }}>
+                  <div className="chart-title" style={{ marginBottom: 8 }}>
+                    💰 Virtual wallet
+                    <span style={{ fontSize: 11, color: 'var(--dim)', marginLeft: 8, fontWeight: 400 }}>
+                      {fmtDollar(w.initial_balance)} starting · {fmtDollar(w.position_size)}/trade ({Math.round((w.position_size_pct ?? 0.1) * 100)}%)
+                    </span>
+                  </div>
+                  <div className="usage-summary-row" style={{ flexWrap: 'wrap', gap: 12 }}>
+                    <div className="usage-stat-card">
+                      <span className="usage-stat-label">Final portfolio</span>
+                      <span className="usage-stat-value"
+                            style={{ color: (w.total_pnl ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                        {fmtDollar(w.final_equity)}
+                      </span>
+                      <span className="usage-stat-sub"
+                            style={{ color: (w.total_pnl ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                        {(w.total_pnl ?? 0) >= 0 ? '+' : ''}{fmtDollar(w.total_pnl)} P&L
+                      </span>
+                    </div>
+                    <div className="usage-stat-card">
+                      <span className="usage-stat-label">Strategy return</span>
+                      <span className="usage-stat-value"
+                            style={{ color: ret >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                        {fmtRetPct(ret)}
+                      </span>
+                      <span className="usage-stat-sub">on {fmtDollar(w.initial_balance)}</span>
+                    </div>
+                    {bhRet != null && (
+                      <div className="usage-stat-card">
+                        <span className="usage-stat-label">Buy &amp; hold</span>
+                        <span className="usage-stat-value"
+                              style={{ color: bhRet >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                          {fmtRetPct(bhRet)}
+                        </span>
+                        <span className="usage-stat-sub">equal-weight benchmark</span>
+                      </div>
+                    )}
+                    {alpha != null && (
+                      <div className="usage-stat-card">
+                        <span className="usage-stat-label">Alpha vs B&amp;H</span>
+                        <span className="usage-stat-value"
+                              style={{ color: alpha >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                          {fmtRetPct(alpha)}
+                        </span>
+                        <span className="usage-stat-sub">{alpha >= 0 ? 'outperformed' : 'underperformed'}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )
+            })()}
+          </div>
+
+          {/* ── Section 5: Floor tuning ──────────────────────────────────── */}
+          {report?.metrics?.floor_sweep?.length > 0 && (
+            <div className="explorer-section">
+              <div className="section-header">
+                <span className="section-badge">5</span>
+                <span className="section-label">Confidence-floor tuning</span>
+                <span className="section-desc">Drag to re-filter results — no re-run needed</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+                <input type="range" min={0} max={100} step={5} value={liveFloor}
+                       onChange={e => setLiveFloor(Number(e.target.value))} className="filter-range"
+                       style={{ flex: 1 }} />
+                <span className="filter-val" style={{ minWidth: 40 }}>{liveFloor}%</span>
+              </div>
+              <div className="chart-title" style={{ marginBottom: 6 }}>Win rate / Avg R / Trade count vs. floor</div>
+              <ResponsiveContainer width="100%" height={130}>
+                <AreaChart data={report.metrics.floor_sweep}
+                           margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#30363d" strokeOpacity={0.5} />
+                  <XAxis dataKey="floor" tick={AXIS_TICK} axisLine={false} tickLine={false}
+                         tickFormatter={v => v + '%'} />
+                  <YAxis yAxisId="rate" domain={[0,1]} tick={AXIS_TICK} axisLine={false}
+                         tickLine={false} width={30} tickFormatter={v => Math.round(v*100)+'%'} />
+                  <YAxis yAxisId="count" orientation="right" tick={AXIS_TICK} axisLine={false}
+                         tickLine={false} width={28} />
+                  <Tooltip {...CHART_TOOLTIP_STYLE}
+                    formatter={(v, name) => {
+                      if (name === 'win_rate') return [fmtPct(v), 'Win rate']
+                      if (name === 'avg_r_multiple') return [fmtR(v), 'Avg R']
+                      return [v, 'Trades']
+                    }}
+                  />
+                  <ReferenceLine yAxisId="rate" x={liveFloor} stroke="var(--accent)" strokeDasharray="4 2" />
+                  <Area yAxisId="rate" type="monotone" dataKey="win_rate"
+                        stroke="#3fb950" fill="rgba(63,185,80,0.15)" strokeWidth={1.5} dot={false} />
+                  <Area yAxisId="rate" type="monotone" dataKey="avg_r_multiple"
+                        stroke="#58a6ff" fill="rgba(88,166,255,0.1)" strokeWidth={1.5} dot={false} />
+                  <Area yAxisId="count" type="monotone" dataKey="total_trades"
+                        stroke="#8b949e" fill="none" strokeWidth={1} dot={false} strokeDasharray="3 2" />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          {/* ── Section 6: Cumulative R-multiple curve ───────────────────── */}
+          <div className="explorer-section">
+            <div className="section-header">
+              <span className="section-badge">6</span>
+              <span className="section-label">Cumulative R-multiple curve</span>
+              <span className="section-desc">Running sum of risk-normalised P&L (floor: {liveFloor}%)</span>
+            </div>
+            {cumR.length > 1 ? (
+              <ResponsiveContainer width="100%" height={160}>
+                <AreaChart data={cumR} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="cumRGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%"  stopColor="#58a6ff" stopOpacity={0.3} />
+                      <stop offset="95%" stopColor="#58a6ff" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#30363d" strokeOpacity={0.5} />
+                  <XAxis dataKey="date" tick={AXIS_TICK} axisLine={false} tickLine={false}
+                         interval={Math.max(1, Math.floor(cumR.length / 6))} />
+                  <YAxis domain={['auto','auto']} tick={AXIS_TICK} axisLine={false} tickLine={false}
+                         width={38} tickFormatter={v => v.toFixed(1) + 'R'} />
+                  <Tooltip {...CHART_TOOLTIP_STYLE}
+                    formatter={v => [fmtR(v), 'Cumulative R']} />
+                  <ReferenceLine y={0} stroke="#8b949e" strokeDasharray="3 2" />
+                  <Area type="monotone" dataKey="r" stroke="#58a6ff" strokeWidth={1.5}
+                        fill="url(#cumRGrad)" dot={false} activeDot={{ r: 3, fill: '#58a6ff' }} />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <p className="chart-empty">No trades at this confidence floor.</p>
+            )}
+          </div>
+
+          {/* ── Section 6b: $ Portfolio equity curve ─────────────────────── */}
+          {report.metrics?.wallet?.dollar_equity_curve?.length > 1 && (() => {
+            const w = report.metrics.wallet
+            // Merge strategy curve and BH curve on a unified date set
+            const stratMap = Object.fromEntries(
+              (w.dollar_equity_curve ?? []).map(p => [p.date, p.equity])
+            )
+            const bhMap = Object.fromEntries(
+              (w.buy_and_hold?.daily_equity_curve ?? []).map(p => [p.date, p.equity])
+            )
+            const allDates = [...new Set([
+              ...(w.dollar_equity_curve ?? []).map(p => p.date),
+              ...(w.buy_and_hold?.daily_equity_curve ?? []).map(p => p.date),
+            ])].filter(Boolean).sort()
+            // Forward-fill
+            let lastStr = w.initial_balance, lastBh = w.initial_balance
+            const merged = allDates.map(date => {
+              if (stratMap[date] != null) lastStr = stratMap[date]
+              if (bhMap[date]   != null) lastBh  = bhMap[date]
+              return { date, strategy: lastStr, buy_and_hold: bhMap[date] != null ? lastBh : undefined }
+            })
+            const hasBh = w.buy_and_hold?.daily_equity_curve?.length > 0
+            const fmtUSD = v => `$${Math.round(v).toLocaleString()}`
+            return (
+              <div className="explorer-section">
+                <div className="section-header">
+                  <span className="section-badge">6b</span>
+                  <span className="section-label">$ Portfolio equity curve</span>
+                  <span className="section-desc">Virtual wallet value over the backtest window</span>
+                </div>
+                <ResponsiveContainer width="100%" height={200}>
+                  <AreaChart data={merged} margin={{ top: 4, right: 8, left: 8, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="stratGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%"  stopColor="#58a6ff" stopOpacity={0.3} />
+                        <stop offset="95%" stopColor="#58a6ff" stopOpacity={0} />
+                      </linearGradient>
+                      {hasBh && (
+                        <linearGradient id="bhGrad" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%"  stopColor="#f0883e" stopOpacity={0.15} />
+                          <stop offset="95%" stopColor="#f0883e" stopOpacity={0} />
+                        </linearGradient>
+                      )}
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#30363d" strokeOpacity={0.5} />
+                    <XAxis dataKey="date" tick={AXIS_TICK} axisLine={false} tickLine={false}
+                           interval={Math.max(1, Math.floor(merged.length / 6))} />
+                    <YAxis domain={['auto','auto']} tick={AXIS_TICK} axisLine={false} tickLine={false}
+                           width={58} tickFormatter={fmtUSD} />
+                    <Tooltip {...CHART_TOOLTIP_STYLE}
+                      formatter={(v, name) => [
+                        fmtUSD(v),
+                        name === 'strategy' ? 'Strategy' : 'Buy & Hold',
+                      ]} />
+                    <ReferenceLine y={w.initial_balance} stroke="#8b949e" strokeDasharray="3 2"
+                                   label={{ value: fmtUSD(w.initial_balance), position: 'insideTopRight',
+                                            fontSize: 10, fill: '#8b949e' }} />
+                    <Area type="monotone" dataKey="strategy" stroke="#58a6ff" strokeWidth={1.5}
+                          fill="url(#stratGrad)" dot={false} activeDot={{ r: 3, fill: '#58a6ff' }} />
+                    {hasBh && (
+                      <Area type="monotone" dataKey="buy_and_hold" stroke="#f0883e" strokeWidth={1.5}
+                            fill="url(#bhGrad)" dot={false} activeDot={{ r: 3, fill: '#f0883e' }}
+                            strokeDasharray="4 2" />
+                    )}
+                  </AreaChart>
+                </ResponsiveContainer>
+                {hasBh && (
+                  <div style={{ display: 'flex', gap: 16, marginTop: 6, fontSize: 11, color: 'var(--dim)' }}>
+                    <span><span style={{ color: '#58a6ff' }}>—</span> Strategy</span>
+                    <span><span style={{ color: '#f0883e' }}>- -</span> Buy &amp; Hold</span>
+                    <span style={{ marginLeft: 'auto' }}>
+                      Reference line = ${(w.initial_balance ?? 0).toLocaleString()} starting balance
+                    </span>
+                  </div>
+                )}
+              </div>
+            )
+          })()}
+
+          {/* ── Section 7: Per-ticker breakdown ──────────────────────────── */}
+          {report.metrics?.per_ticker?.length > 0 && (
+            <div className="explorer-section">
+              <div className="section-header">
+                <span className="section-badge">7</span>
+                <span className="section-label">Per-ticker breakdown</span>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Ticker</th>
+                      <th style={{ textAlign:'right' }}>Trades</th>
+                      <th style={{ textAlign:'right' }}>Win rate</th>
+                      <th style={{ textAlign:'right' }}>Avg R</th>
+                      <th style={{ textAlign:'right' }}>Sharpe</th>
+                      <th style={{ textAlign:'right' }}>Max DD</th>
+                      {walletPosSz > 0 && <th style={{ textAlign:'right' }}>$ P&amp;L</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {report.metrics.per_ticker.map(r => {
+                      const dpnl = walletPosSz > 0 ? (perTickerDollarPnl[r.ticker] ?? null) : null
+                      return (
+                      <tr key={r.ticker}>
+                        <td><strong>{r.ticker}</strong></td>
+                        <td style={{ textAlign:'right' }}>{r.total_trades}</td>
+                        <td style={{ textAlign:'right', color: (r.win_rate??0)>=0.5?'var(--green)':'var(--red)' }}>{fmtPct(r.win_rate)}</td>
+                        <td style={{ textAlign:'right', color: (r.avg_r_multiple??0)>=0?'var(--green)':'var(--red)' }}>{fmtR(r.avg_r_multiple)}</td>
+                        <td style={{ textAlign:'right' }}>{r.sharpe != null ? r.sharpe.toFixed(2) : '—'}</td>
+                        <td style={{ textAlign:'right', color:'var(--red)' }}>{r.max_drawdown != null ? r.max_drawdown.toFixed(2)+'R' : '—'}</td>
+                        {walletPosSz > 0 && (
+                          <td style={{ textAlign:'right', fontVariantNumeric:'tabular-nums',
+                                       color: dpnl == null ? 'var(--dim)' : dpnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                            {dpnl == null ? '—' : `${dpnl >= 0 ? '+' : ''}$${Math.abs(dpnl).toFixed(0)}`}
+                          </td>
+                        )}
+                      </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* ── Section 8: Trade list ─────────────────────────────────────── */}
+          <div className="explorer-section">
+            <div className="section-header">
+              <span className="section-badge">8</span>
+              <span className="section-label">Trade list</span>
+              <span className="section-desc">{filteredTrades.length} trades at ≥{liveFloor}% confidence</span>
+            </div>
+            {filteredTrades.length > 0 ? (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Ticker</th><th>Date</th><th>Dir</th><th style={{ textAlign:'right' }}>Conf</th>
+                      <th>Source</th><th style={{ textAlign:'right' }}>Entry</th>
+                      <th style={{ textAlign:'right' }}>Stop</th><th style={{ textAlign:'right' }}>Target</th>
+                      <th>Outcome</th><th style={{ textAlign:'right' }}>R</th>
+                      {walletPosSz > 0 && <th style={{ textAlign:'right' }}>$ P&amp;L</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredTrades.slice(0, 200).map((t, i) => (
+                      <tr key={i} style={{ opacity: (t.confidence??0) < liveFloor ? 0.4 : 1 }}>
+                        <td><strong>{t.ticker}</strong></td>
+                        <td style={{ fontVariantNumeric:'tabular-nums' }}>{t.signal_date}</td>
+                        <td><span className={`badge ${t.type}`}>{t.type}</span></td>
+                        <td style={{ textAlign:'right' }}>{t.confidence?.toFixed(0)}%</td>
+                        <td style={{ fontSize:11, color:'var(--dim)' }}>{t.source}</td>
+                        <td style={{ textAlign:'right' }}>{t.entry?.toFixed(2) ?? '—'}</td>
+                        <td style={{ textAlign:'right', color:'var(--red)' }}>{t.stop?.toFixed(2) ?? '—'}</td>
+                        <td style={{ textAlign:'right', color:'var(--green)' }}>{t.target?.toFixed(2) ?? '—'}</td>
+                        <td style={{ color: t.outcome==='win'?'var(--green)':t.outcome==='loss'?'var(--red)':t.outcome==='cashout'?'var(--yellow)':'var(--dim)' }}
+                            title={t.outcome==='cashout'?`Cashout exit at ${t.r_multiple}R — rule locked in profit before reversal`:undefined}>
+                          {t.outcome==='cashout'?'💰 cashout':t.outcome ?? '—'}
+                        </td>
+                        <td style={{ textAlign:'right', fontVariantNumeric:'tabular-nums',
+                                     color: (t.r_multiple??0)>=0?'var(--green)':'var(--red)' }}>
+                          {t.r_multiple != null ? ((t.r_multiple>=0?'+':'')+t.r_multiple.toFixed(2)) : '—'}
+                        </td>
+                        {walletPosSz > 0 && (() => {
+                          const dp = t.exit_date ? tradeDollarPnl(t) : null
+                          return (
+                            <td style={{ textAlign:'right', fontVariantNumeric:'tabular-nums',
+                                         color: dp == null ? 'var(--dim)' : dp >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                              {dp == null ? '—' : `${dp >= 0 ? '+' : '-'}$${Math.abs(dp).toFixed(0)}`}
+                            </td>
+                          )
+                        })()}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {filteredTrades.length > 200 && (
+                  <p style={{ fontSize:11, color:'var(--dim)', padding:'6px 10px' }}>
+                    Showing first 200 of {filteredTrades.length} trades.
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p className="chart-empty">No trades at this confidence floor.</p>
+            )}
+          </div>
+
+          {/* ── Section 9: AI Review (Feature 4) ─────────────────────────────── */}
+          <div className="explorer-section">
+            <div className="section-header">
+              <span className="section-badge">9</span>
+              <span className="section-label">AI Review</span>
+              <span className="section-desc">Senior trader verdict on these results</span>
+            </div>
+            <p style={{ fontSize: 13, color: 'var(--dim)', marginBottom: 10 }}>
+              An LLM acting as a senior, strict-judge trader evaluates the backtest metrics and gives an actionable verdict.
+            </p>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button className="btn-primary btn-sm" onClick={runAiReview}
+                      disabled={aiReviewLoading || !reportRunId}>
+                {aiReviewLoading ? '⏳ Analysing…' : '🧠 Get AI Review'}
+              </button>
+              <span className="provider-hint" title="💡 Gemini Flash or Mistral · reasoning none">ⓘ</span>
+              <button className="btn-primary btn-sm" onClick={runFloorSuggest}
+                      disabled={floorSuggestLoading || !reportRunId}
+                      title="Ask the AI to assess this run and recommend parameter adjustments">
+                {floorSuggestLoading ? '⏳ Thinking…' : '🧪 Experiment Advisor'}
+              </button>
+              <span className="provider-hint" title="💡 Groq Qwen3.6-27b or Gemini Flash · reasoning low">ⓘ</span>
+              {report && (
+                <button className="btn-secondary btn-sm"
+                        title="Clone these params and flip the LLM mode"
+                        onClick={() => cloneRunParams(report, true)}>
+                  ↩ Re-run {report.signal_mode === 'llm' ? 'without LLM' : 'with LLM'}
+                </button>
+              )}
+            </div>
+            {aiReviewError && (
+              <p style={{ color: 'var(--red)', fontSize: 13, marginTop: 8 }}>✗ {aiReviewError}</p>
+            )}
+            {floorSuggestError && (
+              <p style={{ color: 'var(--red)', fontSize: 13, marginTop: 8 }}>✗ Experiment Advisor: {floorSuggestError}</p>
+            )}
+            {floorSuggest && (() => {
+              const fs = floorSuggest
+              const sc = fs.selected_candidate  // v2 selected candidate object
+              const riskColor = { low: 'var(--green)', medium: 'var(--yellow)', high: 'var(--red)' }
+
+              // Map backend change keys → {label, fmt, apply}
+              const changeAppliers = {
+                confidence_floor: { label: 'Confidence floor', fmt: v => `${v}%`,
+                  apply: v => { setConfFloor(Number(v)); setLiveFloor(Number(v)) } },
+                max_hold_days:    { label: 'Max hold days',   fmt: v => `${v}d`,  apply: v => setMaxHold(Number(v)) },
+                atr_multiple:     { label: 'ATR multiple',    fmt: v => `${v}×`,  apply: v => setAtrMult(Number(v)) },
+                reward_risk:      { label: 'Reward / risk',   fmt: v => `${v}:1`, apply: v => setRrRatio(Number(v)) },
+              }
+              // Current values for comparison
+              const currentVals = {
+                confidence_floor: report?.confidence_floor ?? confFloor,
+                max_hold_days:    report?.max_hold_days    ?? maxHold,
+                atr_multiple:     report?.atr_multiple     ?? atrMult,
+                reward_risk:      report?.reward_risk      ?? rrRatio,
+              }
+
+              return (
+                <div style={{
+                  marginTop: 14, padding: '14px 16px',
+                  background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 8,
+                }}>
+                  {/* header */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 13, fontWeight: 700 }}>🧪 Experiment Advisor</span>
+                    {sc?._auto_selected && (
+                      <span style={{
+                        fontSize: 11, padding: '2px 8px', borderRadius: 99, fontWeight: 600,
+                        background: 'var(--yellow)22', color: 'var(--yellow)',
+                      }} title="LLM found insufficient evidence for a confident pick; safest candidate shown">
+                        ⚠ auto-selected
+                      </span>
+                    )}
+                    {sc?.overfitting_risk && !sc?._auto_selected && (
+                      <span style={{
+                        fontSize: 11, padding: '2px 8px', borderRadius: 99, fontWeight: 600,
+                        background: (riskColor[sc.overfitting_risk] || 'var(--dim)') + '22',
+                        color: riskColor[sc.overfitting_risk] || 'var(--dim)',
+                      }}>
+                        Overfit risk: {sc.overfitting_risk}
+                      </span>
+                    )}
+                    <span style={{ fontSize: 11, color: 'var(--dim)', marginLeft: 'auto' }}>
+                      {fs.model_used && `via ${fs.model_used}`}
+                      {(fs.prompt_tokens || fs.completion_tokens) && (
+                        ` · ${((fs.prompt_tokens ?? 0) + (fs.completion_tokens ?? 0)).toLocaleString()} tok`
+                      )}
+                    </span>
+                  </div>
+
+                  {/* Diagnosis — what failure mode is being addressed */}
+                  {fs.diagnosis && (
+                    <div style={{ fontSize: 12, color: 'var(--dim)', margin: '0 0 8px',
+                      padding: '5px 10px', background: 'var(--surface)', borderRadius: 4 }}>
+                      <span style={{ fontWeight: 600, color: 'var(--fg)' }}>Diagnosis: </span>{fs.diagnosis}
+                    </div>
+                  )}
+
+                  {/* LLM reasoning (why field) — show before hypothesis */}
+                  {fs.reasoning && fs.reasoning !== fs.diagnosis && (
+                    <p style={{ fontSize: 12, color: 'var(--dim)', fontStyle: 'italic', margin: '0 0 10px',
+                      padding: '6px 10px', background: 'var(--surface)', borderRadius: 4 }}>
+                      {fs.reasoning}
+                    </p>
+                  )}
+
+                  {/* Hypothesis box */}
+                  {sc?.hypothesis && (
+                    <div style={{
+                      padding: '8px 12px', background: 'var(--accent)11',
+                      borderLeft: '3px solid var(--accent)', borderRadius: 4, marginBottom: 10,
+                      fontSize: 13, fontWeight: 600,
+                    }}>
+                      {sc.hypothesis}
+                    </div>
+                  )}
+
+                  {/* Changes: current → suggested */}
+                  {sc?.changes && Object.keys(sc.changes).length > 0 && (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 5, marginBottom: 10 }}>
+                      {Object.entries(sc.changes).map(([key, val]) => {
+                        const meta = changeAppliers[key]
+                        if (!meta) return null
+                        const cur = currentVals[key]
+                        const changed = String(val) !== String(cur)
+                        return (
+                          <div key={key} style={{
+                            display: 'grid', gridTemplateColumns: '130px 1fr auto', gap: 8,
+                            alignItems: 'center', padding: '5px 8px',
+                            background: changed ? 'var(--accent)0d' : 'transparent', borderRadius: 5,
+                          }}>
+                            <span style={{ fontSize: 12, color: 'var(--dim)' }}>{meta.label}</span>
+                            <span style={{ fontSize: 13 }}>
+                              <span style={{ color: 'var(--dim)', textDecoration: 'line-through', marginRight: 6 }}>
+                                {meta.fmt(cur)}
+                              </span>
+                              <span style={{ fontWeight: 700, color: 'var(--accent)' }}>→ {meta.fmt(val)}</span>
+                            </span>
+                            <button className="btn-secondary btn-sm" style={{ whiteSpace: 'nowrap' }}
+                                    onClick={() => meta.apply(val)}>↑ Use</button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+
+                  {/* Diagnostic support */}
+                  {(sc?.diagnostic_support ?? []).length > 0 && (
+                    <div style={{ marginBottom: 8 }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--dim)', marginBottom: 3 }}>Evidence</div>
+                      <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12, color: 'var(--dim)' }}>
+                        {sc.diagnostic_support.map((d, i) => <li key={i}>{d}</li>)}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Success / failure criteria */}
+                  {((sc?.success_criteria ?? []).length > 0 || (sc?.failure_criteria ?? []).length > 0) && (
+                    <div style={{ display: 'flex', gap: 16, marginBottom: 10, flexWrap: 'wrap' }}>
+                      {(sc?.success_criteria ?? []).length > 0 && (
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--green)', marginBottom: 2 }}>✓ Success if</div>
+                          <ul style={{ margin: 0, paddingLeft: 14, fontSize: 11 }}>
+                            {sc.success_criteria.map((s, i) => <li key={i} style={{ color: 'var(--green)' }}>{s}</li>)}
+                          </ul>
+                        </div>
+                      )}
+                      {(sc?.failure_criteria ?? []).length > 0 && (
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--red)', marginBottom: 2 }}>✗ Fail if</div>
+                          <ul style={{ margin: 0, paddingLeft: 14, fontSize: 11 }}>
+                            {sc.failure_criteria.map((f, i) => <li key={i} style={{ color: 'var(--red)' }}>{f}</li>)}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Apply button */}
+                  {sc?.changes && (
+                    <button className="btn-primary btn-sm" onClick={() => {
+                      Object.entries(sc.changes).forEach(([key, val]) => {
+                        changeAppliers[key]?.apply(val)
+                      })
+                      document.querySelector('.bt-params-section')?.scrollIntoView({ behavior: 'smooth' })
+                    }}>
+                      ✦ Apply & scroll to params
+                    </button>
+                  )}
+
+                  {/* Next step */}
+                  {fs.next_step && (
+                    <div style={{ fontSize: 12, color: 'var(--dim)', marginTop: 8,
+                      padding: '5px 10px', background: 'var(--surface)', borderRadius: 4,
+                      borderLeft: '2px solid var(--accent)' }}>
+                      <span style={{ fontWeight: 600, color: 'var(--accent)' }}>Next: </span>{fs.next_step}
+                    </div>
+                  )}
+
+                  {/* All candidates — always visible so user can pick manually */}
+                  {(fs.candidates ?? []).length > 1 && (
+                    <details style={{ marginTop: 12 }}>
+                      <summary style={{ fontSize: 11, color: 'var(--dim)', cursor: 'pointer', userSelect: 'none' }}>
+                        All {fs.candidates.length} candidates — pick manually
+                      </summary>
+                      <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {fs.candidates.map(c => {
+                          const isSel = c.candidate_id === sc?.candidate_id
+                          return (
+                            <div key={c.candidate_id} style={{
+                              padding: '7px 10px', borderRadius: 6, fontSize: 12,
+                              border: `1px solid ${isSel ? 'var(--accent)' : 'var(--border)'}`,
+                              background: isSel ? 'var(--accent)0d' : 'var(--surface)',
+                            }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontWeight: 600 }}>{c.hypothesis}</span>
+                                <button className="btn-secondary btn-sm" style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+                                        onClick={() => {
+                                          Object.entries(c.changes ?? {}).forEach(([k, v]) => changeAppliers[k]?.apply(v))
+                                          document.querySelector('.bt-params-section')?.scrollIntoView({ behavior: 'smooth' })
+                                        }}>
+                                  ↑ Apply
+                                </button>
+                              </div>
+                              {c.diagnostic_support?.[0] && (
+                                <div style={{ color: 'var(--dim)', marginTop: 3 }}>{c.diagnostic_support[0]}</div>
+                              )}
+                              <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+                                {Object.entries(c.changes ?? {}).map(([k, v]) => {
+                                  const m = changeAppliers[k]
+                                  return m ? (
+                                    <span key={k} style={{ fontSize: 11, color: 'var(--accent)', fontWeight: 600 }}>
+                                      {m.label}: {m.fmt(currentVals[k])} → {m.fmt(v)}
+                                    </span>
+                                  ) : null
+                                })}
+                                <span style={{
+                                  fontSize: 10, padding: '1px 6px', borderRadius: 99,
+                                  background: (riskColor[c.overfitting_risk] || 'var(--dim)') + '22',
+                                  color: riskColor[c.overfitting_risk] || 'var(--dim)',
+                                }}>
+                                  overfit: {c.overfitting_risk ?? '?'}
+                                </span>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              )
+            })()}
+            {aiReview && (() => {
+              const ar = aiReview
+              const stageColor = { reject: 'var(--red)', research_only: 'var(--yellow)',
+                paper_trade: 'var(--accent)', limited_live_candidate: 'var(--green)' }
+              const stageLabel = { reject: '🚫 Reject', research_only: '🔬 Research only',
+                paper_trade: '📋 Paper trade', limited_live_candidate: '✅ Live candidate' }
+              const edgeColor = ar.edge_assessment === 'positive' ? 'var(--green)'
+                : ar.edge_assessment === 'negative' ? 'var(--red)' : 'var(--yellow)'
+              const stage = ar.deployment_stage ?? (ar.recommendation === 'deploy' ? 'paper_trade'
+                : ar.recommendation === 'discard' ? 'reject' : 'research_only')
+              const STAGE_ORDER = ['reject', 'research_only', 'paper_trade', 'limited_live_candidate']
+              const stageDesc = {
+                reject:                 'Strategy has fatal flaws; do not proceed.',
+                research_only:          'In-sample / tuning phase. Experiment to improve metrics.',
+                paper_trade:            'Edge demonstrated on OOS data. Simulate with real prices.',
+                limited_live_candidate: 'Robust OOS evidence. Ready for small live allocation.',
+              }
+              return (
+                <div style={{ marginTop: 14 }}>
+                  {/* ── Deployment stage progression strip ─────────────────── */}
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--dim)', marginBottom: 6 }}>
+                      Deployment stage
+                    </div>
+                    <div style={{ display: 'flex', gap: 0, borderRadius: 8, overflow: 'hidden',
+                      border: '1px solid var(--border)' }}>
+                      {STAGE_ORDER.map((s, i) => {
+                        const isSelected = s === stage
+                        const color = stageColor[s] || 'var(--dim)'
+                        const icons = { reject: '🚫', research_only: '🔬', paper_trade: '📋', limited_live_candidate: '✅' }
+                        const labels = { reject: 'Reject', research_only: 'Research', paper_trade: 'Paper trade', limited_live_candidate: 'Live candidate' }
+                        return (
+                          <div key={s} title={stageDesc[s]} style={{
+                            flex: 1, padding: '7px 4px', textAlign: 'center', cursor: 'default',
+                            background: isSelected ? color + '22' : 'var(--surface)',
+                            borderRight: i < STAGE_ORDER.length - 1 ? '1px solid var(--border)' : 'none',
+                            borderTop: isSelected ? `2px solid ${color}` : '2px solid transparent',
+                            transition: 'background 0.15s',
+                          }}>
+                            <div style={{ fontSize: 13 }}>{icons[s]}</div>
+                            <div style={{ fontSize: 10, fontWeight: isSelected ? 700 : 400,
+                              color: isSelected ? color : 'var(--dim)', marginTop: 2, lineHeight: 1.2 }}>
+                              {labels[s]}
+                            </div>
+                            {isSelected && (
+                              <div style={{ fontSize: 9, marginTop: 2, fontWeight: 700,
+                                color, letterSpacing: '0.05em' }}>▲ NOW</div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                    {/* Edge + evidence quality inline below the strip */}
+                    <div style={{ display: 'flex', gap: 10, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                      {ar.edge_assessment && (
+                        <span style={{
+                          padding: '2px 9px', borderRadius: 20, fontSize: 11, fontWeight: 600,
+                          background: edgeColor + '22', color: edgeColor,
+                          border: `1px solid ${edgeColor}55`,
+                        }}>Edge: {ar.edge_assessment}</span>
+                      )}
+                      {ar.evidence_quality && (
+                        <span style={{ fontSize: 11, color: 'var(--dim)' }}>
+                          Evidence: {ar.evidence_quality}
+                        </span>
+                      )}
+                      <span style={{ fontSize: 11, color: 'var(--dim)', marginLeft: 'auto' }}>
+                        {ar.model_used && `via ${ar.model_used}`}
+                        {(ar.prompt_tokens || ar.completion_tokens) && (
+                          ` · ${((ar.prompt_tokens ?? 0) + (ar.completion_tokens ?? 0)).toLocaleString()} tok`
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                  {ar.verdict && (
+                    <p style={{ fontSize: 13, lineHeight: 1.6, marginBottom: 10 }}>{ar.verdict}</p>
+                  )}
+                  {/* Blocking issues — most critical */}
+                  {(ar.blocking_issues ?? []).length > 0 && (
+                    <div style={{ marginBottom: 8, padding: '8px 12px', background: 'rgba(248,113,113,0.08)',
+                      borderLeft: '3px solid var(--red)', borderRadius: 4 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--red)', marginBottom: 4 }}>
+                        ⛔ Blocking issues
+                      </div>
+                      <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12 }}>
+                        {ar.blocking_issues.map((b, i) => <li key={i} style={{ marginBottom: 2 }}>{b}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                  {(ar.strengths ?? []).length > 0 && (
+                    <div style={{ marginBottom: 8 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--green)', marginBottom: 4 }}>✓ Strengths</div>
+                      <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+                        {ar.strengths.map((s, i) => <li key={i} style={{ marginBottom: 2 }}>{s}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                  {(ar.weaknesses ?? []).length > 0 && (
+                    <div style={{ marginBottom: 8 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--red)', marginBottom: 4 }}>✗ Weaknesses</div>
+                      <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+                        {ar.weaknesses.map((w, i) => <li key={i} style={{ marginBottom: 2 }}>{w}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                  {ar.next_action && (
+                    <p style={{ fontSize: 12, color: 'var(--dim)', fontStyle: 'italic', margin: 0 }}>
+                      → {ar.next_action}
+                    </p>
+                  )}
+                </div>
+              )
+            })()}
+          </div>
+        </>
+      )}
+
+      {/* ── Past runs + comparator ─────────────────────────────────────────── */}
+      <div className="explorer-section">
+        <div className="section-header">
+          <span className="section-badge">📋</span>
+          <span className="section-label">Past runs</span>
+          <span className="section-desc">Click to load · select multiple for comparator</span>
+        </div>
+        {pastRuns.length === 0 && <p className="chart-empty">No runs yet.</p>}
+        {pastRuns.length > 0 && (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th></th><th>Tickers</th><th>Window</th><th>Mode</th><th>Model</th>
+                  <th style={{ textAlign:'right' }} title="Confidence floor · ATR multiple · R:R · Max hold · Scan interval · Cashout">Params</th>
+                  <th style={{ textAlign:'right' }}>Win rate</th>
+                  <th style={{ textAlign:'right' }}>Avg R</th>
+                  <th style={{ textAlign:'right' }}>Trades</th>
+                  <th style={{ textAlign:'right' }} title="Wallet: final balance · P&L · cashout trade count">Wallet</th>
+                  <th>Status</th><th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {pastRuns.map(r => {
+                  const m = r.metrics
+                  const isOrphaned = !m || m.total_trades == null
+                  const tokTotal = (r.llm_prompt_tokens ?? 0) + (r.llm_completion_tokens ?? 0)
+                  const scanLbl = (() => {
+                    const s = r.scan_interval_minutes ?? 1440
+                    if (s >= 1440) return 'EOD'
+                    if (s >= 60)   return `${s / 60}h`
+                    return `${s}m`
+                  })()
+                  const paramsTitle = [
+                    `Floor: ${r.confidence_floor ?? '?'}%`,
+                    `ATR: ${r.atr_multiple ?? '?'}×`,
+                    `R:R: ${r.reward_risk ?? '?'}:1`,
+                    `Hold: ${r.max_hold_days ?? '?'}d`,
+                    `Scan: ${scanLbl}`,
+                    m?.cashout_r != null ? `Cashout: ${m.cashout_r}R` : null,
+                    r.requests_per_minute ? `RPM cap: ${r.requests_per_minute}` : null,
+                    r.is_out_of_sample ? 'OOS holdout' : 'In-sample',
+                    (r.llm_calls ?? 0) > 0 ? `${fmtTokens(tokTotal)} tok · ${r.llm_calls} calls` : null,
+                  ].filter(Boolean).join(' · ')
+                  return (
+                    <tr key={r.id}
+                        style={{
+                          cursor: 'pointer',
+                          opacity: isOrphaned ? 0.6 : 1,
+                          background: loadedRunId === r.id ? 'rgba(88,166,255,0.08)' : undefined,
+                          outline: loadedRunId === r.id ? '1px solid rgba(88,166,255,0.35)' : undefined,
+                        }}
+                        title={isOrphaned ? 'No metrics — run was interrupted or created by an older version' : undefined}
+                        onClick={() => loadRun(r.id)}>
+                      <td onClick={e => { e.stopPropagation(); toggleCompare(r.id) }}>
+                        <input type="checkbox" checked={compareSel.has(r.id)} readOnly
+                               style={{ accentColor:'var(--accent)' }} />
+                      </td>
+                      <td>{(r.tickers ?? []).join(', ')}</td>
+                      <td style={{ fontSize:11, color:'var(--dim)', fontVariantNumeric:'tabular-nums' }}>
+                        {r.start_date?.slice(5)} → {r.end_date?.slice(5)}
+                      </td>
+                      <td>
+                        <span className={`badge ${r.signal_mode === 'llm' ? 'long' : ''}`}
+                              style={r.signal_mode !== 'llm' ? { background: 'var(--surface-2)', color: 'var(--text-dim)', border: '1px solid var(--border)' } : {}}>
+                          {r.signal_mode === 'llm' ? '🤖 LLM' : '📐 Rules'}
+                        </span>
+                      </td>
+                      <td style={{ fontSize:10, color:'var(--dim)' }}
+                          title={r.llm_provider
+                            ? `${r.llm_provider} · ${r.llm_model ?? 'model unknown'}`
+                            : 'rule-based (no LLM)'}>
+                        <div style={{ fontWeight:500 }}>{r.llm_provider ?? '—'}</div>
+                        {r.llm_model && (
+                          <div style={{ fontSize:9, opacity:0.7, maxWidth:100, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                            {r.llm_model}
+                          </div>
+                        )}
+                        {tokTotal > 0 && (
+                          <div style={{ fontSize:9, opacity:0.55, marginTop:1 }}>
+                            {fmtTokens(tokTotal)} tok
+                          </div>
+                        )}
+                      </td>
+                      {/* ── Params identity column ── */}
+                      <td style={{ textAlign:'right', fontSize:10, color:'var(--dim)', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap' }}
+                          title={paramsTitle}>
+                        <div style={{ display:'flex', flexDirection:'column', gap:1, alignItems:'flex-end' }}>
+                          <span title="Confidence floor">
+                            🎯 {r.confidence_floor ?? '?'}%
+                          </span>
+                          <span title="ATR multiple · Reward:Risk">
+                            📐 {r.atr_multiple ?? '?'}× · {r.reward_risk ?? '?'}:1
+                          </span>
+                          <span title="Max hold days">
+                            ⏳ {r.max_hold_days ?? '?'}d
+                          </span>
+                          <span title={`Scan interval: ${r.scan_interval_minutes ?? 1440} min per replay day`}>
+                            🔁 {scanLbl}
+                          </span>
+                          {m?.cashout_r != null && (
+                            <span title={`Cashout rule: exit trades early at ${m.cashout_r}R`}
+                                  style={{ color: 'var(--yellow)' }}>
+                              💰 {m.cashout_r}R
+                            </span>
+                          )}
+                          {r.is_out_of_sample ? (
+                            <span style={{ color:'var(--accent)', fontWeight:600 }} title="Out-of-sample holdout">OOS</span>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td style={{ textAlign:'right' }}>{fmtPct(m?.win_rate)}</td>
+                      <td style={{ textAlign:'right', color: (m?.avg_r_multiple??0)>=0?'var(--green)':'var(--red)' }}>{fmtR(m?.avg_r_multiple)}</td>
+                      <td style={{ textAlign:'right' }}>{m?.total_trades ?? '—'}</td>
+                      {(() => {
+                        const w = m?.wallet
+                        if (!w) return <td style={{ textAlign:'right', color:'var(--dim)' }}>—</td>
+                        const pnl = w.total_pnl ?? 0
+                        const ret = w.total_return_pct ?? 0
+                        const finalEq = w.final_equity ?? 0
+                        const cashouts = m?.cashout_count ?? 0
+                        return (
+                          <td style={{ textAlign:'right', fontVariantNumeric:'tabular-nums', fontSize: 11 }}
+                              title={`Started $${(w.initial_balance??0).toLocaleString()} · Final $${finalEq.toLocaleString()}`}>
+                            {/* Final balance — the "money in wallet" */}
+                            <div style={{ fontWeight: 600, fontSize: 12,
+                                          color: finalEq >= (w.initial_balance ?? 0) ? 'var(--green)' : 'var(--red)' }}>
+                              ${Math.round(finalEq).toLocaleString()}
+                            </div>
+                            {/* P&L delta */}
+                            <div style={{ color: pnl >= 0 ? 'var(--green)' : 'var(--red)', opacity: 0.85 }}>
+                              {pnl >= 0 ? '+' : '-'}${Math.abs(Math.round(pnl)).toLocaleString()} ({ret >= 0 ? '+' : ''}{ret.toFixed(1)}%)
+                            </div>
+                            {/* Cashout trade count */}
+                            {cashouts > 0 && (
+                              <div style={{ color: 'var(--yellow)', opacity: 0.9 }}>
+                                💰 {cashouts} cashout{cashouts > 1 ? 's' : ''}
+                              </div>
+                            )}
+                          </td>
+                        )
+                      })()}
+                      <td style={{ fontSize:11, color: r.status==='done'?'var(--green)':r.status==='error'?'var(--red)':'var(--dim)' }}>{r.status}</td>
+                      <td onClick={e => { e.stopPropagation(); deleteRun(r.id) }}>
+                        <button className="btn-delete" title="Delete run">×</button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Comparator — shown when 2+ runs are selected */}
+        {compareRuns.length >= 2 && (
+          <div style={{ marginTop: 20 }}>
+            <div className="chart-title" style={{ marginBottom: 10 }}>
+              Runs comparator — {compareRuns.length} runs selected
+            </div>
+            {/* Side-by-side metrics */}
+            {(() => {
+              // Helper: for numeric rows, highlight the best value
+              const bestIdx = (vals, higherIsBetter) => {
+                if (vals.length < 2) return -1
+                const nums = vals.map(v => (v == null || v === '—' || isNaN(Number(v)) ? null : Number(v)))
+                if (nums.every(v => v == null)) return -1
+                const valid = nums.filter(v => v != null)
+                const best = higherIsBetter ? Math.max(...valid) : Math.min(...valid)
+                const idx = nums.findIndex(v => v === best)
+                return nums.filter(v => v === best).length === 1 ? idx : -1  // no highlight if tied
+              }
+              const hasWallet = compareRuns.some(r => r.metrics?.wallet)
+              const rows = [
+                // label, valueFn, rawNumFn (for best-highlighting), higherIsBetter
+                ['Period',        r => `${r.start_date?.slice(5)} → ${r.end_date?.slice(5)}`, null, null],
+                ['Mode',          r => r.signal_mode === 'llm' ? '🤖 LLM' : '📐 Rules', null, null],
+                ['Floor',         r => (r.confidence_floor ?? '—') + '%', null, null],
+                ['ATR ×  R:R',    r => `${r.atr_multiple ?? '?'}× · ${r.reward_risk ?? '?'}:1`, null, null],
+                ['Max hold',      r => r.max_hold_days != null ? r.max_hold_days + 'd' : '—', null, null],
+                ['—', null, null, null],  // divider
+                ['Total trades',  r => fmtNum(r.metrics?.total_trades), r => r.metrics?.total_trades, true],
+                ['Win rate',      r => fmtPct(r.metrics?.win_rate), r => r.metrics?.win_rate, true],
+                ['Avg R',         r => fmtR(r.metrics?.avg_r_multiple), r => r.metrics?.avg_r_multiple, true],
+                ['After-cost Avg R', r => r.metrics?.after_cost_avg_r != null ? fmtR(r.metrics.after_cost_avg_r) : '—', r => r.metrics?.after_cost_avg_r, true],
+                ['Sharpe',        r => r.metrics?.sharpe != null ? r.metrics.sharpe.toFixed(2) : '—', r => r.metrics?.sharpe, true],
+                ['Max drawdown',  r => r.metrics?.max_drawdown != null ? r.metrics.max_drawdown.toFixed(2)+'R' : '—', r => r.metrics?.max_drawdown, false],
+                ['Fee stress',    r => r.metrics?.fee_stress_pass != null ? (r.metrics.fee_stress_pass ? '✓ pass' : '✗ fail') : '—', null, null],
+                ...(hasWallet ? [
+                  ['—', null, null, null],  // divider
+                  ['Initial balance', r => r.metrics?.wallet ? `$${(r.metrics.wallet.initial_balance ?? 0).toLocaleString()}` : '—', null, null],
+                  ['Position size',   r => r.metrics?.wallet ? `$${(r.metrics.wallet.position_size ?? 0).toLocaleString()} (${((r.metrics.wallet.position_size_pct ?? 0)*100).toFixed(0)}%)` : '—', null, null],
+                  ['Final equity',    r => r.metrics?.wallet ? `$${(r.metrics.wallet.final_equity ?? 0).toLocaleString()}` : '—', r => r.metrics?.wallet?.final_equity, true],
+                  ['Strategy return', r => r.metrics?.wallet?.total_return_pct != null ? `${r.metrics.wallet.total_return_pct >= 0 ? '+' : ''}${r.metrics.wallet.total_return_pct.toFixed(1)}%` : '—', r => r.metrics?.wallet?.total_return_pct, true],
+                  ['Strategy $ P&L',  r => r.metrics?.wallet?.total_pnl != null ? `${r.metrics.wallet.total_pnl >= 0 ? '+' : '-'}$${Math.abs(r.metrics.wallet.total_pnl).toFixed(0)}` : '—', r => r.metrics?.wallet?.total_pnl, true],
+                  ['Buy & Hold',      r => r.metrics?.wallet?.buy_and_hold?.return_pct != null ? `${r.metrics.wallet.buy_and_hold.return_pct >= 0 ? '+' : ''}${r.metrics.wallet.buy_and_hold.return_pct.toFixed(1)}%` : '—', r => r.metrics?.wallet?.buy_and_hold?.return_pct, true],
+                  ['Alpha vs B&H',    r => {
+                    const sp = r.metrics?.wallet?.total_return_pct; const bh = r.metrics?.wallet?.buy_and_hold?.return_pct
+                    if (sp == null || bh == null) return '—'
+                    const a = sp - bh; return `${a >= 0 ? '+' : ''}${a.toFixed(1)} pp`
+                  }, r => { const sp = r.metrics?.wallet?.total_return_pct; const bh = r.metrics?.wallet?.buy_and_hold?.return_pct; return sp != null && bh != null ? sp - bh : null }, true],
+                ] : []),
+              ]
+              return (
+              <div className="table-wrap" style={{ marginBottom: 14 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th style={{ minWidth: 120 }}>Metric</th>
+                      {compareRuns.map((r,i) => (
+                        <th key={r.id} style={{ color: BT_COMPARATOR_COLORS[i % BT_COMPARATOR_COLORS.length], textAlign:'right' }}>
+                          Run #{r.id}
+                          <div style={{ fontWeight:400, fontSize:10, opacity:0.7 }}>
+                            {(r.tickers??[]).join(',')} · {r.signal_mode === 'llm' ? 'LLM' : 'Rules'}
+                          </div>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map(([label, fn, numFn, higherIsBetter], ri) => {
+                      if (label === '—') return (
+                        <tr key={ri}><td colSpan={compareRuns.length + 1} style={{ padding: '2px 0', borderTop: '1px solid var(--border)' }}></td></tr>
+                      )
+                      const vals = compareRuns.map(r => fn(r))
+                      const rawNums = numFn ? compareRuns.map(r => numFn(r)) : null
+                      const best = rawNums ? bestIdx(rawNums, higherIsBetter) : -1
+                      return (
+                        <tr key={label}>
+                          <td style={{ color:'var(--dim)', fontSize:12 }}>{label}</td>
+                          {compareRuns.map((r, ci) => (
+                            <td key={r.id} style={{
+                              textAlign:'right',
+                              fontWeight: best === ci ? 700 : 400,
+                              color: best === ci ? 'var(--green)' : undefined,
+                            }}>{vals[ci]}</td>
+                          ))}
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              )
+            })()}
+
+            {/* Overlaid cumulative-R curves */}
+            <div className="chart-title" style={{ marginBottom: 6 }}>Cumulative R — overlaid</div>
+            <ResponsiveContainer width="100%" height={160}>
+              <AreaChart data={compareChartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#30363d" strokeOpacity={0.5} />
+                <XAxis dataKey="i" tick={AXIS_TICK} axisLine={false} tickLine={false} />
+                <YAxis domain={['auto','auto']} tick={AXIS_TICK} axisLine={false} tickLine={false}
+                       width={38} tickFormatter={v => v.toFixed(1)+'R'} />
+                <Tooltip {...CHART_TOOLTIP_STYLE}
+                  formatter={(v, name) => [fmtR(v), name.replace('run_', 'Run #')]} />
+                <ReferenceLine y={0} stroke="#8b949e" strokeDasharray="3 2" />
+                {compareRuns.map((r, i) => (
+                  <Area key={r.id} type="monotone" dataKey={`run_${r.id}`}
+                    stroke={BT_COMPARATOR_COLORS[i % BT_COMPARATOR_COLORS.length]}
+                    fill={`${BT_COMPARATOR_COLORS[i % BT_COMPARATOR_COLORS.length]}22`}
+                    strokeWidth={1.5} dot={false} connectNulls />
+                ))}
+              </AreaChart>
+            </ResponsiveContainer>
+
+            {/* Overlaid $ equity curves — only when wallet data is present */}
+            {compareDollarChartData.length > 0 && compareRuns.some(r => r.metrics?.wallet?.dollar_equity_curve?.length) && (
+              <>
+                <div className="chart-title" style={{ marginBottom: 6, marginTop: 14 }}>$ Portfolio equity — overlaid</div>
+                <ResponsiveContainer width="100%" height={160}>
+                  <AreaChart data={compareDollarChartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#30363d" strokeOpacity={0.5} />
+                    <XAxis dataKey="date" tick={AXIS_TICK} axisLine={false} tickLine={false} />
+                    <YAxis domain={['auto','auto']} tick={AXIS_TICK} axisLine={false} tickLine={false}
+                           width={56} tickFormatter={v => '$'+Math.round(v).toLocaleString()} />
+                    <Tooltip {...CHART_TOOLTIP_STYLE}
+                      formatter={(v, name) => [`$${Number(v).toLocaleString()}`, name.replace('run_', 'Run #')]} />
+                    {compareRuns.filter(r => r.metrics?.wallet).map((r, i) => {
+                      const init = r.metrics.wallet.initial_balance ?? 0
+                      return <ReferenceLine key={`ref_${r.id}`} y={init} stroke={BT_COMPARATOR_COLORS[i % BT_COMPARATOR_COLORS.length]} strokeDasharray="3 2" strokeOpacity={0.4} />
+                    })}
+                    {compareRuns.map((r, i) => (
+                      r.metrics?.wallet?.dollar_equity_curve?.length ? (
+                        <Area key={r.id} type="monotone" dataKey={`run_${r.id}`}
+                          stroke={BT_COMPARATOR_COLORS[i % BT_COMPARATOR_COLORS.length]}
+                          fill={`${BT_COMPARATOR_COLORS[i % BT_COMPARATOR_COLORS.length]}22`}
+                          strokeWidth={1.5} dot={false} connectNulls />
+                      ) : null
+                    ))}
+                  </AreaChart>
+                </ResponsiveContainer>
+              </>
+            )}
+
+            {/* AI Compare */}
+            {(() => {
+              const hasLlmVsRules =
+                compareRuns.some(r => r.signal_mode === 'llm') &&
+                compareRuns.some(r => r.signal_mode === 'rules')
+              return (
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
+                    <button className="btn-primary btn-sm" onClick={runAiCompare}
+                            disabled={aiCompareLoading}>
+                      {aiCompareLoading ? '⏳ Comparing…' : '🧠 AI Compare'}
+                    </button>
+                    <span className="provider-hint" title="💡 Groq Qwen3.6-27b · reasoning default">ⓘ</span>
+                    {hasLlmVsRules && (
+                      <span className="badge" style={{
+                        background: 'rgba(251,191,36,0.18)', color: 'var(--yellow)',
+                        border: '1px solid rgba(251,191,36,0.35)', fontSize: 11,
+                      }}>⚡ LLM vs Rules</span>
+                    )}
+                  </div>
+                  {aiCompareError && (
+                    <p style={{ color: 'var(--red)', fontSize: 13 }}>✗ {aiCompareError}</p>
+                  )}
+                  {aiCompare && (
+                    <div style={{
+                      padding: '12px 16px', background: 'var(--surface-2)',
+                      border: '1px solid var(--border)', borderRadius: 8,
+                    }}>
+                      {/* Header row */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
+                        {/* Comparability badge */}
+                        {aiCompare.comparability && (
+                          <span style={{
+                            padding: '3px 9px', borderRadius: 20, fontSize: 11, fontWeight: 600,
+                            background: aiCompare.comparability === 'full' ? 'rgba(52,211,153,0.15)'
+                              : aiCompare.comparability === 'partial' ? 'rgba(251,191,36,0.15)'
+                              : 'rgba(248,113,113,0.15)',
+                            color: aiCompare.comparability === 'full' ? 'var(--green)'
+                              : aiCompare.comparability === 'partial' ? 'var(--yellow)' : 'var(--red)',
+                          }}>
+                            {aiCompare.comparability === 'full' ? '✓ Fully comparable'
+                              : aiCompare.comparability === 'partial' ? '⚠ Partially comparable'
+                              : '✗ Not comparable'}
+                          </span>
+                        )}
+                        {/* Winner badge */}
+                        {aiCompare.winner_run_id != null && (
+                          <span style={{
+                            padding: '3px 10px', borderRadius: 20, fontSize: 12, fontWeight: 600,
+                            background: 'rgba(52,211,153,0.18)', color: 'var(--green)',
+                            border: '1px solid rgba(52,211,153,0.3)',
+                          }}>
+                            🏆 Run #{aiCompare.winner_run_id} wins
+                            {aiCompare.winner_confidence && aiCompare.winner_confidence !== 'none' && (
+                              <span style={{ fontWeight: 400, marginLeft: 5, fontSize: 11 }}>
+                                ({aiCompare.winner_confidence} confidence)
+                              </span>
+                            )}
+                          </span>
+                        )}
+                        <span style={{ fontSize: 11, color: 'var(--dim)', marginLeft: 'auto' }}>
+                          {aiCompare.model_used && `via ${aiCompare.model_used}`}
+                          {(aiCompare.prompt_tokens || aiCompare.completion_tokens) && (
+                            ` · ${((aiCompare.prompt_tokens ?? 0) + (aiCompare.completion_tokens ?? 0)).toLocaleString()} tok`
+                          )}
+                        </span>
+                      </div>
+                      {/* LLM value-add */}
+                      {aiCompare.llm_value_add?.assessment && aiCompare.llm_value_add.assessment !== 'not_applicable' && (
+                        <div style={{
+                          fontSize: 12, marginBottom: 10, padding: '6px 10px',
+                          background: 'var(--surface-1)', borderRadius: 6,
+                        }}>
+                          <span style={{ fontWeight: 600, marginRight: 6 }}>LLM vs Rules:</span>
+                          <span style={{
+                            fontWeight: 700,
+                            color: aiCompare.llm_value_add.assessment === 'adds' ? 'var(--green)'
+                              : aiCompare.llm_value_add.assessment === 'detracts' ? 'var(--red)'
+                              : 'var(--dim)',
+                          }}>{aiCompare.llm_value_add.assessment}</span>
+                          {aiCompare.llm_value_add.reason && (
+                            <span style={{ color: 'var(--dim)', marginLeft: 8 }}>
+                              — {aiCompare.llm_value_add.reason}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {/* Summary */}
+                      {aiCompare.summary && (
+                        <p style={{ fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>{aiCompare.summary}</p>
+                      )}
+                      {/* Per-run */}
+                      {(aiCompare.per_run ?? []).map((pr, i) => (
+                        <div key={pr.run_id} style={{ marginBottom: 10 }}>
+                          <div style={{
+                            fontSize: 12, fontWeight: 600, marginBottom: 4,
+                            color: BT_COMPARATOR_COLORS[i % BT_COMPARATOR_COLORS.length],
+                          }}>
+                            Run #{pr.run_id}
+                            {pr.evidence_quality && (
+                              <span style={{ fontWeight: 400, color: 'var(--dim)', marginLeft: 6 }}>
+                                · {pr.evidence_quality} evidence
+                              </span>
+                            )}
+                          </div>
+                          {(pr.strengths ?? []).length > 0 && (
+                            <ul style={{ margin: '0 0 4px', paddingLeft: 18, fontSize: 12 }}>
+                              {pr.strengths.map((s, j) => (
+                                <li key={j} style={{ color: 'var(--green)', marginBottom: 1 }}>{s}</li>
+                              ))}
+                            </ul>
+                          )}
+                          {(pr.weaknesses ?? []).length > 0 && (
+                            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
+                              {pr.weaknesses.map((w, j) => (
+                                <li key={j} style={{ color: 'var(--red)', marginBottom: 1 }}>{w}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      ))}
+                      {/* Recommendation */}
+                      {aiCompare.recommendation && (
+                        <p style={{ fontSize: 13, fontWeight: 600, margin: '8px 0 0' }}>
+                          → {aiCompare.recommendation}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
+          </div>
+        )}
+      </div>
+
+    </div>
+  )
+}
+
+// ─── Paper Orders Panel ───────────────────────────────────────────────────────
+
+function PaperOrdersPanel({ open, onToggle }) {
+  const [account,    setAccount]    = useState(null)
+  const [clock,      setClock]      = useState(null)
+  const [orders,     setOrders]     = useState([])
+  const [positions,  setPositions]  = useState([])
+  const [loading,    setLoading]    = useState(false)
+  const [error,      setError]      = useState(null)
+  const [cancelling, setCancelling] = useState({})
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const [accRes, clkRes, ordRes, posRes] = await Promise.all([
+        fetch('/paper/account'),
+        fetch('/paper/clock'),
+        fetch('/paper/orders'),
+        fetch('/paper/positions'),
+      ])
+      if (accRes.ok) { const d = await accRes.json(); setAccount(d.account ?? null) }
+      if (clkRes.ok) setClock(await clkRes.json())
+      if (ordRes.ok)  setOrders((await ordRes.json()).orders ?? [])
+      if (posRes.ok)  setPositions((await posRes.json()).positions ?? [])
+    } catch (e) {
+      setError('Failed to load paper data')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  // Load on mount and poll every 60 s
+  useEffect(() => {
+    load()
+    const id = setInterval(load, 60_000)
+    return () => clearInterval(id)
+  }, [load])
+
+  const cancelOrder = async (dbId, alpacaId) => {
+    setCancelling(c => ({ ...c, [dbId]: true }))
+    try {
+      await fetch(`/paper/orders/${dbId}/cancel`, { method: 'POST' })
+      await load()
+    } finally {
+      setCancelling(c => { const n = { ...c }; delete n[dbId]; return n })
+    }
+  }
+
+  const fmtMoney = (v, decimals = 2) =>
+    v == null ? '—' : `$${parseFloat(v).toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`
+
+  const fmtPct = (v) =>
+    v == null ? '' : `${v >= 0 ? '+' : ''}${parseFloat(v).toFixed(2)}%`
+
+  const statusChip = (status) => {
+    const map = {
+      pending:           { bg: '#7c6200', color: '#ffd54f' },
+      accepted:          { bg: '#7c6200', color: '#ffd54f' },
+      accepted_for_bidding: { bg: '#7c6200', color: '#ffd54f' },
+      new:               { bg: '#7c6200', color: '#ffd54f' },
+      filled:            { bg: '#1b4332', color: '#69db7c' },
+      partially_filled:  { bg: '#1b4332', color: '#69db7c' },
+      cancelled:         { bg: '#333', color: '#888' },
+      canceled:          { bg: '#333', color: '#888' },
+      expired:           { bg: '#333', color: '#888' },
+      rejected:          { bg: '#5c1a1a', color: '#fc9a9a' },
+    }
+    const style = map[status] ?? { bg: '#333', color: '#aaa' }
+    return (
+      <span style={{
+        padding: '1px 6px', borderRadius: 4, fontSize: 11, fontWeight: 600,
+        background: style.bg, color: style.color, textTransform: 'uppercase',
+      }}>
+        {status ?? 'unknown'}
+      </span>
+    )
+  }
+
+  const isPending = (s) => ['pending','new','accepted','accepted_for_bidding','partially_filled'].includes(s)
+
+  if (!open) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'flex-start', paddingTop: 8 }}>
+        <button
+          onClick={onToggle}
+          title="Show Paper Orders"
+          style={{
+            background: 'none', border: '1px solid #333', borderRadius: 6,
+            color: '#888', cursor: 'pointer', padding: '6px 10px', fontSize: 18,
+            lineHeight: 1, writingMode: 'vertical-rl',
+          }}
+        >
+          📈
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{
+      width: 260, minWidth: 260, flexShrink: 0,
+      background: 'var(--surface)', border: '1px solid #333',
+      borderRadius: 10, padding: '12px 14px', display: 'flex',
+      flexDirection: 'column', gap: 10, alignSelf: 'flex-start',
+    }}>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ fontWeight: 700, fontSize: 13 }}>📈 Paper Orders</span>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          {loading && <span style={{ fontSize: 11, color: '#888' }}>↻</span>}
+          <button
+            onClick={load}
+            title="Refresh"
+            style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', fontSize: 13, padding: 0 }}
+          >⟳</button>
+          <button
+            onClick={onToggle}
+            title="Collapse"
+            style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', fontSize: 13, padding: 0 }}
+          >◀</button>
+        </div>
+      </div>
+
+      {error && <div style={{ fontSize: 11, color: '#fc9a9a' }}>{error}</div>}
+
+      {/* Market clock pill */}
+      {clock && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
+          <span style={{
+            width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+            background: clock.is_open ? '#69db7c' : '#888',
+            boxShadow: clock.is_open ? '0 0 5px #69db7c' : 'none',
+          }} />
+          <span style={{ color: clock.is_open ? '#69db7c' : '#888', fontWeight: 600 }}>
+            {clock.is_open ? 'Market Open' : 'Market Closed'}
+          </span>
+          {!clock.is_open && clock.next_open && (
+            <span style={{ color: '#555', fontSize: 10 }}>
+              · opens {new Date(clock.next_open).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Account summary */}
+      {account && (
+        <div style={{ borderRadius: 7, background: '#1a1a2a', padding: '8px 10px', fontSize: 12 }}>
+          <div style={{ color: '#888', fontSize: 10, textTransform: 'uppercase', marginBottom: 6, letterSpacing: 1 }}>Account</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+            <span style={{ color: '#aaa' }}>Equity</span>
+            <span style={{ fontWeight: 600 }}>{fmtMoney(account.equity)}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+            <span style={{ color: '#aaa' }}>Day P&amp;L</span>
+            <span style={{ color: (account.day_pnl ?? 0) >= 0 ? '#69db7c' : '#fc9a9a', fontWeight: 600 }}>
+              {(account.day_pnl ?? 0) >= 0 ? '+' : ''}{fmtMoney(account.day_pnl)}
+              {account.day_pnl_pct != null && (
+                <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.8 }}>
+                  ({fmtPct(account.day_pnl_pct)})
+                </span>
+              )}
+            </span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+            <span style={{ color: '#aaa' }}>Cash</span>
+            <span>{fmtMoney(account.cash)}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+            <span style={{ color: '#aaa' }}>Buying Power</span>
+            <span>{fmtMoney(account.buying_power)}</span>
+          </div>
+          {(account.long_market_value > 0 || account.short_market_value > 0) && (
+            <div style={{ borderTop: '1px solid #2a2a3a', marginTop: 5, paddingTop: 5 }}>
+              {account.long_market_value > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
+                  <span style={{ color: '#aaa' }}>Long exposure</span>
+                  <span style={{ color: '#69db7c' }}>{fmtMoney(account.long_market_value)}</span>
+                </div>
+              )}
+              {account.short_market_value < 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
+                  <span style={{ color: '#aaa' }}>Short exposure</span>
+                  <span style={{ color: '#fc9a9a' }}>{fmtMoney(Math.abs(account.short_market_value))}</span>
+                </div>
+              )}
+              {account.maintenance_margin > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#aaa' }}>Maint. margin</span>
+                  <span style={{ color: '#888' }}>{fmtMoney(account.maintenance_margin)}</span>
+                </div>
+              )}
+            </div>
+          )}
+          {account.daytrade_count > 0 && (
+            <div style={{ marginTop: 5, fontSize: 10, color: account.daytrade_count >= 3 ? '#fc9a9a' : '#ffd54f' }}>
+              ⚠ {account.daytrade_count}/3 day trades (rolling 5 days)
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Open positions */}
+      {positions.length > 0 && (
+        <div>
+          <div style={{ color: '#888', fontSize: 10, textTransform: 'uppercase', marginBottom: 6, letterSpacing: 1 }}>Open Positions</div>
+          {positions.map((p, i) => {
+            const pnl = parseFloat(p.unrealized_pl ?? 0)
+            const pnlPct = parseFloat(p.unrealized_plpc ?? 0) * 100
+            return (
+              <div key={i} style={{
+                padding: '6px 8px', borderRadius: 6, background: '#1a1a2a',
+                marginBottom: 4, fontSize: 12,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
+                  <span style={{ fontWeight: 700 }}>{p.symbol}</span>
+                  <span style={{ color: '#aaa', fontSize: 11 }}>{p.side} · {fmtMoney(p.market_value, 0)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#888', fontSize: 11 }}>Avg {fmtMoney(p.avg_entry_price)}</span>
+                  <span style={{ color: pnl >= 0 ? '#69db7c' : '#fc9a9a', fontSize: 11, fontWeight: 600 }}>
+                    {pnl >= 0 ? '+' : ''}{fmtMoney(pnl)} ({fmtPct(pnlPct)})
+                  </span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Recent orders */}
+      <div>
+        <div style={{ color: '#888', fontSize: 10, textTransform: 'uppercase', marginBottom: 6, letterSpacing: 1 }}>Recent Orders</div>
+        {orders.length === 0 && !loading && (
+          <div style={{ color: '#555', fontSize: 12, textAlign: 'center', padding: '8px 0' }}>No orders yet</div>
+        )}
+        {orders.slice(0, 20).map((o) => (
+          <div key={o.id} style={{
+            padding: '6px 8px', borderRadius: 6, background: '#1a1a2a',
+            marginBottom: 4, fontSize: 12,
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+              <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+                <span style={{ fontWeight: 700 }}>{o.ticker}</span>
+                <span style={{ fontSize: 10, color: o.side === 'buy' ? '#69db7c' : '#fc9a9a' }}>
+                  {o.side === 'buy' ? '↑ LONG' : '↓ SHORT'}
+                </span>
+              </div>
+              {statusChip(o.status)}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ color: '#888', fontSize: 11 }}>
+                {fmtMoney(o.notional, 0)} notional
+                {o.filled_avg_price ? ` · fill ${fmtMoney(o.filled_avg_price)}` : ''}
+              </span>
+              {isPending(o.status) && (
+                <button
+                  onClick={() => cancelOrder(o.id, o.alpaca_order_id)}
+                  disabled={cancelling[o.id]}
+                  title="Cancel order"
+                  style={{
+                    background: 'none', border: '1px solid #555', borderRadius: 4,
+                    color: '#fc9a9a', cursor: 'pointer', fontSize: 10, padding: '1px 5px',
+                  }}
+                >
+                  {cancelling[o.id] ? '…' : '✕'}
+                </button>
+              )}
+            </div>
+            {/* Realised P&L for closed orders */}
+            {o.realized_pnl != null && (
+              <div style={{ fontSize: 11, color: parseFloat(o.realized_pnl) >= 0 ? '#69db7c' : '#fc9a9a', marginTop: 2 }}>
+                P&amp;L {parseFloat(o.realized_pnl) >= 0 ? '+' : ''}{fmtMoney(o.realized_pnl)}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { data: health }                        = usePolling('/health', 30_000)
+  const { data: health, reload: reloadHealth }  = usePolling('/health', 30_000)
   const { data: wl, reload: reloadWatchlist }   = usePolling('/watchlist', 60_000)
   const { data: signals, reload: reloadSignals } = usePolling('/signals?limit=30', 60_000)
   // Token usage — 30-day window; drives header chip + settings section
   const { data: usage, reload: reloadUsage }    = usePolling('/usage', 60_000)
+  // Backtest runs list — used to include LLM backtest tokens in the header chip
+  const { data: btListData }                    = usePolling('/backtest', 60_000)
+  const btTodayTokens = (() => {
+    const todayIso     = new Date().toISOString().slice(0, 10)
+    const activeModel  = usage?.active_model    ?? null
+    const activeProv   = usage?.active_provider ?? null
+    return (btListData?.runs ?? [])
+      .filter(r =>
+        (r.created_at ?? '').slice(0, 10) === todayIso &&
+        // filter to active model when we have provider info; otherwise sum all
+        (!activeProv || (r.llm_provider ?? null) === activeProv) &&
+        (!activeModel || (r.llm_model   ?? null) === activeModel)
+      )
+      .reduce((s, r) => s + (r.llm_prompt_tokens ?? 0) + (r.llm_completion_tokens ?? 0), 0)
+  })()
 
   const [activeView, setActiveView] = useState('dashboard')
   const [explorerState, setExplorerState] = useState(null)
   // Increment to force-remount ExplorerPage only when a new result arrives from Dashboard.
   // Tab switching leaves explorerKey unchanged so the running SSE stream is preserved.
   const [explorerKey, setExplorerKey] = useState(0)
+
+  // Paper orders panel — open state persisted to localStorage
+  const [paperPanelOpen, setPaperPanelOpen] = useState(() => {
+    try { return localStorage.getItem('paper_panel_open') !== 'false' }
+    catch { return true }
+  })
+  const togglePaperPanel = () => {
+    setPaperPanelOpen(v => {
+      const next = !v
+      try { localStorage.setItem('paper_panel_open', String(next)) } catch {}
+      return next
+    })
+  }
 
   const openExplorer = (result) => {
     setExplorerState(result)
@@ -3623,13 +7830,32 @@ export default function App() {
 
   return (
     <div className="app">
-      <Header health={health} usage={usage} activeView={activeView} onViewChange={setActiveView} />
+      <Header health={health} usage={usage} btTodayTokens={btTodayTokens} activeView={activeView} onViewChange={setActiveView} />
       <main className="main">
         {/* All three views are always mounted — switching tabs never destroys SSE state */}
         <div style={{ display: activeView === 'dashboard' ? 'flex' : 'none',
-                      flexDirection: 'column', gap: 16 }}>
-          <WatchlistCard wl={wl} onWatchlistChange={reloadWatchlist} />
-          <SignalsTable signals={signals} reload={reloadSignals} />
+                      flexDirection: 'row', gap: 16, alignItems: 'flex-start' }}>
+          <PaperOrdersPanel open={paperPanelOpen} onToggle={togglePaperPanel} />
+          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {/* Dashboard info bar */}
+            <div style={{
+              display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'center',
+              padding: '7px 14px', borderRadius: 8,
+              background: 'color-mix(in srgb, var(--accent) 6%, transparent)',
+              border: '1px solid color-mix(in srgb, var(--accent) 18%, transparent)',
+              fontSize: 12, color: 'var(--dim)',
+            }}>
+              <span>📊 <strong>Live prices</strong> refresh every 30 s via Alpaca</span>
+              <span style={{ color: 'color-mix(in srgb, var(--dim) 40%, transparent)' }}>·</span>
+              <span>🤖 <strong>AI signal scan</strong> runs every {wl?.scan_interval_minutes ?? 15} min during market hours</span>
+              <span style={{ color: 'color-mix(in srgb, var(--dim) 40%, transparent)' }}>·</span>
+              <span style={{ color: wl?.scheduler?.market_open ? 'var(--green)' : 'var(--dim)' }}>
+                {wl?.scheduler?.market_open ? '🟢 Market open' : '⚫ Market closed'}
+              </span>
+            </div>
+            <WatchlistCard wl={wl} onWatchlistChange={reloadWatchlist} />
+            <SignalsTable signals={signals} reload={reloadSignals} />
+          </div>
         </div>
         <div style={{ display: activeView === 'explorer' ? '' : 'none' }}>
           <ExplorerPage
@@ -3641,7 +7867,8 @@ export default function App() {
           />
         </div>
         {activeView === 'education' && <EducationPage />}
-        {activeView === 'settings' && <SettingsPage usage={usage} onUsageRefresh={reloadUsage} />}
+        {activeView === 'backtest' && <BacktestPage wl={wl} usage={usage} />}
+        {activeView === 'settings' && <SettingsPage usage={usage} onUsageRefresh={reloadUsage} onHealthRefresh={reloadHealth} />}
       </main>
       <footer className="footer">
         <span className="footer-brand">MarketSage</span>

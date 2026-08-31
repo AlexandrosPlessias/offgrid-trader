@@ -22,7 +22,12 @@ from datetime import datetime
 from typing import Any
 
 from .config import MarketHours, get_settings
-from .database import get_effective_watchlist, get_setting, init_db
+from .database import (
+    get_effective_watchlist,
+    get_setting,
+    init_db,
+    update_paper_order_status,
+)
 from .memory import MemoryLayer
 from .orchestrator import Orchestrator
 
@@ -79,8 +84,15 @@ async def scan_watchlist(*, send_alerts: bool = True) -> list[dict[str, Any]]:
     """Scan every ticker in the effective watchlist via the Orchestrator.
 
     Tickers are sorted by scan staleness and run concurrently up to the
-    orchestrator's ``max_concurrent`` cap.
+    orchestrator's ``max_concurrent`` cap, which is read from the DB setting
+    ``concurrent_tickers`` (Settings → Performance) before each scan so that
+    changes take effect without a container restart.
     """
+    from .config import get_settings as _cfg
+
+    _max = int(get_setting("concurrent_tickers") or 0) or _cfg().concurrent_tickers
+    _orchestrator.set_max_concurrent(_max)
+
     tickers = get_effective_watchlist()
     return await _orchestrator.scan_watchlist(tickers, send_alerts=send_alerts)
 
@@ -97,6 +109,48 @@ def scan_ticker(ticker: str, *, send_alerts: bool = True) -> dict[str, Any]:
     return asyncio.get_event_loop().run_until_complete(
         scan_ticker_async(ticker, send_alerts=send_alerts)
     )
+
+
+# --------------------------------------------------------------------------- #
+# Paper-order status sync
+# --------------------------------------------------------------------------- #
+async def sync_paper_orders() -> None:
+    """Fetch live order status from Alpaca and update the paper_orders table.
+
+    Runs in the background every scan cycle.  Skipped when paper trading
+    is disabled or no Alpaca credentials are configured.
+    """
+    if get_setting("paper_trading_enabled", "false") != "true":
+        return
+
+    from .alpaca import AlpacaError, get_client  # local import — avoids startup cost
+
+    try:
+        client = get_client()
+        alpaca_orders = client.get_orders(status="all", limit=200)
+    except AlpacaError as exc:
+        _log.warning("paper sync: Alpaca fetch failed: %s", exc)
+        return
+
+    updated = 0
+    for ao in alpaca_orders:
+        order_id = ao.get("id")
+        if not order_id:
+            continue
+        updates: dict = {"status": ao.get("status")}
+        filled_qty = ao.get("filled_qty")
+        if filled_qty is not None:
+            updates["qty"] = float(filled_qty)
+        filled_avg = ao.get("filled_avg_price")
+        if filled_avg is not None:
+            updates["filled_avg_price"] = float(filled_avg)
+        filled_at = ao.get("filled_at")
+        if filled_at:
+            updates["filled_at"] = filled_at
+        update_paper_order_status(order_id, updates)
+        updated += 1
+
+    _log.info("paper sync: updated %d order(s)", updated)
 
 
 # --------------------------------------------------------------------------- #
@@ -128,6 +182,11 @@ class MonitorScheduler:
                         _log.info("scan complete — %d actionable signal(s)", total)
                     except Exception as exc:  # pragma: no cover - defensive
                         _log.error("scan error: %s", exc)
+                    # Sync paper order statuses after each watchlist scan.
+                    try:
+                        await sync_paper_orders()
+                    except Exception as exc:  # pragma: no cover - defensive
+                        _log.warning("paper sync error: %s", exc)
                 else:
                     _log.info("market closed — sleeping")
 

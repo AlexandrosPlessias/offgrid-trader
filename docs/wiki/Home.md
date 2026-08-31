@@ -11,7 +11,7 @@ Runs locally with **Ollama** (default) or via free cloud inference (**Groq**) �
 
 ## What does it do?
 
-For each ticker in your watchlist (or on demand), a **TickerAgent** runs five sequential skills:
+For each ticker in your watchlist (or on demand), a **TickerAgent** runs six sequential skills:
 
 ```
 MemoryLayer       → load prior scan context (signal history, RSI streak, price trend)
@@ -22,23 +22,30 @@ AIAnalysisSkill   → builds prompt with PRIOR CONTEXT, sends to local Ollama qw
 OpportunityDetect → 5 rule checks (RSI, MACD, volume, valuation, AI signal)
                     + macro regime confidence filter → scored, confidence-filtered signals
 PersistSkill      → save analysis log + signals to SQLite
+PaperTradeSkill   → places Alpaca bracket orders for actionable signals (optional)
 AlertSkill        → optional Gmail SMTP · Telegram bot
 MemoryLayer       → update ticker_memory for next scan
 ```
 
 The **Orchestrator** sorts watchlist tickers by scan staleness and caps concurrency at 3 (respects Ollama VRAM). Results are visible in the React UI (Dashboard · Explorer · Learn · Settings) and via the REST API. Live progress streams via SSE — including `retry` and `memory` events.
 
+After each scan, the scheduler syncs open Alpaca paper orders (status, fill price, P&L) back to the local DB. The **Dashboard** shows a live watchlist price table (Price · Chg% · VWAP · Vol · H/L) updated every 30 s during market hours and a collapsible **Paper Orders** sidebar with account equity, positions, and recent orders.
+
 ---
 
 ## Screenshots
 
-| Dashboard | Learn |
+| Dashboard (live prices + Paper Orders) | Learn |
 |---|---|
 | ![Dashboard](../screenshots/01-dashboard.png) | ![Learn](../screenshots/03-learn.png) |
 
 | Analysis Explorer | Settings |
 |---|---|
 | ![Explorer](../screenshots/02-explorer.png) | ![Settings](../screenshots/05-settings.png) |
+
+| Paper Orders sidebar | Paper Trading settings |
+|---|---|
+| ![Paper Orders sidebar](../screenshots/11-dashboard-paper-orders.png) | ![Paper Trading settings](../screenshots/12-settings-paper-trading.png) |
 
 ### Explorer — section walkthrough (AAPL)
 
@@ -94,6 +101,9 @@ See [docs/screenshots/README.md](../screenshots/README.md) for full instructions
 | [Cloud LLM Providers](cloud-llm.md) | Free Groq setup, model reference, switching between providers |
 | [How Signals Work](how-signals-work.md) | End-to-end walkthrough: AI verdict → 5 rule checks → merge + corroboration bonus → macro filter → confidence floor |
 | [Indicators](indicators.md) | RSI, MACD, EMA, Bollinger Bands, Stochastic, Volume ratio, Fundamentals, Balance Sheet, Macro — definitions and how they're used |
+| [Backtesting — Concepts](backtesting-explained.md) | What backtesting does, each metric in plain English, the confidence-floor sweep, and how to tune `CONFIDENCE_FLOOR` |
+| [Backtesting — Reference](backtesting.md) | Parameters, ATR bracket, LLM-mode quota, runs comparator, `/backtest*` API endpoints, schema |
+| [Paper Trading](paper-trading.md) | Alpaca paper account setup, bracket orders, live market data, `/paper/*` API endpoints |
 | [Glossary](glossary.md) | Alphabetical trading and macro terminology |
 | [Observability](observability.md) | OTEL span hierarchy, Aspire usage guide, log lines |
 
@@ -103,7 +113,7 @@ See [docs/screenshots/README.md](../screenshots/README.md) for full instructions
 
 | URL | Service |
 |---|---|
-| http://localhost:5174 | React UI — Dashboard · Analysis Explorer · Learn · Settings |
+| http://localhost:5174 | React UI — Dashboard · Analysis Explorer · Backtesting · Learn · Settings |
 | http://localhost:8010/docs | FastAPI interactive docs (OpenAPI) |
 | http://localhost:18889 | Aspire — structured logs, traces, metrics |
 | http://localhost:9000 | Portainer — container management |
@@ -118,8 +128,8 @@ backend/
 ├── data.py           — yfinance OHLCV + ta library → indicators + market dict
 ├── analysis.py       — prompt builder → Ollama /api/chat → parsed JSON
 ├── opportunities.py  — 5 rule checks + macro regime filter → scored signals
-├── database.py       — SQLite: signals, analysis_log (+ opportunities_json / actionable_json),
-│                       app_settings, ticker_memory
+├── database.py       — SQLite: signals, analysis_log, app_settings, ticker_memory,
+│                       backtest_runs, backtest_trades
 ├── alerts.py         — Gmail SMTP · Telegram bot (confidence-gated)
 ├── memory.py         — MemoryLayer: load/update ticker_memory; 48h TTL
 ├── agent.py          — TickerAgent: runs skills with retry + memory + OTEL spans/metrics
@@ -128,6 +138,7 @@ backend/
 ├── skills/           — five pipeline skills (fetch_data, ai_analysis, opportunity_detect,
 │                       persist, alert)
 ├── prompts/          — system_prompt.md (loaded at runtime), user_prompt_structure.md
+├── backtest.py       — backtesting engine: replay, ATR bracket, outcome evaluation, metrics
 └── main.py           — FastAPI: endpoints, SSE streaming, lifespan, OTEL setup
 
 frontend/src/

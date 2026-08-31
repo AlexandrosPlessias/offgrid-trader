@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "backtest_comparison_v2.schema.json",
+  "title": "BacktestComparisonV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "comparison_id",
+    "status",
+    "comparability",
+    "comparability_reasons",
+    "summary",
+    "winner_run_id",
+    "winner_confidence",
+    "llm_value_add",
+    "per_run",
+    "recommendation"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "backtest_compare.v2"
+    },
+    "comparison_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "insufficient_data",
+        "invalid_input"
+      ]
+    },
+    "comparability": {
+      "type": "string",
+      "enum": [
+        "full",
+        "partial",
+        "none"
+      ]
+    },
+    "comparability_reasons": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "string",
+        "maxLength": 300
+      }
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 800
+    },
+    "winner_run_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "winner_confidence": {
+      "type": "string",
+      "enum": [
+        "none",
+        "low",
+        "moderate",
+        "high"
+      ]
+    },
+    "llm_value_add": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assessment",
+        "matched_pair_ids",
+        "reason"
+      ],
+      "properties": {
+        "assessment": {
+          "type": "string",
+          "enum": [
+            "adds",
+            "detracts",
+            "neutral",
+            "inconclusive",
+            "not_applicable"
+          ]
+        },
+        "matched_pair_ids": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string"
+          }
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      }
+    },
+    "per_run": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "evidence_quality",
+          "strengths",
+          "weaknesses"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_quality": {
+            "type": "string",
+            "enum": [
+              "weak",
+              "moderate",
+              "strong"
+            ]
+          },
+          "strengths": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+              "type": "string",
+              "maxLength": 250
+            }
+          },
+          "weaknesses": {
+            "type": "array",
+            "maxItems": 7,
+            "items": {
+              "type": "string",
+              "maxLength": 250
+            }
+          }
+        }
+      }
+    },
+    "recommendation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    }
+  }
+}

@@ -379,6 +379,28 @@ body {
 }
 .btn-ghost:hover { color: var(--text); border-color: var(--dim); background: var(--surface-2); }
 
+.btn-secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: border-color var(--transition), color var(--transition);
+}
+.btn-secondary:hover { border-color: var(--accent); color: var(--text); }
+
+.provider-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: help;
+  opacity: 0.6;
+  user-select: none;
+}
+.provider-hint:hover { opacity: 1; }
+
 .btn-delete {
   background: none;
   border: 1px solid transparent;
@@ -537,7 +559,11 @@ tbody td {
 .rbadge.trend-bullish  { background: var(--long-bg);  color: var(--green); border: 1px solid rgba(22,163,74,0.3); }
 .rbadge.trend-bearish  { background: var(--short-bg); color: var(--red);   border: 1px solid rgba(220,38,38,0.3); }
 .rbadge.trend-neutral  { background: var(--surface-2); color: var(--dim); border: 1px solid var(--border); }
-.rbadge.momentum       { background: var(--blue-dim); color: var(--blue); border: 1px solid rgba(37,99,235,0.2); }
+.rbadge.momentum          { background: var(--blue-dim);  color: var(--blue);   border: 1px solid rgba(37,99,235,0.2); }
+.rbadge.sentiment-bullish { background: var(--long-bg);   color: var(--green);  border: 1px solid rgba(52,211,153,0.3); }
+.rbadge.sentiment-bearish { background: var(--short-bg);  color: var(--red);    border: 1px solid rgba(248,113,113,0.3); }
+.rbadge.sentiment-mixed   { background: var(--surface-2); color: var(--yellow); border: 1px solid rgba(251,191,36,0.3); }
+.rbadge.sentiment-neutral { background: var(--surface-2); color: var(--dim);    border: 1px solid var(--border); }
 
 .reasoning-body {
   padding: 12px 14px;
@@ -1085,6 +1111,16 @@ tbody td {
   font-weight: 700;
   opacity: 0.75;
 }
+
+/* Used as <h4 className="edu-sub-heading"> inside EduSection bodies */
+.edu-sub-heading {
+  margin: 20px 0 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  font-family: var(--font-ui);
+  letter-spacing: -0.1px;
+}
 .edu-table {
   border-collapse: collapse;
   font-size: 0.82rem;
@@ -1488,9 +1524,26 @@ tbody td {
 
 .news-meta {
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
   font-size: 11px;
   color: var(--dim);
+}
+
+.news-source {
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.news-channel {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  border: 1px solid var(--border-sub);
+  font-size: 10px;
+  color: var(--dim);
+  letter-spacing: 0.02em;
 }
 
 /* ── Macro context card ─────────────────────────────────────────────────────── */
@@ -1623,7 +1676,7 @@ tbody td {
 }
 
 .edu-header {
-  padding-bottom: 20px;
+  padding: 0 20px 20px;          /* left/right 20 px matches .edu-summary padding */
   border-bottom: 1px solid var(--border);
   margin-bottom: 4px;
 }
@@ -1688,8 +1741,15 @@ tbody td {
   letter-spacing: -0.1px;
 }
 
-.edu-chevron {
+/* Badge on the right side of the summary row — pushed to the right so title
+   text is flush-left and aligns with the page h1 above it. */
+.edu-badge-right {
   margin-left: auto;
+  flex-shrink: 0;
+}
+
+.edu-chevron {
+  margin-left: 10px;   /* was: auto — now stays tight next to the badge */
   color: var(--dim);
   font-size: 16px;
   line-height: 1;
@@ -2276,7 +2336,7 @@ details.edu-section[open] .edu-chevron {
 
 .signal-levels-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
   gap: 1px;
   background: var(--border);
   border-top: 1px solid var(--border);
@@ -2288,6 +2348,7 @@ details.edu-section[open] .edu-chevron {
   padding: 7px 4px;
   background: var(--bg-card);
   gap: 2px;
+  cursor: help;
 }
 .signal-level-label {
   font-size: 10px;
@@ -2308,6 +2369,99 @@ details.edu-section[open] .edu-chevron {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 100%;
+}
+
+/* ── R:R bracket row ──────────────────────────────────────────────────── */
+.signal-rr-row {
+  padding: 6px 10px 4px;
+  border-top: 1px solid var(--border);
+  cursor: help;
+}
+.signal-rr-bar {
+  display: flex;
+  height: 5px;
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+.signal-rr-risk   { background: var(--red);   opacity: 0.7; }
+.signal-rr-reward { background: var(--green);  opacity: 0.7; }
+.signal-rr-labels {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+}
+.signal-rr-risk-lbl   { color: var(--red);   }
+.signal-rr-ratio      { color: var(--text-dim); font-weight: 600; }
+.signal-rr-reward-lbl { color: var(--green); }
+
+/* ── 52-week range bar ────────────────────────────────────────────────── */
+.signal-52w-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px 6px;
+  border-top: 1px solid var(--border);
+  cursor: help;
+}
+.signal-52w-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  font-family: var(--font-ui);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.signal-52w-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.signal-52w-track {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: visible;
+}
+.signal-52w-fill {
+  position: absolute;
+  inset: 0;
+  background: rgba(88,166,255,0.3);
+  border-radius: 2px 0 0 2px;
+}
+.signal-52w-dot {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 1.5px solid var(--bg-card);
+  z-index: 1;
+}
+.signal-52w-caption {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.signal-52w-pct {
+  color: var(--fg);
+  font-weight: 600;
+}
+.signal-52w-range {
+  opacity: 0.6;
 }
 
 /* Model tag bubble — bottom-right corner of each dashboard signal card */
@@ -2910,4 +3064,14 @@ details.edu-section[open] .edu-chevron {
 }
 .text-blue-link:hover {
   text-decoration: underline;
+}
+
+/* ── BacktestPage ──────────────────────────────────────────────────────────── */
+/* Alias for .chip-row — backtesting ticker multiselect */
+.chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+
+/* Warning state for .usage-stat-card (over-limit) */
+.usage-stat-card-warn {
+  border-color: rgba(248, 113, 113, 0.4) !important;
+  background: rgba(248, 113, 113, 0.08) !important;
 }
