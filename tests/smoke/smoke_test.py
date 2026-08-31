@@ -754,7 +754,7 @@ try:
 
     _start_str = (_dt.date.today() - _dt.timedelta(days=60)).isoformat()
     _end_str = (_dt.date.today() - _dt.timedelta(days=1)).isoformat()
-    _bp = BacktestParams(
+    BacktestParams(
         tickers=["SMOKETEST"],
         start_date=_start_str,
         end_date=_end_str,

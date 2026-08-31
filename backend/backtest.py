@@ -216,7 +216,7 @@ def build_market_data_asof(
                 current_price = float(_price_df["Close"].iloc[-1])
                 break
             except (IndexError, TypeError, KeyError):
-                pass
+                continue  # dataframe unusable; try next one
 
     return {
         "ticker": ticker.upper(),

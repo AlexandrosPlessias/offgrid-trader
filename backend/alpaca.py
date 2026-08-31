@@ -16,6 +16,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import urllib.parse
 from typing import Any
 
 import httpx
@@ -28,9 +29,47 @@ _log = logging.getLogger(__name__)
 _TIMEOUT = 15  # seconds for all Alpaca calls
 _DATA_URL = "https://data.alpaca.markets"  # market data — separate host from trading API
 
+# Allowlist of hostnames the client is permitted to connect to.
+# Prevents SSRF if a malicious value is stored in DB settings.
+_ALLOWED_HOSTS: frozenset[str] = frozenset(
+    {
+        "paper-api.alpaca.markets",
+        "api.alpaca.markets",
+        "data.alpaca.markets",
+    }
+)
+
+_ALLOWED_BASE_URLS: dict[str, str] = {
+    "paper-api.alpaca.markets": "https://paper-api.alpaca.markets",
+    "api.alpaca.markets": "https://api.alpaca.markets",
+    "data.alpaca.markets": "https://data.alpaca.markets",
+}
+
 
 class AlpacaError(Exception):
     """Raised when an Alpaca API call fails."""
+
+
+def _validate_url(url: str) -> str:
+    """Validate *url* and return a URL reconstructed from safe components.
+
+    Enforces HTTPS and restricts the hostname to known Alpaca endpoints so
+    that a compromised DB setting cannot redirect requests to an internal
+    network address (SSRF).  The returned string is built from the validated
+    ``parsed.hostname`` — not from the original input — breaking any taint
+    chain that CodeQL (or similar tools) would otherwise track.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        raise AlpacaError(
+            f"Alpaca base URL must use HTTPS (got scheme {parsed.scheme!r})"
+        )
+    if parsed.hostname not in _ALLOWED_HOSTS:
+        raise AlpacaError(
+            f"Alpaca base URL host {parsed.hostname!r} is not an allowed "
+            f"Alpaca endpoint. Allowed hosts: {sorted(_ALLOWED_HOSTS)}"
+        )
+    return _ALLOWED_BASE_URLS[parsed.hostname]
 
 
 class AlpacaClient:
@@ -52,7 +91,8 @@ class AlpacaClient:
         raw_url = (base_url or get_setting("alpaca_paper_url", "") or cfg.paper_url).rstrip("/")
         # Normalise: strip /v2 suffix so paths like /v2/account are always appended once.
         # Users sometimes paste the full versioned URL (e.g. https://paper-api.alpaca.markets/v2).
-        self._base_url = raw_url[:-3] if raw_url.endswith("/v2") else raw_url
+        normalised = raw_url[:-3] if raw_url.endswith("/v2") else raw_url
+        self._base_url = _validate_url(normalised)
         self._key_id = (
             key_id if key_id is not None else (get_setting("alpaca_key_id", "") or cfg.key_id)
         )
@@ -237,8 +277,8 @@ class AlpacaClient:
 # --------------------------------------------------------------------------- #
 # Module-level singleton — recreated when credentials change
 # --------------------------------------------------------------------------- #
-_client: AlpacaClient | None = None
-_client_key_id: str = ""
+# Stored in a dict so the factory never needs a `global` statement.
+_client_state: dict[str, Any] = {"client": None, "key_id": ""}
 
 
 def get_client() -> AlpacaClient:
@@ -247,9 +287,8 @@ def get_client() -> AlpacaClient:
     Re-instantiates when the DB key_id changes so runtime credential
     updates from the Settings page take effect without a restart.
     """
-    global _client, _client_key_id
     current_key_id = get_setting("alpaca_key_id", "") or get_settings().alpaca.key_id
-    if _client is None or current_key_id != _client_key_id:
-        _client = AlpacaClient()
-        _client_key_id = current_key_id
-    return _client
+    if _client_state["client"] is None or current_key_id != _client_state["key_id"]:
+        _client_state["client"] = AlpacaClient()
+        _client_state["key_id"] = current_key_id
+    return _client_state["client"]

@@ -374,7 +374,7 @@ class Settings:
     slack: SlackConfig = field(default_factory=SlackConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     otel: OtelConfig = field(default_factory=OtelConfig)
-    alpaca: AlpacaConfig = field(default_factory=lambda: AlpacaConfig())
+    alpaca: AlpacaConfig = field(default_factory=AlpacaConfig)
 
 
 # Singleton-style accessor -------------------------------------------------- #

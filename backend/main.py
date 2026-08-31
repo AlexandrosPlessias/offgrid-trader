@@ -1649,7 +1649,10 @@ async def backtest_compare(
     # compare instructions, not the default signal-scan prompt).
     errs = _validate_llm_json(result, "backtest_comparison.schema.json")
     if errs:
-        _log.warning("backtest_compare v2 schema errors: %s", errs)
+        _log.warning(
+            "backtest_compare v2 schema errors: %s",
+            str(errs).replace("\r", "").replace("\n", ""),
+        )
         try:
             repaired = _repair_llm_json(raw, errs, call_llm, system_prompt)
             result = json.loads(repaired)
@@ -1750,11 +1753,7 @@ async def backtest_experiment_advisor(run_id: int) -> dict[str, Any]:
     except LLMError as exc:
         raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
     except Exception as exc:
-        _log.exception(
-            "backtest_experiment_advisor error for run %d: %s",
-            run_id,
-            _log_safe(str(exc)),
-        )
+        _log.error("backtest_experiment_advisor error for run %d", run_id)
         raise HTTPException(status_code=503, detail=f"Experiment Advisor failed: {exc}") from exc
 
     cleaned = raw.strip()
@@ -1772,7 +1771,11 @@ async def backtest_experiment_advisor(run_id: int) -> dict[str, Any]:
     # experiment-selector instructions, not the default signal-scan prompt).
     errs = _validate_llm_json(result, "experiment_selection.schema.json")
     if errs:
-        _log.warning("experiment_advisor v2 schema errors run=%d: %s", run_id, errs)
+        _log.warning(
+            "experiment_advisor v2 schema errors run=%d: %s",
+            run_id,
+            str(errs).replace("\r", "").replace("\n", ""),
+        )
         try:
             repaired = _repair_llm_json(raw, errs, call_llm, system_prompt)
             result = json.loads(repaired)
@@ -1791,10 +1794,12 @@ async def backtest_experiment_advisor(run_id: int) -> dict[str, Any]:
         selected_candidate = dict(low_risk[0] if low_risk else candidates[0])
         selected_candidate["_auto_selected"] = True
         _log.info(
-            "experiment_advisor run=%d: LLM returned null/unknown id %r; " "auto-selected %s",
+            "experiment_advisor run=%d: LLM returned unknown id %s; auto-selected %s",
             run_id,
-            sel_id,
-            selected_candidate["candidate_id"],
+            str(sel_id).replace("\r", "").replace("\n", ""),
+            str(selected_candidate["candidate_id"])
+            .replace("\r", "")
+            .replace("\n", ""),
         )
 
     result["selected_candidate"] = selected_candidate
@@ -1930,7 +1935,7 @@ async def backtest_review(run_id: int) -> dict[str, Any]:
     except LLMError as exc:
         raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
     except Exception as exc:
-        _log.exception("backtest_review error for run %d: %s", run_id, _log_safe(str(exc)))
+        _log.error("backtest_review error for run %d", run_id)
         raise HTTPException(status_code=503, detail=f"Review failed: {exc}") from exc
 
     cleaned = raw.strip()
@@ -1957,7 +1962,11 @@ async def backtest_review(run_id: int) -> dict[str, Any]:
     # review instructions, not the default signal-scan prompt).
     errs = _validate_llm_json(result, "backtest_review.schema.json")
     if errs:
-        _log.warning("backtest_review v2 schema errors run=%d: %s", run_id, errs)
+        _log.warning(
+            "backtest_review v2 schema errors run=%d: %s",
+            run_id,
+            str(errs).replace("\r", "").replace("\n", ""),
+        )
         try:
             repaired = _repair_llm_json(raw, errs, call_llm, system_prompt)
             result = json.loads(repaired)
