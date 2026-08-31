@@ -35,9 +35,17 @@ class AIAnalysisSkill(Skill):
             OllamaError,
             analyze,
         )
+        from backend.database import get_setting
 
         if ctx.market_data is None:
             return SkillResult(success=False, error="market_data not available")
+
+        # Global kill-switch: if signal_scan_llm_enabled is explicitly "false"
+        # skip the LLM call and let the pipeline continue in rules-only mode.
+        if get_setting("signal_scan_llm_enabled", "true") == "false":
+            _log.info("ai_analysis skipped for %s — signal_scan_llm_enabled=false", ctx.ticker)
+            ctx.analysis = {"llm_disabled": True, "signal_scan_llm_enabled": False}
+            return SkillResult(success=True, data=ctx.analysis)
 
         _log.info("ai_analysis ▶ %s", ctx.ticker)
         try:

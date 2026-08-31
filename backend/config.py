@@ -274,6 +274,23 @@ class OtelConfig:
 
 
 @dataclass(frozen=True)
+class AlpacaConfig:
+    """Alpaca paper-trading broker settings.
+
+    Env-var values serve as boot-time defaults; the Settings page can store
+    overrides in the DB (keys: alpaca_paper_url, alpaca_key_id,
+    alpaca_secret_key) which take precedence at call time via
+    ``backend.database.get_setting``.
+    """
+
+    paper_url: str = field(
+        default_factory=lambda: _env_str("ALPACA_PAPER_URL", "https://paper-api.alpaca.markets")
+    )
+    key_id: str = field(default_factory=lambda: _env_str("ALPACA_API_KEY_ID", ""))
+    secret_key: str = field(default_factory=lambda: _env_str("ALPACA_API_SECRET_KEY", ""))
+
+
+@dataclass(frozen=True)
 class Settings:
     """Top-level settings aggregate."""
 
@@ -331,6 +348,24 @@ class Settings:
     # Rate limit: 120 req/min on the free tier — more than sufficient.
     fred_api_key: str = field(default_factory=lambda: _env_str("FRED_API_KEY", ""))
 
+    # Parallelism — applies to both live signal scanning and backtesting.
+    # concurrent_tickers: max tickers processed simultaneously (orchestrator
+    #   semaphore for signals; ThreadPoolExecutor max_workers for backtest).
+    # concurrent_llm: max simultaneous LLM calls inside a backtest run
+    #   (signals already cap at concurrent_tickers since each ticker = 1 LLM call).
+    # Set via env vars; overridable from the Settings → Performance panel.
+    concurrent_tickers: int = field(default_factory=lambda: _env_int("CONCURRENT_TICKERS", 4))
+    concurrent_llm: int = field(default_factory=lambda: _env_int("CONCURRENT_LLM", 2))
+
+    # Legacy aliases kept for backwards compat with any existing env vars.
+    @property
+    def backtest_concurrent_tickers(self) -> int:
+        return self.concurrent_tickers
+
+    @property
+    def backtest_concurrent_llm(self) -> int:
+        return self.concurrent_llm
+
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     market_hours: MarketHours = field(default_factory=MarketHours)
@@ -339,6 +374,7 @@ class Settings:
     slack: SlackConfig = field(default_factory=SlackConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     otel: OtelConfig = field(default_factory=OtelConfig)
+    alpaca: AlpacaConfig = field(default_factory=lambda: AlpacaConfig())
 
 
 # Singleton-style accessor -------------------------------------------------- #

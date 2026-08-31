@@ -29,10 +29,14 @@ class OpportunityDetectSkill(Skill):
 
         _log.info("opportunity_detect ▶ %s", ctx.ticker)
         try:
-            opportunities = detect_opportunities(ctx.market_data, ctx.analysis)
+            diag: dict = {}
+            opportunities = detect_opportunities(
+                ctx.market_data, ctx.analysis, out_diagnostics=diag
+            )
             actionable = filter_by_confidence(opportunities)
             ctx.opportunities = opportunities
             ctx.actionable = actionable
+            ctx.rules_checked = diag.get("rules_checked")
             _log.info(
                 "opportunity_detect ◀ %s — %d opportunities, %d actionable",
                 ctx.ticker,

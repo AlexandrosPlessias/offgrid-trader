@@ -59,7 +59,19 @@ class Orchestrator:
 
     def __init__(self, *, memory: MemoryLayer, max_concurrent: int = 3) -> None:
         self._memory = memory
+        self._max_concurrent = max_concurrent
         self._sem = asyncio.Semaphore(max_concurrent)
+
+    def set_max_concurrent(self, n: int) -> None:
+        """Update the concurrency cap (takes effect on the next scan cycle).
+
+        Safe to call between scans from the scheduler. Do not call while a
+        ``scan_watchlist`` is in progress — the running semaphore is unchanged.
+        """
+        if n != self._max_concurrent:
+            self._max_concurrent = n
+            self._sem = asyncio.Semaphore(n)
+            _log.debug("orchestrator: max_concurrent updated to %d", n)
 
     # ------------------------------------------------------------------
     # Public
