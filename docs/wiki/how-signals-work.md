@@ -259,3 +259,5 @@ All thresholds can be adjusted in `.env` (restart required) or viewed in `GET /h
 - [Architecture](architecture.md) — how the pipeline fits together end-to-end
 - [Glossary](glossary.md) — trading term definitions
 - [API Reference](api.md) — `GET /signals` and `GET /analysis/{ticker}` response schemas
+- [Backtesting — Concepts](backtesting-explained.md) — replay these exact signals against history to measure their edge
+- [Backtesting — Reference](backtesting.md) — parameters, runs comparator, `/backtest*` API

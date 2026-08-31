@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "experiment_selection_v2.schema.json",
+  "title": "ExperimentSelectionV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "diagnosis",
+    "selected_candidate_id",
+    "selection_confidence",
+    "why",
+    "expected_effect",
+    "falsification_criteria",
+    "keep_constant",
+    "next_step"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "experiment_selection.v2"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "insufficient_data",
+        "invalid_input"
+      ]
+    },
+    "diagnosis": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 600
+    },
+    "selected_candidate_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selection_confidence": {
+      "type": "string",
+      "enum": [
+        "none",
+        "low",
+        "moderate",
+        "high"
+      ]
+    },
+    "why": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 700
+    },
+    "expected_effect": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 400
+    },
+    "falsification_criteria": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "maxLength": 300
+      }
+    },
+    "keep_constant": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "string",
+        "maxLength": 100
+      }
+    },
+    "next_step": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 400
+    }
+  }
+}

@@ -37,6 +37,7 @@ from backend.skills.ai_analysis import AIAnalysisSkill
 from backend.skills.alert import AlertSkill
 from backend.skills.fetch_data import FetchDataSkill
 from backend.skills.opportunity_detect import OpportunityDetectSkill
+from backend.skills.paper_trade import PaperTradeSkill
 from backend.skills.persist import PersistSkill
 
 _log = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ DEFAULT_SKILL_CLASSES: list[type[Skill]] = [
     AIAnalysisSkill,
     OpportunityDetectSkill,
     PersistSkill,
+    PaperTradeSkill,  # after persist (needs saved_signal_ids), before alerts
     AlertSkill,
 ]
 
@@ -110,6 +112,7 @@ class AgentResult:
             "market_data": ctx.market_data,
             "opportunities": ctx.opportunities or [],
             "actionable": ctx.actionable or [],
+            "rules_checked": ctx.rules_checked,  # always present, even when no opps fire
             "saved_signal_ids": ctx.saved_signal_ids,
             "alerts": ctx.alerts_sent,
             "errors": ctx.errors,

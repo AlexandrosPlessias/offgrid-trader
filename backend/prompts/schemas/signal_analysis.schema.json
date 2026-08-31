@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "signal_analysis_v2.schema.json",
+  "title": "SignalAnalysisV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "request_id",
+    "ticker",
+    "as_of",
+    "status",
+    "decision",
+    "confidence_band",
+    "confidence_raw",
+    "reason_code",
+    "selected_plan_id",
+    "data_quality",
+    "evidence",
+    "risks",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "signal.v2"
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ticker": {
+      "type": "string",
+      "minLength": 1
+    },
+    "as_of": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "insufficient_data",
+        "invalid_input"
+      ]
+    },
+    "decision": {
+      "type": "string",
+      "enum": [
+        "long",
+        "short",
+        "none"
+      ]
+    },
+    "confidence_band": {
+      "type": "string",
+      "enum": [
+        "very_low",
+        "low",
+        "moderate",
+        "high",
+        "very_high"
+      ]
+    },
+    "confidence_raw": {
+      "type": "integer",
+      "enum": [
+        20,
+        25,
+        30,
+        35,
+        40,
+        45,
+        50,
+        55,
+        60,
+        65,
+        70,
+        75,
+        80,
+        85,
+        90
+      ]
+    },
+    "reason_code": {
+      "type": "string",
+      "enum": [
+        "aligned_setup",
+        "conflicting_timeframes",
+        "insufficient_data",
+        "invalid_input",
+        "no_valid_risk_plan",
+        "event_risk",
+        "weak_edge",
+        "other"
+      ]
+    },
+    "selected_plan_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "data_quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "grade",
+        "missing_paths",
+        "stale_paths",
+        "warnings"
+      ],
+      "properties": {
+        "grade": {
+          "type": "string",
+          "enum": [
+            "poor",
+            "limited",
+            "adequate",
+            "good"
+          ]
+        },
+        "missing_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20
+        },
+        "stale_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "direction",
+          "strength",
+          "observation",
+          "source_paths"
+        ],
+        "properties": {
+          "direction": {
+            "type": "string",
+            "enum": [
+              "bullish",
+              "bearish",
+              "neutral"
+            ]
+          },
+          "strength": {
+            "type": "string",
+            "enum": [
+              "weak",
+              "moderate",
+              "strong"
+            ]
+          },
+          "observation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "source_paths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "risks": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "observation",
+          "source_paths"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "observation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "source_paths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 400
+    }
+  }
+}

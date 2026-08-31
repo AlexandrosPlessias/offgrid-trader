@@ -88,36 +88,70 @@ def _safe_float(value: Any) -> float | None:
 
 
 # --------------------------------------------------------------------------- #
-# DB-backed cache helpers (JSON blobs in app_settings KV table)
 # --------------------------------------------------------------------------- #
-def _cached_json(key: str) -> dict[str, Any] | None:
-    """Return the stored JSON blob for *key*, or None if not found.
+# Unified data-cache helpers (data_cache table, TTL-aware)
+# --------------------------------------------------------------------------- #
+def _cache_get(key: str, ttl_minutes: int | None = None) -> Any | None:
+    """Retrieve a cached value by *key*.
 
-    Swallows all errors — a DB read failure must never block analysis.
+    If *ttl_minutes* is given and the entry is older than that, returns None
+    (stale).  Pass ``ttl_minutes=None`` for entries that never expire (e.g.
+    historical OHLCV whose end date is in the past).
+
+    Swallows all errors — a cache miss must never block analysis.
     """
     try:
-        from .database import get_setting
+        from .database import get_cached_data
 
-        raw = get_setting(key, "")
+        raw = get_cached_data(key)
         if not raw:
             return None
-        return json.loads(raw)
+        envelope = json.loads(raw)
+        if ttl_minutes is not None:
+            cached_at_str = envelope.get("_cached_at", "")
+            if cached_at_str:
+                cached_at = datetime.fromisoformat(cached_at_str)
+                age_minutes = (datetime.utcnow() - cached_at).total_seconds() / 60
+                if age_minutes > ttl_minutes:
+                    _log.debug(
+                        "cache stale (%.0f min > %d min) key=%s",
+                        age_minutes,
+                        ttl_minutes,
+                        key,
+                    )
+                    return None
+        return envelope.get("_data")
     except Exception as exc:
         _log.debug("cache read failed key=%s: %s", key, exc)
         return None
 
 
-def _store_json(key: str, obj: Any) -> None:
-    """Persist *obj* as JSON under *key* in app_settings.
+def _cache_set(key: str, data: Any) -> None:
+    """Persist *data* under *key* in the data_cache table.
 
-    Swallows all errors — a DB write failure must never block analysis.
+    Swallows all errors — a cache write failure must never block analysis.
     """
     try:
-        from .database import set_setting
+        from .database import set_cached_data
 
-        set_setting(key, json.dumps(obj, default=str))
+        envelope = {"_cached_at": datetime.utcnow().isoformat(), "_data": data}
+        set_cached_data(key, json.dumps(envelope, default=str))
+        _log.debug("cache set key=%s", key)
     except Exception as exc:
         _log.warning("cache write failed key=%s: %s", key, exc)
+
+
+# Legacy shims — still used by fetch_fred_macro / fetch_balance_sheet until
+# those functions are migrated; route through the new helpers so everything
+# lands in the same data_cache table.
+def _cached_json(key: str) -> dict[str, Any] | None:
+    """Backward-compat shim: read from data_cache (no TTL applied here)."""
+    return _cache_get(key, ttl_minutes=None)
+
+
+def _store_json(key: str, obj: Any) -> None:
+    """Backward-compat shim: write to data_cache."""
+    _cache_set(key, obj)
 
 
 # --------------------------------------------------------------------------- #
@@ -126,9 +160,18 @@ def _store_json(key: str, obj: Any) -> None:
 def fetch_yfinance(ticker: str) -> dict[str, Any]:
     """Fetch price/volume/fundamentals for *ticker* from yfinance.
 
+    Results are cached permanently keyed by date (``price:{TICKER}:{YYYY-MM-DD}``).
+    Within a single trading day the cached snapshot is returned directly, preserving
+    the exact market state seen at scan time for later backtesting replay.
+
     Returns a dict with ``price``, ``fundamentals`` and an ``exchange_hint``
     for display. Raises nothing: failures are surfaced via the ``error`` key.
     """
+    _cache_key = f"price:{ticker}:{date.today().isoformat()}"
+    cached = _cache_get(_cache_key, ttl_minutes=None)  # permanent per day
+    if cached is not None:
+        _log.info("yfinance ◀ %s (cache hit)", ticker)
+        return cached
 
     import yfinance as yf
 
@@ -249,29 +292,41 @@ def fetch_yfinance(ticker: str) -> dict[str, Any]:
         span.set_attribute("market_cap", str(fund.get("market_cap", "")))
         span.set_attribute("pe_trailing", str(fund.get("trailing_pe", "")))
         span.set_attribute("pe_forward", str(fund.get("forward_pe", "")))
+        _cache_set(_cache_key, result)
         return result
 
 
 # --------------------------------------------------------------------------- #
 # yfinance + ta — technical indicators
 # --------------------------------------------------------------------------- #
+def _normalize_ohlcv(df):
+    """Flatten MultiIndex columns and ensure a DatetimeIndex.
+
+    Returns the same DataFrame (mutated) on success, or an empty DataFrame
+    when *df* is None / empty.
+    """
+    import pandas as pd
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+    return df
+
+
 def _fetch_ohlcv(ticker: str, period: str, interval: str):
     """Download OHLCV via yfinance; returns empty DataFrame on any failure."""
-    import pandas as pd
     import yfinance as yf
 
     try:
         df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
-        if df is None or df.empty:
-            return pd.DataFrame()
-        # yfinance may return MultiIndex columns — flatten to simple names.
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(df.index)
-        return df
+        return _normalize_ohlcv(df)
     except Exception as exc:
         _log.warning("ohlcv ✗ %s %s/%s: %s", ticker, period, interval, exc)
+        import pandas as pd
+
         return pd.DataFrame()
 
 
@@ -389,6 +444,11 @@ def _indicators_from_df(df) -> dict[str, Any]:
 def compute_indicators(ticker: str) -> dict[str, Any]:
     """Compute multi-timeframe technicals using yfinance OHLCV + ta library.
 
+    Results are cached permanently keyed by date (``indicators:{TICKER}:{YYYY-MM-DD}``).
+    The indicator snapshot from each trading day is preserved as-is — the same
+    RSI/MACD values that were seen at scan time are replayed for any future
+    backtesting analysis that references that date.
+
     Drop-in replacement for the removed fetch_tradingview(). Returns the same
     shape: ``{"technicals": {"1H": {...}, "4H": {...}, "1D": {...}},
     "exchange": None, "errors": [...]}``.
@@ -399,6 +459,12 @@ def compute_indicators(ticker: str) -> dict[str, Any]:
       ~1 638 1H bars → ~410 4H bars after resampling. Both fully cover EMA200.
     * 1D — ``period="2y", interval="1d"`` → ~504 bars (covers EMA200 on 1D).
     """
+    _cache_key = f"indicators:{ticker}:{date.today().isoformat()}"
+    cached = _cache_get(_cache_key, ttl_minutes=None)  # permanent per day
+    if cached is not None:
+        _log.info("indicators ◀ %s (cache hit)", ticker)
+        return cached
+
     errors: list[str] = []
     technicals: dict[str, Any] = {}
 
@@ -487,7 +553,102 @@ def compute_indicators(ticker: str) -> dict[str, Any]:
 
         _log.info("indicators done %s errors=%d", ticker, len(errors))
         span.set_attribute("error_count", len(errors))
-        return {"technicals": technicals, "exchange": None, "errors": errors}
+        result = {"technicals": technicals, "exchange": None, "errors": errors}
+        _cache_set(_cache_key, result)
+        return result
+
+
+# --------------------------------------------------------------------------- #
+# Backtesting helpers — date-range OHLCV download + ATR
+# --------------------------------------------------------------------------- #
+def fetch_ohlcv_range(ticker: str, start: str, end: str, interval: str = "1d"):
+    """Download OHLCV for an explicit date range via yfinance.
+
+    Results are cached in the data_cache table:
+    All windows are cached permanently — keyed by ``ohlcv:{TICKER}:{start}:{end}:{interval}``.
+    OHLCV bars for completed sessions never change, so the same window requested on
+    a future date returns the stored data instantly without a network call.
+
+    *start* and *end* are ISO-8601 date strings (``YYYY-MM-DD``).  Returns an
+    empty DataFrame on any failure.
+
+    Note: yfinance 1H data covers only the last ~730 calendar days.  Callers
+    that need 1H/4H indicators should add ~40 days of lead-in before *start*;
+    for 1D EMA200 add ~300 days of lead-in.
+    """
+    import pandas as pd
+    import yfinance as yf
+
+    _cache_key = f"ohlcv:{ticker}:{start}:{end}:{interval}"
+    cached_records = _cache_get(_cache_key, ttl_minutes=None)  # permanent
+    if cached_records is not None:
+        _log.info(
+            "ohlcv_range ◀ %s %s-%s/%s (cache hit)",
+            ticker,
+            start,
+            end,
+            interval,
+        )
+        try:
+            df = pd.DataFrame(cached_records)
+            if not df.empty:
+                df.index = pd.to_datetime(df["_date"])
+                df.index.name = "Date"
+                df = df.drop(columns=["_date"], errors="ignore")
+            return df
+        except Exception as exc:
+            _log.debug("ohlcv cache deserialise failed key=%s: %s", _cache_key, exc)
+
+    try:
+        df = yf.download(
+            ticker,
+            start=start,
+            end=end,
+            interval=interval,
+            auto_adjust=True,
+            progress=False,
+        )
+        df = _normalize_ohlcv(df)
+        if not df.empty:
+            # Serialise: store dates in a dedicated column (index → _date).
+            records = df.copy().reset_index()
+            records.rename(
+                columns={"index": "_date", "Datetime": "_date", "Date": "_date"},
+                errors="ignore",
+                inplace=True,
+            )
+            records["_date"] = records["_date"].astype(str)
+            _cache_set(_cache_key, records.to_dict(orient="records"))
+            _log.info(
+                "ohlcv_range ◀ %s %s-%s/%s bars=%d (fetched, cached permanently)",
+                ticker,
+                start,
+                end,
+                interval,
+                len(df),
+            )
+        return df
+    except Exception as exc:
+        _log.warning("ohlcv_range ✗ %s %s-%s/%s: %s", ticker, start, end, interval, exc)
+        return pd.DataFrame()
+
+
+def atr(df, window: int = 14) -> float | None:
+    """Return the last Average True Range value from an OHLCV DataFrame.
+
+    Uses ``ta.volatility.AverageTrueRange``.  Returns *None* when the
+    DataFrame is too short or the indicator cannot be computed.
+    """
+    try:
+        if df is None or len(df) < window + 1:
+            return None
+        from ta.volatility import AverageTrueRange
+
+        ind = AverageTrueRange(df["High"], df["Low"], df["Close"], window=window)
+        return _safe_last(ind.average_true_range())
+    except Exception as exc:
+        _log.debug("atr ✗: %s", exc)
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -611,7 +772,7 @@ def _cape_from_multpl() -> dict[str, Any] | None:
         return None
 
 
-def fetch_fred_macro() -> dict[str, Any]:  # noqa: C901
+def fetch_fred_macro() -> dict[str, Any]:
     """Fetch US macro indicators from FRED (key-free CSV) + Shiller CAPE.
 
     Global 6h DB cache shared across all tickers in a scan.  A FRED/scrape
@@ -816,18 +977,28 @@ def fetch_balance_sheet(ticker: str) -> dict[str, Any]:
 def fetch_finnhub_news(ticker: str, api_key: str, n: int = 5) -> list[dict[str, Any]]:
     """Return up to *n* recent news articles via the Finnhub API.
 
+    Results are cached permanently keyed by date (``news:{TICKER}:{YYYY-MM-DD}``),
+    preserving the exact headlines visible on each trading day for backtesting
+    replay. Finnhub free-tier rate limits are also naturally avoided.
+
     Each article dict has: ``headline``, ``source``, ``url``, ``datetime``
     (Unix epoch int — JSON-safe).  Returns an empty list when no API key is
     configured or on any error.
     """
+    if not api_key:
+        return []
+
+    _cache_key = f"news:{ticker}:{date.today().isoformat()}"
+    cached = _cache_get(_cache_key, ttl_minutes=None)  # permanent per day
+    if cached is not None:
+        _log.info("news ◀ %s (cache hit, %d articles)", ticker, len(cached))
+        return cached
+
     with _tracer.start_as_current_span("data.fetch_news") as span:
         span.set_attribute("ticker", ticker)
         span.set_attribute("data_source", "finnhub")
         span.set_attribute("api_key_set", bool(api_key))
 
-        if not api_key:
-            span.set_attribute("article_count", 0)
-            return []
         try:
             import finnhub
 
@@ -839,6 +1010,7 @@ def fetch_finnhub_news(ticker: str, api_key: str, n: int = 5) -> list[dict[str, 
                 {
                     "headline": a.get("headline"),
                     "source": a.get("source"),
+                    "channel": "Finnhub",
                     "url": a.get("url"),
                     "datetime": a.get("datetime"),  # Unix epoch int
                 }
@@ -846,12 +1018,170 @@ def fetch_finnhub_news(ticker: str, api_key: str, n: int = 5) -> list[dict[str, 
                 if a.get("headline")
             ]
             span.set_attribute("article_count", len(result))
+            _cache_set(_cache_key, result)
             return result
         except Exception as exc:
             _log.warning("finnhub ✗ %s: %s", ticker, exc)
             span.set_attribute("article_count", 0)
             span.set_attribute("error", str(exc))
             return []
+
+
+# Google News RSS template — key-free, always available
+_GNEWS_RSS_URL = (
+    "https://news.google.com/rss/search"
+    "?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
+)
+
+
+def fetch_google_news_rss(ticker: str, n: int = 10) -> list[dict[str, Any]]:
+    """Return up to *n* recent items from Google News RSS (no API key needed).
+
+    Cache key: ``gnews:{TICKER}:{YYYY-MM-DD}`` — permanent per day, same TTL
+    as :func:`fetch_finnhub_news`.  Uses ``requests`` for HTTP so corporate
+    proxy env-vars are respected, then parses via ``feedparser``.
+
+    Each article dict has: ``headline``, ``source``, ``url``, ``datetime``
+    (Unix epoch int or None).  Returns ``[]`` on any error or if feedparser
+    is not installed.
+    """
+    _cache_key = f"gnews:{ticker}:{date.today().isoformat()}"
+    cached = _cache_get(_cache_key, ttl_minutes=None)  # permanent per day
+    if cached is not None:
+        _log.info("gnews ◀ %s (cache hit, %d articles)", ticker, len(cached))
+        return cached
+
+    try:
+        import calendar
+        import feedparser  # type: ignore[import-untyped]
+    except ImportError:
+        _log.warning("gnews: feedparser not installed — Google News RSS disabled")
+        return []
+
+    with _tracer.start_as_current_span("data.fetch_google_news") as span:
+        span.set_attribute("ticker", ticker)
+        span.set_attribute("data_source", "google_news_rss")
+        try:
+            url = _GNEWS_RSS_URL.format(ticker=ticker)
+            r = requests.get(
+                url,
+                timeout=(5, 15),
+                headers={"User-Agent": "Mozilla/5.0 (compatible; MarketSage/1.0)"},
+            )
+            r.raise_for_status()
+            feed = feedparser.parse(r.text)
+
+            result: list[dict[str, Any]] = []
+            for entry in (feed.entries or [])[:n]:
+                headline = (entry.get("title") or "").strip()
+                if not headline:
+                    continue
+                # <source> tag is a dict in feedparser
+                source_meta = entry.get("source") or {}
+                source = source_meta.get("title") if isinstance(source_meta, dict) else "Google News"
+                # published_parsed → Unix epoch via calendar.timegm
+                dt_epoch: int | None = None
+                if entry.get("published_parsed"):
+                    dt_epoch = int(calendar.timegm(entry.published_parsed))
+                result.append({
+                    "headline": headline,
+                    "source": source or "Google News",
+                    "channel": "Google News RSS",
+                    "url": entry.get("link") or "",
+                    "datetime": dt_epoch,
+                })
+
+            span.set_attribute("article_count", len(result))
+            _cache_set(_cache_key, result)
+            _log.info("gnews ◀ %s %d articles", ticker, len(result))
+            return result
+        except Exception as exc:
+            _log.warning("gnews ✗ %s: %s", ticker, exc)
+            span.set_attribute("error", str(exc))
+            return []
+
+
+def _merge_news(
+    primary: list[dict[str, Any]],
+    supplement: list[dict[str, Any]],
+    max_total: int = 10,
+) -> list[dict[str, Any]]:
+    """Merge two news lists; primary takes precedence.  De-dup by headline text."""
+    seen: set[str] = {(item.get("headline") or "").lower().strip() for item in primary}
+    merged = list(primary)
+    for item in supplement:
+        if len(merged) >= max_total:
+            break
+        key = (item.get("headline") or "").lower().strip()
+        if key and key not in seen:
+            seen.add(key)
+            merged.append(item)
+    return merged
+
+
+def score_news_sentiment(news: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compute VADER compound sentiment for each headline; return aggregate.
+
+    Returns a dict with:
+      - ``score``           mean compound (-1.0 to +1.0)
+      - ``label``           "Bullish" | "Bearish" | "Mixed" | "Neutral"
+      - ``article_count``   number of articles scored
+      - ``scored_headlines`` list of {headline, score, label}
+
+    Gracefully returns a Neutral/0.0 result when vaderSentiment is not
+    installed or the news list is empty.
+    """
+    _neutral: dict[str, Any] = {
+        "score": 0.0,
+        "label": "Neutral",
+        "article_count": 0,
+        "scored_headlines": [],
+    }
+    if not news:
+        return _neutral
+
+    try:
+        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer  # type: ignore[import-untyped]
+    except ImportError:
+        _log.warning("score_news_sentiment: vaderSentiment not installed — returning Neutral")
+        return _neutral
+
+    sia = SentimentIntensityAnalyzer()
+    scored: list[dict[str, Any]] = []
+
+    for item in news:
+        text = (item.get("headline") or "").strip()
+        if item.get("summary"):
+            text = f"{text} {item['summary']}"
+        text = text.strip()
+        if not text:
+            continue
+        compound = round(sia.polarity_scores(text)["compound"], 4)
+        item_label = "Bullish" if compound > 0.05 else ("Bearish" if compound < -0.05 else "Neutral")
+        scored.append({"headline": item.get("headline", ""), "score": compound, "label": item_label})
+
+    if not scored:
+        return _neutral
+
+    agg = round(sum(s["score"] for s in scored) / len(scored), 4)
+    bullish_n = sum(1 for s in scored if s["score"] > 0.05)
+    bearish_n = sum(1 for s in scored if s["score"] < -0.05)
+
+    if agg > 0.15:
+        label = "Bullish"
+    elif agg < -0.15:
+        label = "Bearish"
+    elif bullish_n > 0 and bearish_n > 0:
+        label = "Mixed"
+    else:
+        label = "Neutral"
+
+    return {
+        "score": agg,
+        "label": label,
+        "article_count": len(scored),
+        "scored_headlines": scored,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -876,9 +1206,19 @@ def get_market_data(ticker: str) -> dict[str, Any]:
     ind_data = compute_indicators(ticker)
     errors.extend(ind_data.get("errors", []))
 
-    # Optional news headlines (empty list when key not set).
+    # News: Finnhub primary (when key set) + Google News RSS supplement/fallback.
+    # Merged list is de-duplicated by headline text; capped at 10 items total.
     settings = get_settings()
-    news = fetch_finnhub_news(ticker, settings.finnhub_api_key)
+    finnhub_news = fetch_finnhub_news(ticker, settings.finnhub_api_key)
+    google_news = fetch_google_news_rss(ticker)
+    news = _merge_news(finnhub_news, google_news)
+
+    # VADER sentiment scoring — pure-Python, no network call after merge.
+    news_sentiment = score_news_sentiment(news)
+    # Enrich each item with its per-headline VADER score for the Explorer UI.
+    _sent_map = {sh["headline"]: sh["score"] for sh in news_sentiment.get("scored_headlines", [])}
+    for _item in news:
+        _item["sentiment_score"] = _sent_map.get(_item.get("headline", ""))
 
     # Balance sheet — daily-cached per ticker.
     balance_sheet: dict[str, Any] = {}
@@ -912,6 +1252,7 @@ def get_market_data(ticker: str) -> dict[str, Any]:
         "exchange": yf_data.get("exchange_hint"),
         "technicals": ind_data.get("technicals", {tf: None for tf in _TIMEFRAMES}),
         "news": news,
+        "news_sentiment": news_sentiment,
         "balance_sheet": balance_sheet,
         "macro": macro,
         "errors": errors,

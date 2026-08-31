@@ -9,11 +9,18 @@ Captured with headless Chromium via [Playwright](https://playwright.dev).
 
 | File | Content |
 |---|---|
-| `01-dashboard.png` | Dashboard — watchlist with tickers, signal-count badges |
+| `01-dashboard.png` | Dashboard — live watchlist price table (Price · Chg% · VWAP · Vol · H/L) with tickers and signal badges |
 | `02-explorer.png` | Analysis Explorer — empty state |
 | `03-learn.png` | Learn tab — all sections collapsed |
 | `04-learn-expanded.png` | Learn — Pipeline section expanded |
 | `05-settings.png` | Settings — scheduler, alerts, Ollama model selector |
+
+### Paper Trading
+
+| File | Content |
+|---|---|
+| `11-dashboard-paper-orders.png` | Dashboard — Paper Orders collapsible sidebar showing account equity, positions, and recent orders |
+| `12-settings-paper-trading.png` | Settings — Paper Trading section with Alpaca credentials, position size, and Test Connection button |
 
 ### Explorer — section walkthrough (AAPL)
 
@@ -77,7 +84,7 @@ node capture.mjs
 node docs/screenshots/capture.mjs
 ```
 
-All 15 screenshots are written to `docs/screenshots/` next to the script.
+All 22 screenshots are written to `docs/screenshots/` next to the script.
 Existing files are overwritten — safe to re-run any time.
 
 ### What the script does
@@ -87,7 +94,8 @@ Existing files are overwritten — safe to re-run any time.
 3. Navigates to the Explorer, expands the Analysis History panel, opens the first saved analysis
 4. Expands all collapsible Explorer sections
 5. Scrolls to each section in turn and takes a viewport screenshot
-6. Closes the browser and prints `✓ <filename>` for each
+6. Captures paper trading screenshots (Dashboard Paper Orders sidebar, Settings Paper Trading section)
+7. Closes the browser and prints `✓ <filename>` for each
 
 ### Troubleshooting
 

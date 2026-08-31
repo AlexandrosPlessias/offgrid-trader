@@ -1,12 +1,16 @@
 # MarketSage
 
-**Local, zero-cost AI stock monitor.** FastAPI + Ollama (`qwen2.5:14b`) + SQLite.
-Fetches live market data, runs a **local** LLM for technical analysis, detects
-trading opportunities with transparent rules, stores signals, and sends alerts
-via Gmail SMTP and/or Telegram.
+**Local-first AI stock monitor.** FastAPI + SQLite + Recharts.
+Fetches live market data, runs an LLM for technical analysis, detects
+trading opportunities with transparent rules, stores signals, sends alerts
+via Gmail SMTP and/or Telegram, and backtests signals against historical data.
 
-Everything runs on your machine. **No paid or cloud APIs are used** — the AI is
-a local Ollama model.
+Runs **fully locally** with Ollama (`qwen2.5:14b`) — no cloud APIs required.
+Optionally switch to **Groq, Gemini, or Mistral** free-tier cloud inference
+from the Settings page with no restart needed. Includes **paper trading via
+Alpaca** — actionable signals automatically place bracket orders on a virtual
+$100 k account, with live market prices (price, VWAP, volume, day Δ%)
+updated every 30 s during market hours.
 
 ### What MarketSage analyses for each ticker
 
@@ -17,6 +21,13 @@ a local Ollama model.
 - **US macro context** — Fed funds rate, CPI YoY, unemployment, 10y-2y yield curve (FRED key-free CSV; 6h cache); Shiller CAPE / P/E 10 (multpl.com; 24h cache)
 - **Recent news headlines** — last 7 days via Finnhub (optional; requires free `FINNHUB_API_KEY`)
 - **LLM reasoning** — all of the above is assembled into a structured prompt; every call is traced end-to-end in Aspire with input/output token counts and time-to-first-token (TTFT)
+
+### Paper trading (Alpaca)
+
+- **Auto-placement** — every actionable signal automatically places a market bracket order (stop-loss + take-profit) on Alpaca's free paper account
+- **Live watchlist prices** — Dashboard watchlist shows Price, Day Chg%, VWAP, Volume, H/L updated every 30 s during market hours via Alpaca market data API; polling stops when market is closed
+- **Paper Orders panel** — collapsible sidebar shows account equity, day P&L, open positions, and recent orders with cancel support
+- **Market clock** — header chip shows live market status (open/closed); scheduler and price polling are both market-hours gated
 
 > ⚠️ **Not financial advice.** This project is for educational and research
 > purposes only. It does not constitute financial, investment, or trading
@@ -31,9 +42,27 @@ a local Ollama model.
 |---|---|
 | ![Dashboard — watchlist + signals](docs/screenshots/01-dashboard.png) | ![Explorer — ad-hoc analysis](docs/screenshots/02-explorer.png) |
 
-| Learn — in-app wiki | Settings |
+| Learn — in-app wiki | Settings — AI Provider |
 |---|---|
-| ![Learn — collapsible sections](docs/screenshots/03-learn.png) | ![Settings — scheduler, alerts, Ollama](docs/screenshots/05-settings.png) |
+| ![Learn — collapsible sections](docs/screenshots/03-learn.png) | ![Settings — AI Provider](docs/screenshots/08-settings-ai-provider.png) |
+
+### Backtesting
+
+| Backtesting — parameters & run | Results — metrics, sweep, trade list |
+|---|---|
+| ![Backtesting tab](docs/screenshots/06-backtesting.png) | ![Backtesting results](docs/screenshots/07-backtesting-results.png) |
+
+### AI Usage (Settings)
+
+| Token usage by period, charts & cost estimate | Quota limits per provider |
+|---|---|
+| ![AI Usage — charts](docs/screenshots/09-settings-ai-usage.png) | ![AI Usage — quota](docs/screenshots/10-settings-ai-usage-quota.png) |
+
+### Paper Trading
+
+| Dashboard — Paper Orders sidebar + live prices | Settings — Paper Trading |
+|---|---|
+| ![Paper Orders sidebar](docs/screenshots/11-dashboard-paper-orders.png) | ![Paper Trading settings](docs/screenshots/12-settings-paper-trading.png) |
 
 ### Analysis deep-dive (Explorer sections)
 
@@ -59,20 +88,22 @@ backend/
 ├── data.py           # yfinance OHLCV + ta library -> indicators + market dict
 ├── analysis.py       # prompt -> local Ollama /api/chat -> parsed JSON
 ├── opportunities.py  # AI output + rule-based checks -> scored signals
-├── database.py       # SQLite: signals + analysis_log + app_settings + ticker_memory
+├── database.py       # SQLite: signals + analysis_log + app_settings + ticker_memory + paper_orders
 ├── alerts.py         # Gmail SMTP + Slack webhook (confidence-gated)
 ├── memory.py         # per-ticker MemoryLayer — persists prior scan context to DB
-├── skills/           # five pipeline skills (fetch, ai, detect, persist, alert)
+├── alpaca.py         # Alpaca REST API client (paper trading + market data)
+├── skills/           # six pipeline skills (fetch, ai, detect, persist, paper_trade, alert)
 ├── agent.py          # TickerAgent — runs skills with retry + memory
 ├── orchestrator.py   # Orchestrator — prioritised watchlist dispatch, concurrency cap
 ├── scheduler.py      # async, market-hours-aware scan loop (uses Orchestrator)
 └── main.py           # FastAPI app (endpoints + CORS + lifespan + SSE streaming)
 ```
 
-Pipeline per ticker: **TickerAgent → FetchDataSkill → AIAnalysisSkill (retries) → OpportunityDetectSkill → PersistSkill → AlertSkill**.  
+Pipeline per ticker: **TickerAgent → FetchDataSkill → AIAnalysisSkill (retries) → OpportunityDetectSkill → PersistSkill → PaperTradeSkill → AlertSkill**.  
 The **Orchestrator** sorts tickers by scan staleness and caps concurrency at 3.  
 The **MemoryLayer** injects prior-scan context (`PRIOR CONTEXT`) into the AI prompt so RSI streaks and signal history inform each analysis.  
-The **Analysis Explorer** UI page shows this pipeline live via Server-Sent Events, including `retry` and `memory` events.
+The **Analysis Explorer** UI page shows this pipeline live via Server-Sent Events, including `retry` and `memory` events.  
+The **PaperTradeSkill** places Alpaca bracket orders for every actionable signal and the scheduler syncs order status after each scan.
 
 See [docs/wiki/architecture.md](docs/wiki/architecture.md) for a full pipeline diagram and service map.
 
@@ -288,8 +319,11 @@ See [docs/wiki/indicators.md](docs/wiki/indicators.md) for a full indicator refe
 |---|---|
 | [Architecture](docs/wiki/architecture.md) | Pipeline diagram, Docker service map, SSE design, data persistence |
 | [API Reference](docs/wiki/api.md) | All endpoints with request/response shapes and `curl` examples |
+| [Backtesting](docs/wiki/backtesting.md) | Parameters, ATR bracket, LLM mode, runs comparator, API + DB schema |
+| [Backtesting explained](docs/wiki/backtesting-explained.md) | Concepts in plain English: R-multiple, Sharpe, confidence-floor tuning |
+| [Cloud LLM setup](docs/wiki/cloud-llm.md) | Step-by-step free-tier setup for Groq, Gemini, and Mistral |
 | [Indicators](docs/wiki/indicators.md) | RSI, MACD, EMA, BB, Stoch, Volume, Fundamentals, Balance Sheet, Macro |
-| [Settings Reference](docs/wiki/settings.md) | Every `.env` variable, defaults, runtime-mutable column |
+| [Settings Reference](docs/wiki/settings.md) | Every `.env` variable, defaults, runtime-mutable column, AI Usage section |
 | [Glossary](docs/wiki/glossary.md) | Alphabetical trading and macro terminology |
 | [Observability](docs/wiki/observability.md) | OTEL span hierarchy, Aspire usage, log reference |
 | [Development](docs/wiki/development.md) | VS Code setup, `make lint`, test layout, Docker naming, PR/CI notes |

@@ -51,7 +51,109 @@ def _load_prompt(filename: str) -> str:
     return (_PROMPTS_DIR / filename).read_text(encoding="utf-8").strip()
 
 
-_SYSTEM_PROMPT = _load_prompt("system_prompt.md")
+# v2 signal analysis system prompt (replaces system_prompt.md).
+_SYSTEM_PROMPT = _load_prompt("signal_scan_system.md")
+
+
+# --------------------------------------------------------------------------- #
+# JSON Schema validation + one-shot repair
+# --------------------------------------------------------------------------- #
+def _validate_llm_json(parsed: dict[str, Any], schema_name: str) -> list[str]:
+    """Return a list of validation error messages; empty list means valid."""
+    try:
+        import jsonschema
+
+        schema_path = _PROMPTS_DIR / "schemas" / schema_name
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        validator = jsonschema.Draft202012Validator(schema)
+        return [e.message for e in validator.iter_errors(parsed)]
+    except Exception as exc:  # schema file missing, import error, etc.
+        _log.debug("_validate_llm_json skipped (%s): %s", schema_name, exc)
+        return []
+
+
+def _repair_llm_json(
+    raw: str,
+    errors: list[str],
+    call_fn: Any,
+    system_prompt: str | None = None,
+) -> str:
+    """One repair attempt: send the invalid JSON + validator errors back to the LLM.
+
+    Pass ``system_prompt`` so the repair call uses the same task-specific
+    instructions as the original call.  Without it the function falls back to
+    the module-level signal-scan prompt, which causes the LLM to misinterpret
+    backtest-compare or review payloads as signal-scan data.
+    """
+    error_lines = "\n".join(f"- {e}" for e in errors[:10])
+    repair_prompt = (
+        f"The following JSON failed schema validation:\n{raw}\n\n"
+        f"Validation errors:\n{error_lines}\n\n"
+        "Return the corrected JSON object only. Do not change any supported facts."
+    )
+    try:
+        if system_prompt is not None:
+            repaired, *_ = call_fn(repair_prompt, system_prompt)
+        else:
+            repaired, *_ = call_fn(repair_prompt)
+        return repaired
+    except Exception:
+        return raw  # repair failed; caller handles the original raw
+
+
+# --------------------------------------------------------------------------- #
+# Candidate trade plan generation (signal scan v2)
+# --------------------------------------------------------------------------- #
+def _build_candidate_plans(
+    market_data: dict[str, Any],
+    atr_multiple: float = 1.5,
+    reward_risk: float = 2.0,
+) -> list[dict[str, Any]]:
+    """Pre-compute long and short candidate trade plans for the LLM to select.
+
+    Uses the 1D Bollinger Band width as an ATR proxy when a direct ATR value
+    is not available in the market snapshot.
+    """
+    # "price" may be a plain float or a nested dict {"current": float, ...}
+    _price_raw = market_data.get("price")
+    if isinstance(_price_raw, dict):
+        price = float(_price_raw.get("current") or 0)
+    else:
+        price = float(_price_raw or 0)
+    if price <= 0:
+        return []
+
+    technicals = market_data.get("technicals") or {}
+    td_1d = technicals.get("1d") or {}
+    # bb_upper/bb_lower may be plain floats or nested dicts
+    _bbu = td_1d.get("bb_upper")
+    _bbl = td_1d.get("bb_lower")
+    bb_upper = float(_bbu.get("upper") if isinstance(_bbu, dict) else _bbu or 0)
+    bb_lower = float(_bbl.get("lower") if isinstance(_bbl, dict) else _bbl or 0)
+    atr_est = (bb_upper - bb_lower) / 4 if (bb_upper > 0 and bb_lower > 0) else price * 0.02
+    risk = atr_multiple * atr_est
+
+    if risk <= 0:
+        return []
+
+    return [
+        {
+            "plan_id": "long_atr",
+            "side": "long",
+            "entry": round(price, 4),
+            "stop": round(price - risk, 4),
+            "target": round(price + reward_risk * risk, 4),
+            "reward_risk": reward_risk,
+        },
+        {
+            "plan_id": "short_atr",
+            "side": "short",
+            "entry": round(price, 4),
+            "stop": round(price + risk, 4),
+            "target": round(price - reward_risk * risk, 4),
+            "reward_risk": reward_risk,
+        },
+    ]
 
 
 class LLMError(RuntimeError):
@@ -73,9 +175,7 @@ def _fmt(value: Any) -> str:
     return "n/a" if value is None else str(value)
 
 
-def build_prompt(  # noqa: C901
-    market_data: dict[str, Any], memory: dict[str, Any] | None = None
-) -> str:
+def build_prompt(market_data: dict[str, Any], memory: dict[str, Any] | None = None) -> str:
     """Render *market_data* into a compact, readable prompt for the model.
 
     Optional ``news`` key in *market_data* (a list of headline strings from
@@ -205,6 +305,16 @@ def build_prompt(  # noqa: C901
     if news:
         lines.append("")
         lines.append("RECENT NEWS HEADLINES")
+        # Inject aggregate VADER sentiment so the model weighs it in context.
+        sentiment = market_data.get("news_sentiment") or {}
+        if sentiment.get("score") is not None:
+            _score = sentiment["score"]
+            _label = sentiment.get("label", "Neutral")
+            _n_art = sentiment.get("article_count", 0)
+            lines.append(
+                f"  Aggregate sentiment: {_label} "
+                f"(score={_score:+.3f}, n={_n_art} articles)"
+            )
         for item in news:
             # item is a dict with headline/source/url/datetime
             if isinstance(item, dict):
@@ -215,8 +325,25 @@ def build_prompt(  # noqa: C901
                 # Backward compat: plain string
                 lines.append(f"  - {item}")
 
+    # Candidate trade plans (v2): pre-computed by backend; LLM selects one.
+    _atr = float(_get_db_setting("atr_multiple")) if _get_db_setting("atr_multiple") else 1.5
+    _rr = float(_get_db_setting("reward_risk")) if _get_db_setting("reward_risk") else 2.0
+    candidates = _build_candidate_plans(market_data, atr_multiple=_atr, reward_risk=_rr)
+    if candidates:
+        lines.append("")
+        lines.append("CANDIDATE TRADE PLANS (backend-generated; select one plan_id or null)")
+        lines.append(json.dumps(candidates, separators=(",", ":")))
+
+    # Closing instruction — provide request_id hints so the LLM can fill them.
+    _ticker = market_data.get("ticker") or "UNKNOWN"
+    _as_of = market_data.get("timestamp") or ""
     lines.append("")
-    lines.append("Analyse the above and return the JSON object described in the system prompt.")
+    _closing = (
+        "Return one JSON object using the REQUIRED OUTPUT SCHEMA in the system prompt. "
+        f'Use request_id="{_ticker}-{_as_of}", ticker="{_ticker}", as_of="{_as_of}". '
+        "Pick a plan_id from CANDIDATE TRADE PLANS or null."
+    )
+    lines.append(_closing)
     return "\n".join(lines)
 
 
@@ -385,13 +512,18 @@ def call_ollama(
             len(content),
             content,
         )
-        return content, _model, input_tokens, output_tokens  # (raw, model, in_tok, out_tok)
+        return (
+            content,
+            _model,
+            input_tokens,
+            output_tokens,
+        )  # (raw, model, in_tok, out_tok)
 
 
 # --------------------------------------------------------------------------- #
 # Cloud LLM call (Groq or any OpenAI-compatible endpoint)
 # --------------------------------------------------------------------------- #
-def call_cloud_llm(  # noqa: C901
+def call_cloud_llm(
     user_prompt: str,
     system_prompt: str = _SYSTEM_PROMPT,
     *,
@@ -494,15 +626,16 @@ def call_cloud_llm(  # noqa: C901
                 # on Gemini 3.x / other models where reasoning can't be disabled).
                 request["reasoning_effort"] = _db_reasoning_effort
             completion = client.chat.completions.create(**request)
+        except _openai.APITimeoutError as exc:
+            # Must come before APIConnectionError — Timeout is a subclass of Connection.
+            span.set_attribute("error", f"timeout after {_timeout}s")
+            raise LLMError(f"{provider} request timed out after {_timeout}s.") from exc
         except _openai.APIConnectionError as exc:
             span.set_attribute("error", str(exc))
             raise LLMError(
                 f"Cannot reach {provider} API ({base_url}). "
                 "Check your internet connection and the provider's status page."
             ) from exc
-        except _openai.APITimeoutError as exc:
-            span.set_attribute("error", f"timeout after {_timeout}s")
-            raise LLMError(f"{provider} request timed out after {_timeout}s.") from exc
         except _openai.AuthenticationError as exc:
             span.set_attribute("error", "authentication failed")
             raise LLMError(f"{provider} authentication failed — check your API key.") from exc
@@ -558,7 +691,12 @@ def call_cloud_llm(  # noqa: C901
             output_tokens,
             len(content),
         )
-        return content, _model, input_tokens, output_tokens  # (raw, model, in_tok, out_tok)
+        return (
+            content,
+            _model,
+            input_tokens,
+            output_tokens,
+        )  # (raw, model, in_tok, out_tok)
 
 
 # --------------------------------------------------------------------------- #
@@ -570,19 +708,14 @@ def _effective_provider() -> str:
     return db_val or get_settings().llm.provider
 
 
-def call_llm(
+def _call_provider(
+    provider: str,
     user_prompt: str,
-    system_prompt: str = _SYSTEM_PROMPT,
-    *,
-    model: str | None = None,
-    ticker: str | None = None,
+    system_prompt: str,
+    model: str | None,
+    ticker: str | None,
 ) -> tuple[str, str, int, int]:
-    """Route to the configured LLM provider.
-
-    Returns ``(raw_content, model_used, prompt_tokens, completion_tokens)``.
-    Raises :class:`LLMError` on any provider failure.
-    """
-    provider = _effective_provider()
+    """Dispatch a single call to *provider*.  Raises :class:`LLMError` on failure."""
     if provider == "ollama":
         return call_ollama(user_prompt, system_prompt, model=model, ticker=ticker)
     if provider in ("groq", "gemini", "mistral", "custom"):
@@ -590,6 +723,51 @@ def call_llm(
     raise LLMError(
         f"Unknown LLM_PROVIDER={provider!r}. Valid values: ollama, groq, gemini, mistral, custom."
     )
+
+
+def call_llm(
+    user_prompt: str,
+    system_prompt: str = _SYSTEM_PROMPT,
+    *,
+    model: str | None = None,
+    ticker: str | None = None,
+    use_fallback: bool = False,
+) -> tuple[str, str, int, int]:
+    """Route to the configured LLM provider.
+
+    Returns ``(raw_content, model_used, prompt_tokens, completion_tokens)``.
+    Raises :class:`LLMError` on any provider failure.
+
+    When ``use_fallback=True`` the call tries the primary provider first; on
+    any :class:`LLMError` (rate-limit, quota exhausted, network error) it
+    automatically retries with the fallback provider configured via the
+    ``llm_fallback_provider`` / ``llm_fallback_model`` DB keys.  If all
+    providers in the chain fail, the last :class:`LLMError` is re-raised.
+
+    The default (``use_fallback=False``) preserves the existing live behaviour
+    exactly — no DB reads, no changed code paths for normal scans.
+    """
+    primary_provider = _effective_provider()
+
+    if not use_fallback:
+        return _call_provider(primary_provider, user_prompt, system_prompt, model, ticker)
+
+    # Build the fallback chain from DB settings (same keys backlog item 3c specifies).
+    fallback_provider = _get_db_setting("llm_fallback_provider", "")
+    fallback_model = _get_db_setting("llm_fallback_model", "") or None
+
+    chain: list[tuple[str, str | None]] = [(primary_provider, model)]
+    if fallback_provider and fallback_provider != primary_provider:
+        chain.append((fallback_provider, fallback_model))
+
+    last_exc: LLMError = LLMError("No providers configured.")
+    for prov, mdl in chain:
+        try:
+            return _call_provider(prov, user_prompt, system_prompt, mdl, ticker)
+        except LLMError as exc:
+            _log.warning("call_llm: provider %r failed (%s), trying next in chain.", prov, exc)
+            last_exc = exc
+    raise last_exc
 
 
 # --------------------------------------------------------------------------- #
@@ -602,8 +780,16 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
-def parse_ai_response(content: str) -> dict[str, Any]:
-    """Parse and normalise the model's JSON string into our analysis schema."""
+def parse_ai_response(
+    content: str,
+    candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Parse and normalise the model's JSON string into our analysis schema.
+
+    Handles both the v2 ``SignalAnalysisV2`` schema (``decision`` + ``selected_plan_id``)
+    and the legacy v1 schema (``opportunity.type`` + ``opportunity.entry``).
+    When *candidates* is supplied the selected plan is resolved to entry/stop/target.
+    """
 
     text = content.strip()
     # Strip accidental markdown fences if the model added them.
@@ -617,9 +803,61 @@ def parse_ai_response(content: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise TypeError("AI response JSON was not an object.")
 
+    # ── Detect v2 schema (has "decision" key) ────────────────────────────── #
+    if "decision" in data:
+        decision = (data.get("decision") or "none").lower()
+        # v2 uses confidence_raw (int 20-90); fall back to confidence for any older output
+        confidence_raw = data.get("confidence_raw") or data.get("confidence") or 0
+        confidence = float(confidence_raw)
+        plan_id = data.get("selected_plan_id")
+
+        # Resolve the selected plan to concrete levels.
+        plan: dict[str, Any] = {}
+        if plan_id and candidates:
+            plan = next((c for c in candidates if c.get("plan_id") == plan_id), {})
+
+        # evidence[].observation → signals list (backward compat)
+        evidence = data.get("evidence") or []
+        signals = [
+            e.get("observation") or e.get("text") or str(e) for e in evidence if isinstance(e, dict)
+        ] or [str(e) for e in evidence]
+
+        # risks[].observation → risk_factors list  (schema uses "risks", not "risk_items")
+        risks = data.get("risks") or data.get("risk_items") or []
+        risk_factors = [
+            r.get("observation") or r.get("text") or str(r) for r in risks if isinstance(r, dict)
+        ] or [str(r) for r in risks]
+
+        return {
+            # Legacy-compatible fields (Explorer still reads these)
+            "trend": data.get("trend") or "neutral",
+            "momentum": data.get("momentum") or "neutral",
+            "key_levels": data.get("key_levels") or {"support": [], "resistance": []},
+            "signals": signals,
+            "risk_factors": risk_factors,
+            "opportunity": {
+                "type": decision,
+                "confidence": confidence,
+                "entry": _coerce_float(plan.get("entry")),
+                "stop": _coerce_float(plan.get("stop")),
+                "target": _coerce_float(plan.get("target")),
+            },
+            # v2 extra fields passed through as-is
+            "schema_version": data.get("schema_version"),
+            "status": data.get("status"),
+            "confidence_band": data.get("confidence_band"),
+            "confidence_raw": confidence_raw,
+            "reason_code": data.get("reason_code"),
+            "data_quality": data.get("data_quality"),
+            "evidence": evidence,
+            "risks": risks,
+            "selected_plan_id": plan_id,
+            "summary": data.get("summary"),
+        }
+
+    # ── Legacy v1 schema ─────────────────────────────────────────────────── #
     normalised: dict[str, Any] = {key: data.get(key) for key in _EXPECTED_KEYS}
 
-    # Normalise the opportunity sub-object.
     opp = normalised.get("opportunity") or {}
     if not isinstance(opp, dict):
         opp = {}
@@ -631,7 +869,6 @@ def parse_ai_response(content: str) -> dict[str, Any]:
         "target": _coerce_float(opp.get("target")),
     }
 
-    # Ensure list-shaped fields are lists.
     for list_key in ("signals", "risk_factors"):
         if not isinstance(normalised.get(list_key), list):
             normalised[list_key] = (
@@ -647,6 +884,8 @@ def parse_ai_response(content: str) -> dict[str, Any]:
 def analyze(
     market_data: dict[str, Any],
     memory: dict[str, Any] | None = None,
+    *,
+    use_fallback: bool = False,
 ) -> dict[str, Any]:
     """Full pipeline: prompt -> LLM (local or cloud) -> parsed analysis.
 
@@ -657,17 +896,29 @@ def analyze(
     so callers can display which model produced the analysis.
 
     Args:
-        market_data: The full market-data dict from ``get_market_data()``.
-        memory:      Optional per-ticker memory from :class:`~backend.memory.MemoryLayer`;
-                     injected as a ``PRIOR CONTEXT`` section in the prompt.
+        market_data:  The full market-data dict from ``get_market_data()``.
+        memory:       Optional per-ticker memory from :class:`~backend.memory.MemoryLayer`;
+                      injected as a ``PRIOR CONTEXT`` section in the prompt.
+        use_fallback: When ``True``, automatically retries with the configured
+                      fallback provider on any :class:`LLMError`.  Pass
+                      ``True`` inside the backtesting engine to recover from
+                      quota exhaustion mid-run.
     """
 
     ticker = market_data.get("ticker")
     provider = _effective_provider()
+
+    # Pre-compute candidate plans before building the prompt (v2 architecture).
+    _atr_mult = float(_get_db_setting("atr_multiple")) if _get_db_setting("atr_multiple") else 1.5
+    _rr = float(_get_db_setting("reward_risk")) if _get_db_setting("reward_risk") else 2.0
+    candidates = _build_candidate_plans(market_data, atr_multiple=_atr_mult, reward_risk=_rr)
+
     prompt = build_prompt(market_data, memory=memory)
 
     try:
-        raw, model_used, prompt_tokens, completion_tokens = call_llm(prompt, ticker=ticker)
+        raw, model_used, prompt_tokens, completion_tokens = call_llm(
+            prompt, ticker=ticker, use_fallback=use_fallback
+        )
     except LLMError as exc:
         return {
             "ticker": ticker,
@@ -680,8 +931,8 @@ def analyze(
         }
 
     try:
-        parsed = parse_ai_response(raw)
-    except (json.JSONDecodeError, ValueError) as exc:
+        parsed = parse_ai_response(raw, candidates=candidates)
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
         return {
             "ticker": ticker,
             "error": f"Failed to parse AI JSON response: {exc}",
@@ -692,6 +943,25 @@ def analyze(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
         }
+
+    # Schema validation + one-shot repair for v2 responses.
+    # Validate the raw LLM JSON (not the normalized dict, which has extra compat keys).
+    if parsed.get("schema_version"):
+        try:
+            _r = raw.strip()
+            _r = _r.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            raw_parsed = json.loads(_r)
+        except Exception:
+            raw_parsed = None
+        if raw_parsed is not None:
+            errs = _validate_llm_json(raw_parsed, "signal_analysis.schema.json")
+            if errs:
+                _log.warning("signal v2 schema errors for %s: %s", ticker, errs)
+                try:
+                    repaired_raw = _repair_llm_json(raw, errs, call_llm)
+                    parsed = parse_ai_response(repaired_raw, candidates=candidates)
+                except Exception:  # noqa: S110
+                    pass  # use original parsed on repair failure
 
     parsed["ticker"] = ticker
     parsed["llm_provider"] = provider

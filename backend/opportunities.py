@@ -65,11 +65,11 @@ def _new_candidate(
         # Transparent score audit trail — carried through merge and macro filter.
         "score_breakdown": {
             "sources_detail": [{"source": source, "confidence": conf}],
-            "base": conf,        # max of individual source confidences
-            "bonus": 0.0,        # 5 × (sources − 1) corroboration bonus
-            "pre_macro": conf,   # base + bonus before macro adjustment
+            "base": conf,  # max of individual source confidences
+            "bonus": 0.0,  # 5 x (sources - 1) corroboration bonus
+            "pre_macro": conf,  # base + bonus before macro adjustment
             "macro_delta": 0.0,  # net macro regime adjustment (negative = headwind)
-            "final": conf,       # pre_macro + macro_delta (== stored confidence)
+            "final": conf,  # pre_macro + macro_delta (== stored confidence)
         },
     }
 
@@ -240,7 +240,7 @@ def _check_valuation(
                 "short",
                 40.0,
                 "valuation_extreme",
-                f"TTM P/E {pe:.1f}× -- severely overvalued (>60×)",  # noqa: RUF001
+                f"TTM P/E {pe:.1f}x -- severely overvalued (>60x)",
                 price,
                 entry=price,
             )
@@ -252,7 +252,7 @@ def _check_valuation(
                 "long",
                 42.0,
                 "valuation_cheap",
-                f"TTM P/E {pe:.1f}× — deeply discounted (<8×)",  # noqa: RUF001
+                f"TTM P/E {pe:.1f}x -- deeply discounted (<8x)",
                 price,
                 entry=price,
             )
@@ -260,7 +260,7 @@ def _check_valuation(
     return []
 
 
-def _apply_macro_regime_filter(  # noqa: C901
+def _apply_macro_regime_filter(
     merged: list[dict[str, Any]],
     macro: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -284,7 +284,7 @@ def _apply_macro_regime_filter(  # noqa: C901
     cape_val = (macro.get("shiller_cape") or {}).get("value")
     cpi_val = (macro.get("cpi_yoy") or {}).get("value")
 
-    def _adj(opp: dict[str, Any]) -> dict[str, Any]:  # noqa: C901
+    def _adj(opp: dict[str, Any]) -> dict[str, Any]:
         side = opp.get("type", "")
         delta = 0.0
         extra: list[str] = []
@@ -300,14 +300,14 @@ def _apply_macro_regime_filter(  # noqa: C901
             if cape_val > 35:
                 if side == "long":
                     delta -= 5.0
-                    msg = f"⚠ Shiller CAPE {cape_val:.0f}× — market elevated"  # noqa: RUF001
+                    msg = f"⚠ Shiller CAPE {cape_val:.0f}x -- market elevated"
                     extra.append(msg)
                 else:
                     delta += 3.0
             elif cape_val < 15:
                 if side == "long":
                     delta += 5.0
-                    msg = f"✓ CAPE {cape_val:.0f}× — market historically cheap"  # noqa: RUF001
+                    msg = f"✓ CAPE {cape_val:.0f}x -- market historically cheap"
                     extra.append(msg)
                 else:
                     delta -= 3.0
@@ -325,6 +325,64 @@ def _apply_macro_regime_filter(  # noqa: C901
         # Record macro delta in the score breakdown for UI transparency.
         bd = dict(out.get("score_breakdown", {}))
         bd["macro_delta"] = round(delta, 2)
+        bd["final"] = out["confidence"]
+        out["score_breakdown"] = bd
+        return out
+
+    return [_adj(o) for o in merged]
+
+
+def _apply_sentiment_filter(
+    merged: list[dict[str, Any]],
+    news_sentiment: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Adjust confidence by up to ±3 pts based on VADER aggregate sentiment.
+
+    Applied after ``_apply_macro_regime_filter`` (Rule 7).
+    "Mixed" and "Neutral" labels produce no adjustment — they carry no
+    directional information.
+
+    Thresholds:
+      score >  0.35 → long +3,  short −3  (strong bullish)
+      score >  0.15 → long +1,  short −1  (mild bullish)
+      score < −0.35 → long −3,  short +3  (strong bearish)
+      score < −0.15 → long −1,  short +1  (mild bearish)
+    """
+    if not news_sentiment:
+        return merged
+
+    score = news_sentiment.get("score")
+    label = news_sentiment.get("label", "Neutral")
+
+    if score is None or label in ("Neutral", "Mixed"):
+        return merged
+
+    def _adj(opp: dict[str, Any]) -> dict[str, Any]:
+        side = opp.get("type", "")
+        delta = 0.0
+        extra: list[str] = []
+
+        if score > 0.35:
+            delta = 3.0 if side == "long" else -3.0
+            extra.append(f"✓ Strong bullish news sentiment (score={score:+.2f})")
+        elif score > 0.15:
+            delta = 1.0 if side == "long" else -1.0
+            extra.append(f"✓ Mild bullish news sentiment (score={score:+.2f})")
+        elif score < -0.35:
+            delta = -3.0 if side == "long" else 3.0
+            extra.append(f"⚠ Strong bearish news sentiment (score={score:+.2f})")
+        elif score < -0.15:
+            delta = -1.0 if side == "long" else 1.0
+            extra.append(f"⚠ Mild bearish news sentiment (score={score:+.2f})")
+
+        if delta == 0.0:
+            return opp
+
+        out = dict(opp)
+        out["confidence"] = round(max(0.0, min(100.0, out["confidence"] + delta)), 2)
+        out["reasons"] = list(out.get("reasons", [])) + extra
+        bd = dict(out.get("score_breakdown", {}))
+        bd["sentiment_delta"] = round(delta, 2)
         bd["final"] = out["confidence"]
         out["score_breakdown"] = bd
         return out
@@ -395,11 +453,19 @@ def _merge(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def detect_opportunities(
     market_data: dict[str, Any],
     analysis: dict[str, Any] | None = None,
+    *,
+    ai_floor_override: float | None = None,
+    out_diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return scored, de-duplicated, sorted opportunities for one ticker.
 
     ``analysis`` is the dict from :func:`backend.analysis.analyze`. If omitted,
     only rule-based checks run.
+
+    ``ai_floor_override`` replaces ``thresholds.confidence_floor`` for the AI
+    rule only — pass ``0.0`` in the backtesting engine to capture AI signals at
+    all confidence levels so the floor-sweep can re-filter them client-side.
+    The default (``None``) leaves the live behaviour unchanged.
     """
 
     settings = get_settings()
@@ -412,15 +478,22 @@ def detect_opportunities(
     fundamentals = market_data.get("fundamentals", {}) or {}
     macro = market_data.get("macro", {}) or {}
 
+    # Build a copy of thresholds with the floor override applied for the AI check.
+    ai_thresholds = thresholds
+    if ai_floor_override is not None:
+        from dataclasses import replace as _dc_replace
+
+        ai_thresholds = _dc_replace(thresholds, confidence_floor=float(ai_floor_override))
+
     candidates: list[dict[str, Any]] = []
     ai_cands: list[dict[str, Any]] = []
     if analysis and not analysis.get("error"):
-        ai_cands = _check_ai(ticker, analysis, price, thresholds)
+        ai_cands = _check_ai(ticker, analysis, price, ai_thresholds)
         candidates.extend(ai_cands)
-    rsi_cands   = _check_rsi(ticker, technicals, price, thresholds)
-    vol_cands   = _check_volume_spike(ticker, price_data, price, thresholds)
-    macd_cands  = _check_macd_crossover(ticker, technicals, price, thresholds)
-    val_cands   = _check_valuation(ticker, fundamentals, price)
+    rsi_cands = _check_rsi(ticker, technicals, price, thresholds)
+    vol_cands = _check_volume_spike(ticker, price_data, price, thresholds)
+    macd_cands = _check_macd_crossover(ticker, technicals, price, thresholds)
+    val_cands = _check_valuation(ticker, fundamentals, price)
     candidates.extend(rsi_cands)
     candidates.extend(vol_cands)
     candidates.extend(macd_cands)
@@ -428,14 +501,16 @@ def detect_opportunities(
 
     merged = _merge(candidates)
     merged = _apply_macro_regime_filter(merged, macro)  # Rule 6
+    news_sentiment = market_data.get("news_sentiment") or {}
+    merged = _apply_sentiment_filter(merged, news_sentiment)  # Rule 7 — ±3 pts
 
     # Build per-rule diagnostic snapshot (actual values, whether rule fired).
     # Attached to every merged opportunity's score_breakdown for UI transparency.
     rsi_values = {tf: (technicals.get(tf) or {}).get("RSI") for tf in _TIMEFRAMES}
-    vol_ratio  = price_data.get("volume_ratio")
+    vol_ratio = price_data.get("volume_ratio")
     change_pct = price_data.get("change_pct")
-    h_1d       = _macd_hist("1D", technicals)
-    h_4h       = _macd_hist("4H", technicals)
+    h_1d = _macd_hist("1D", technicals)
+    h_4h = _macd_hist("4H", technicals)
     try:
         pe_raw = fundamentals.get("trailing_pe") or fundamentals.get("pe_ratio")
         pe_val = float(pe_raw) if pe_raw is not None else None
@@ -450,14 +525,20 @@ def detect_opportunities(
         "ai": {
             "fired": bool(ai_cands),
             "type": (ai_opp.get("type") or "none").lower() if analysis else None,
-            "confidence": _r(float(ai_opp.get("confidence") or 0), 0) if analysis else None,
+            "confidence": (_r(float(ai_opp.get("confidence") or 0), 0) if analysis else None),
         },
         "rsi_extreme": {
             "fired": bool(rsi_cands),
             "values": {tf: _r(v, 1) for tf, v in rsi_values.items()},
-            "oversold":   [tf for tf, v in rsi_values.items() if v is not None and v <= thresholds.rsi_oversold],
-            "overbought": [tf for tf, v in rsi_values.items() if v is not None and v >= thresholds.rsi_overbought],
-            "threshold_low":  thresholds.rsi_oversold,
+            "oversold": [
+                tf for tf, v in rsi_values.items() if v is not None and v <= thresholds.rsi_oversold
+            ],
+            "overbought": [
+                tf
+                for tf, v in rsi_values.items()
+                if v is not None and v >= thresholds.rsi_overbought
+            ],
+            "threshold_low": thresholds.rsi_oversold,
             "threshold_high": thresholds.rsi_overbought,
         },
         "volume_spike": {
@@ -465,7 +546,7 @@ def detect_opportunities(
             "ratio": _r(vol_ratio, 2),
             "change_pct": _r(change_pct, 2),
             "threshold_ratio": thresholds.volume_spike_multiplier,
-            "threshold_move":  thresholds.significant_move_pct,
+            "threshold_move": thresholds.significant_move_pct,
         },
         "macd_crossover": {
             "fired": bool(macd_cands),
@@ -476,12 +557,56 @@ def detect_opportunities(
             "fired": bool(val_cands),
             "pe": _r(pe_val, 1),
             "threshold_high": 60,
-            "threshold_low":  8,
+            "threshold_low": 8,
+        },
+        "sentiment": {
+            "applied": bool(news_sentiment),
+            "score": news_sentiment.get("score"),
+            "label": news_sentiment.get("label"),
+            "article_count": news_sentiment.get("article_count", 0),
         },
     }
 
     for opp in merged:
         opp["score_breakdown"]["rules_checked"] = rules_checked
+
+    # Always surface diagnostics to callers that want them (e.g. for the
+    # empty-state display in section 6 when no opportunities fire).
+    if out_diagnostics is not None:
+        out_diagnostics["rules_checked"] = rules_checked
+
+    # Synthesize ATR bracket for rule-based signals that have no stop/target.
+    # Uses the same (bb_upper - bb_lower) / 4 proxy as the backtesting engine.
+    # Default multiples: 1.5x ATR risk, 2.0 R:R target (matches BacktestParams defaults).
+    _bb1d = technicals.get("1D") or {}
+    _bb_upper = _bb1d.get("bb_upper")
+    _bb_lower = _bb1d.get("bb_lower")
+    _atr_est = (
+        (_bb_upper - _bb_lower) / 4
+        if (_bb_upper and _bb_lower and _bb_upper > _bb_lower)
+        else (price * 0.015 if price else None)  # 1.5 % fallback when BB unavailable
+    )
+    _ATR_MULT = 1.5
+    _RR = 2.0
+    if _atr_est and price:
+        for opp in merged:
+            if opp.get("entry") and opp.get("stop") is None:
+                entry = opp["entry"]
+                risk = _ATR_MULT * _atr_est
+                if opp.get("type") == "long":
+                    opp["stop"] = round(entry - risk, 4)
+                    opp["target"] = round(entry + _RR * risk, 4)
+                elif opp.get("type") == "short":
+                    opp["stop"] = round(entry + risk, 4)
+                    opp["target"] = round(entry - _RR * risk, 4)
+
+    # Attach 52-week range snapshot so callers (and the signals table) can store
+    # the annual price context captured at signal-detection time.
+    w52_high = price_data.get("week52_high")
+    w52_low = price_data.get("week52_low")
+    for opp in merged:
+        opp.setdefault("week52_high", w52_high)
+        opp.setdefault("week52_low", w52_low)
 
     # Finalise the joined ``source`` string for storage.
     for opp in merged:

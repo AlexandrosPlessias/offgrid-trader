@@ -129,67 +129,6 @@ When using a cloud provider, ticker data and market snapshots leave your machine
 
 ---
 
-## 3c. Multi-model fallback
-
-When the active LLM provider fails (network error, rate limit, quota exhaustion) automatically retry the same request with a second configured provider/model, instead of surfacing the error to the user.
-
-### Why this matters
-
-Cloud free tiers are generous but not unlimited — Groq has a 6 000 req/day cap, Gemini Flash 250 req/day, Mistral varies by model. A sequential watchlist scan across multiple tickers can exhaust one provider's quota within a session. Without fallback, the user sees an error and must manually switch providers in Settings.
-
-### Design
-
-| Priority | Provider / Model | Configured via |
-|---|---|---|
-| 1st | Primary (from Settings page) | existing `llm_provider` / `llm_model` DB keys |
-| 2nd | Fallback provider | new `llm_fallback_provider` / `llm_fallback_model` DB keys |
-| 3rd | (optional) Second fallback | new `llm_fallback2_*` DB keys |
-
-Fallback fires on any `LLMError` (connection refused, HTTP 429, HTTP 5xx, timeout). If all configured providers fail, the original error is re-raised to the user as today.
-
-### Implementation scope
-
-1. **`backend/analysis.py`** — wrap `call_llm()` in a retry loop that iterates through the fallback chain; log each attempt with provider name and error reason
-2. **`backend/config.py`** / **`backend/main.py`** — new `llm_fallback_provider` / `llm_fallback_model` setting keys; expose in `GET /settings` and `POST /settings/llm`
-3. **Settings page** — add a second "Fallback provider" row beneath the primary; same fields (provider dropdown, API key, model); shown only when primary is a cloud provider
-4. **SSE stream** — emit a `type:"fallback"` event when a retry fires so the Explorer pipeline shows which provider actually ran
-
-### Dependencies
-
-- Item 3a (cloud LLM) must be complete — this only makes sense with multiple providers configured.
-
----
-
-## 3d. App hosting — Vercel (frontend) + Fly.io (backend)
-
-Host the full stack publicly for free — no local machine needed once a cloud LLM is configured (item 3a above).
-
-| Layer | Platform | Free tier | Notes |
-|---|---|---|---|
-| **Frontend** | [Vercel](https://vercel.com) | Unlimited hobby projects | Vite SPA — `vite build` + `vercel --prod`, zero config |
-| **Backend + DB** | [Fly.io](https://fly.io) | 3 shared-CPU VMs, 3 GB storage | FastAPI + SQLite + scheduler; persistent volume at `/app/data` |
-
-### What this task covers
-
-1. **Production `Dockerfile`** for the backend — strip Aspire/OTEL overhead for the free tier, keep health endpoint
-2. **`fly.toml`** — `internal_port=8000`, volume mount at `/app/data`, process group for the scheduler
-3. **Deploy script** — `fly secrets set` for `LLM_PROVIDER`, `GROQ_API_KEY`, `WATCHLIST`, alert credentials
-4. **Vercel project** for the Vite frontend — `VITE_API_URL` points at the Fly.io backend URL; no separate API gateway needed
-5. **`SETUP.md` cloud-deploy section** — step-by-step from zero to public URL
-
-### Constraints and notes
-
-- SQLite on Fly.io persistent volume survives redeploys and restarts but is not replicated. Sufficient for single-user / personal use.
-- Fly.io free tier machines share CPU — Ollama cannot run here; must use Groq or a custom cloud endpoint (item 3a prerequisite).
-- Vercel free tier has 100 GB bandwidth/month and zero cold-start latency for a static build.
-- CORS: backend `CORS_ORIGINS` must include the Vercel preview URL pattern (`*.vercel.app`) plus the custom domain if set.
-
-### Dependencies
-
-- Item 3a must be complete (cloud LLM configured) — Fly.io cannot run a local Ollama model.
-
----
-
 ## ✅ 3b. Agentic architecture — workers, skills, orchestrator, memory
 *Shipped on branch `feat/backlog-3b-agentic-arch`*
 
@@ -210,38 +149,122 @@ New SSE event types: `type:"retry"` (skill retried with back-off), `type:"memory
 
 ---
 
-## 4. Backtesting + virtual wallet simulation
+## 3c. Multi-model fallback + cloud hosting (Vercel / Fly.io)
 
-Evaluate how good the system's signals actually are by replaying them against historical data and tracking a simulated portfolio.
+*Branch: `feat/backlog-3c-fallback-hosting`*
 
-### Backtesting engine
-
-- **Scenario**: pick a date range (e.g. the last 3 months), replay day-by-day as if it were live
-- Feed historical OHLCV + indicator data through the same pipeline that runs today
-- Record every signal the system would have generated on each day
-- Compare against actual subsequent price movements: did the entry/stop/target play out before the opposite level was hit?
-- **Metrics**: win rate, average R-multiple, Sharpe ratio, max drawdown, false-positive rate
-- **Output**: a report card per ticker and overall — useful for tuning `CONFIDENCE_FLOOR` and prompt wording
-
-### Virtual wallet
-
-- Start each backtest run with a configurable virtual balance (e.g. `$10,000`)
-- Each actionable signal opens a paper position: buy `N` shares at `entry`, set stop and target
-- Close positions when price hits `target` (profit) or `stop` (loss); time-out after N days if neither hit
-- Track running portfolio value day-by-day — visualise as an equity curve in the Explorer or a new Backtest tab
-- Compare against a simple buy-and-hold benchmark for the same period
-- **Goal**: answer "if I had followed every signal for the last month, would I have made or lost money?"
-
-### Implementation notes
-
-- `yfinance` historical download covers the replay period; indicators computed with `pandas-ta` (item 1)
-- Add a `POST /backtest` endpoint (or a CLI flag `--backtest`) that accepts `{ tickers, start_date, end_date, initial_balance }`
-- Store backtest runs in a separate `backtest_runs` + `backtest_trades` SQLite table — never pollutes live `signals`
-- Item 1 (pandas-ta) must land first — needed to recompute indicators historically without TradingView dependency
+Two closely related capabilities that build on item 3a and are best shipped together: automatic provider fallback when a quota is hit, and deploying the full stack publicly so it runs without a local machine.
 
 ---
 
-## 5. Validate and clean up alert channels (Email + Telegram)
+### Part 1 — Multi-model fallback
+
+When the active LLM provider fails (network error, rate limit, quota exhaustion) automatically retry the same request with a second configured provider/model, instead of surfacing the error to the user.
+
+#### Why this matters
+
+Cloud free tiers are generous but not unlimited — Groq has a 6 000 req/day cap, Gemini Flash 250 req/day, Mistral varies by model. A sequential watchlist scan across multiple tickers can exhaust one provider's quota within a session. Without fallback, the user sees an error and must manually switch providers in Settings.
+
+#### Design
+
+| Priority | Provider / Model | Configured via |
+|---|---|---|
+| 1st | Primary (from Settings page) | existing `llm_provider` / `llm_model` DB keys |
+| 2nd | Fallback provider | new `llm_fallback_provider` / `llm_fallback_model` DB keys |
+| 3rd | (optional) Second fallback | new `llm_fallback2_*` DB keys |
+
+Fallback fires on any `LLMError` (connection refused, HTTP 429, HTTP 5xx, timeout). If all configured providers fail, the original error is re-raised to the user as today.
+
+#### Implementation scope
+
+1. **`backend/analysis.py`** — wrap `call_llm()` in a retry loop that iterates through the fallback chain; log each attempt with provider name and error reason
+2. **`backend/config.py`** / **`backend/main.py`** — new `llm_fallback_provider` / `llm_fallback_model` setting keys; expose in `GET /settings` and `POST /settings/llm`
+3. **Settings page** — add a second "Fallback provider" row beneath the primary; same fields (provider dropdown, API key, model); shown only when primary is a cloud provider
+4. **SSE stream** — emit a `type:"fallback"` event when a retry fires so the Explorer pipeline shows which provider actually ran
+
+---
+
+### Part 2 — App hosting (Vercel + Fly.io)
+
+Host the full stack publicly for free — no local machine needed once a cloud LLM is configured (item 3a above).
+
+| Layer | Platform | Free tier | Notes |
+|---|---|---|---|
+| **Frontend** | [Vercel](https://vercel.com) | Unlimited hobby projects | Vite SPA — `vite build` + `vercel --prod`, zero config |
+| **Backend + DB** | [Fly.io](https://fly.io) | 3 shared-CPU VMs, 3 GB storage | FastAPI + SQLite + scheduler; persistent volume at `/app/data` |
+
+#### What this covers
+
+1. **Production `Dockerfile`** for the backend — strip Aspire/OTEL overhead for the free tier, keep health endpoint
+2. **`fly.toml`** — `internal_port=8000`, volume mount at `/app/data`, process group for the scheduler
+3. **Deploy script** — `fly secrets set` for `LLM_PROVIDER`, `GROQ_API_KEY`, `WATCHLIST`, alert credentials
+4. **Vercel project** for the Vite frontend — `VITE_API_URL` points at the Fly.io backend URL; no separate API gateway needed
+5. **`SETUP.md` cloud-deploy section** — step-by-step from zero to public URL
+
+#### Constraints and notes
+
+- SQLite on Fly.io persistent volume survives redeploys and restarts but is not replicated. Sufficient for single-user / personal use.
+- Fly.io free tier machines share CPU — Ollama cannot run here; must use Groq or a custom cloud endpoint.
+- Vercel free tier has 100 GB bandwidth/month and zero cold-start latency for a static build.
+- CORS: backend `CORS_ORIGINS` must include the Vercel preview URL pattern (`*.vercel.app`) plus the custom domain if set.
+
+### Dependencies
+
+- Item 3a must be complete (cloud LLM configured) — ✅ done.
+
+---
+
+## ✅ 4. Backtesting + virtual wallet simulation
+
+Evaluate how good the system's signals actually are by replaying them against historical data and tracking a simulated portfolio.
+
+**Delivered in two phases — split from the original spec for scope management:**
+
+### ✅ Phase 1 — Backtesting engine *(shipped on branch `feat/backlog-4-backtesting-engine`)*
+
+Day-by-day signal replay, forward outcome evaluation, and risk-normalized performance metrics.
+
+- **Signal replay**: walk trading days in the window; at each day build an as-of `market_data` dict (historical OHLCV sliced to that day, empty macro/fundamentals/news to avoid look-ahead) and run it through the live `detect_opportunities` pipeline.
+- **ATR volatility bracket**: rule signals carry an `entry` price but no stop/target — synthesize a bracket scaled to recent Average True Range (configurable ATR multiple + reward:risk ratio). AI-mode signals keep their own bracket.
+- **Outcome evaluation**: walk forward daily bars; long wins if `high ≥ target` before `low ≤ stop` (conservative tie-break: both hit in same bar → loss). Timeout at `max_hold_days` → exit at that close.
+- **Metrics**: win rate, avg R-multiple, Sharpe (mean R / std R), max drawdown (peak-to-trough of cumulative-R series), false-positive rate — per-ticker and overall.
+- **Confidence-floor sweep**: every signal is recorded regardless of floor, so the interactive floor slider in the UI re-filters results instantly with no re-run. Includes a sweep chart (win-rate / avg-R / trade-count vs floor) to find the optimal `CONFIDENCE_FLOOR`.
+- **Cumulative R-multiple chart** (dollar-free); $ equity curve + buy-and-hold benchmark are Phase 2.
+- **LLM mode**: optional toggle; pre-flight quota notifier (est. requests/tokens/TPM/duration) + RPM/TPM throttle + scoped auto-fallback reading `llm_fallback_provider`/`llm_fallback_model` DB keys (shared with backlog item 3c).
+- **Runs comparator**: multiselect past runs → side-by-side metrics + overlaid R curves.
+- **New API**: `POST /backtest/stream` (SSE), `GET /backtest`, `GET /backtest/{id}`, `DELETE /backtest/{id}`.
+- **New DB tables** (separate, never pollutes live `signals`): `backtest_runs`, `backtest_trades`; LLM token columns (`llm_calls`, `llm_prompt_tokens`, `llm_completion_tokens`, `llm_provider`, `llm_model`) and AI Review columns (`review_prompt_tokens`, `review_completion_tokens`) tracked per run.
+- **New UI tab**: Backtesting (8 numbered sections); time-period presets `3M / 6M / 1Y / 2Y` + custom date pickers.
+- **AI Review**: "Get AI Review" button on completed runs — sends metrics summary to the LLM; tokens tracked separately as `backtest_review` source in AI Usage.
+- **AI Usage section** (Settings): renamed from "Token Usage"; period selector (Today / 3d / 7d / 30d / 90d); daily-calls bar chart; TPM headroom bar; cost estimate card; by-source breakdown (signals/explorer · backtesting runs · AI review); quota limits table per provider (Groq live headers, Gemini/Mistral documented free-tier limits).
+- **Education**: two new wiki pages (`backtesting-explained.md`, `backtesting.md`) + Learn-tab section.
+
+### Phase 2 — Virtual wallet simulation *(next item after Phase 1)*
+
+- Start each run with a configurable virtual balance (e.g. `$10,000`)
+- Each actionable signal opens a paper position: buy `N` shares at `entry`, set stop and target
+- Close positions when price hits `target` (profit) or `stop` (loss); time-out after N days if neither hit
+- Track running portfolio value day-by-day — visualise as a **$ equity curve** in the Backtest tab
+- Compare against a simple buy-and-hold benchmark for the same period
+- **Goal**: answer "if I had followed every signal for the last month, would I have made or lost money?"
+- Layers on Phase 1 without schema changes — `initial_balance` + full `backtest_trades` (entry/exit/dates/direction) are already captured by Phase 1.
+
+---
+
+## 5. Trending ticker discovery (auto-detect, not manual add)
+
+Surface *new* tickers to watch automatically from market trends, instead of relying only on manual watchlist additions.
+
+- **Discovery sources**: top movers / most-active / unusual-volume (yfinance or the existing Finnhub integration), plus a momentum/trend screen (price above a rising EMA20/50, multi-timeframe RSI/MACD alignment) that reuses the current indicator stack.
+- **Ranking**: score candidates by a trend/momentum score; show them in a "Trending" panel with the reason and a one-click **Add to watchlist**.
+- **Optional auto-scan**: run the analysis pipeline on the top-N discovered tickers (respecting the orchestrator's concurrency cap) so signals appear without manual adds.
+- **Config**: enable/disable, max candidates, refresh interval, minimum score.
+
+Distinct from the existing manual `POST /watchlist` add flow — this is *discovery*, not curation.
+
+---
+
+## 6. Validate and clean up alert channels (Email + Telegram)
 
 Slim the alert layer down to the two channels worth supporting, then validate them end-to-end.
 
@@ -271,9 +294,22 @@ Slim the alert layer down to the two channels worth supporting, then validate th
 
 ---
 
+## ✅ News sentiment layer
+*Shipped on branch `feat/backlog-4-backtesting-engine`*
+
+- **Google News RSS** (always active, no API key) + **Finnhub** (optional) fetched and deduplicated per ticker per day
+- **VADER** offline sentiment scoring per headline; aggregate score (−1.0 to +1.0) → Bullish / Bearish / Mixed / Neutral label
+- **AI prompt injection**: `RECENT NEWS HEADLINES` block now includes `Aggregate sentiment: <label> (score=±X.XXX, n=N articles)` before individual headlines
+- **Rule 7 — confidence adjuster**: ±1 pt (mild) or ±3 pts (strong) applied post-merge, direction-aware (bullish boosts long / hurts short; bearish reverses); Mixed/Neutral = no change
+- **Explorer news card**: source, channel pill (Finnhub / Google News RSS), VADER label+score pill, date — all shown per headline
+- **Opportunity score computation**: sentiment step added to formula display and All Rules table
+- **Learn page**: Rule 7 card added to Section 5; Step 4 (sentiment) added to scoring pipeline in Section 6
+- **Smoke tests Section 14**: 17 checks (empty-list graceful, positive/negative scoring, dedup, cap, filter direction, edge clamp, network graceful)
+
+---
+
 ## Other ideas
 
-- **News sentiment layer** — fetch recent headlines for a ticker (e.g. via `feedparser` + Google News RSS) and include a sentiment summary in the Ollama prompt
 - **Multi-model support** — allow swapping models per ticker or per scan type; benchmark `qwen2.5:14b` vs `llama3.1:8b` vs `mistral:7b` on accuracy/latency
 - **Mobile notifications** — push via Pushover or ntfy.sh (self-hosted) as a lightweight alternative to Telegram
 - **Confidence calibration** — track how often each confidence band (65–75 / 75–85 / 85+) leads to correct calls; auto-adjust `CONFIDENCE_FLOOR` over time

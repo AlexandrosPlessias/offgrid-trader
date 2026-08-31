@@ -96,6 +96,7 @@ def _load_dotenv(path: Path) -> None:
 # Provider test functions
 # ---------------------------------------------------------------------------
 def _test_ollama(host: str, model: str, timeout: int) -> tuple[bool, str]:
+    import urllib.error
     import urllib.request
 
     url = f"{host.rstrip('/')}/api/chat"
@@ -160,10 +161,11 @@ def _test_cloud(
             True,
             f"status={parsed.get('status')!r}  tokens={tokens_in}→{tokens_out}",
         )
+    except openai.APITimeoutError:
+        # Must come before APIConnectionError — Timeout is a subclass of Connection.
+        return False, f"Timed out after {timeout}s"
     except openai.APIConnectionError as exc:
         return False, f"Cannot reach {provider} ({base_url}): {exc}"
-    except openai.APITimeoutError:
-        return False, f"Timed out after {timeout}s"
     except openai.APIStatusError as exc:
         return False, f"HTTP {exc.status_code}: {exc.message}"
     except json.JSONDecodeError as exc:

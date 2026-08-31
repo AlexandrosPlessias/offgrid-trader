@@ -152,5 +152,85 @@ if (loaded) {
   await shotAt(page, 'explorer-10-signals.png',      sectionOf(page, 'Signals detected'));
 }
 
+// ── 3. Backtesting page ──────────────────────────────────────────────────────
+
+await shot(page, '06-backtesting.png', async () => {
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.click('text=Backtesting');
+  await page.waitForTimeout(1200);
+});
+
+// If there are past runs in the list, click one to show the results view
+await shot(page, '07-backtesting-results.png', async () => {
+  // Try clicking the first past-run row to open it; fall back to params view
+  try {
+    await page.locator('.bt-run-row, .run-row, tbody tr').first().waitFor({ timeout: 4000 });
+    await page.locator('.bt-run-row, .run-row, tbody tr').first().click();
+    await page.waitForTimeout(1500);
+  } catch {
+    console.warn('⚠  No past backtest runs found — keeping parameter view for 07.');
+  }
+});
+
+// ── 4. Settings — AI Provider ─────────────────────────────────────────────────
+
+await shot(page, '08-settings-ai-provider.png', async () => {
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.locator('.tool-btn').last().click();
+  await page.waitForTimeout(600);
+  // Click the AI Provider menu item
+  try {
+    await page.locator('text=AI Provider').first().click();
+    await page.waitForTimeout(800);
+  } catch { /* already on Settings, might already show AI Provider */ }
+});
+
+// ── 5. Settings — AI Usage ────────────────────────────────────────────────────
+
+await shot(page, '09-settings-ai-usage.png', async () => {
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.locator('.tool-btn').last().click();
+  await page.waitForTimeout(600);
+  try {
+    await page.locator('text=AI Usage').first().click();
+    await page.waitForTimeout(1200); // wait for charts to render
+  } catch { console.warn('⚠  AI Usage nav item not found'); }
+});
+
+// Scroll to show the quota/limits section
+await shot(page, '10-settings-ai-usage-quota.png', async () => {
+  try {
+    const quotaBox = page.locator('.usage-quota-box').first();
+    await quotaBox.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(500);
+  } catch { console.warn('⚠  usage-quota-box not found'); }
+});
+
+// ── 6. Dashboard — Paper Orders sidebar + live watchlist ─────────────────────
+
+await shot(page, '11-dashboard-paper-orders.png', async () => {
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(1500); // let price table load
+  // Ensure the Paper Orders panel is expanded (click the toggle if collapsed)
+  try {
+    const panelBtn = page.locator('.paper-panel-toggle, [class*="paper-panel"]').first();
+    const isVisible = await panelBtn.isVisible().catch(() => false);
+    if (isVisible) await panelBtn.click();
+    await page.waitForTimeout(800);
+  } catch { /* panel may already be open */ }
+});
+
+// ── 7. Settings — Paper Trading ───────────────────────────────────────────────
+
+await shot(page, '12-settings-paper-trading.png', async () => {
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.locator('.tool-btn').last().click();
+  await page.waitForTimeout(600);
+  try {
+    await page.locator('text=Paper Trading').first().click();
+    await page.waitForTimeout(800);
+  } catch { console.warn('⚠  Paper Trading nav item not found'); }
+});
+
 await browser.close();
 console.log('\nAll screenshots saved to:', OUT);
