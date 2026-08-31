@@ -1,6 +1,6 @@
 # Settings Reference
 
-![Settings page — scheduler, alerts, Ollama model, data reset](../screenshots/05-settings.png)
+![Settings page — AI Provider](../screenshots/08-settings-ai-provider.png)
 
 All configuration for **MarketSage** is driven by environment variables in `.env`
 (copied from `.env.example`). Most can also be changed at **runtime** from the
@@ -144,6 +144,93 @@ Outside these hours it sleeps until the next interval.
 | `OTEL_INCLUDE_LLM_CONTENT` | `false` | When `true`, full LLM prompt and response text are added as span events in Aspire. Default `false` — prompts contain financial context (balance sheet figures, news). Enable only in development. |
 
 See [observability.md](observability.md) for the full span hierarchy and how to read traces in Aspire.
+
+---
+
+## Paper Trading (Alpaca)
+
+> **Settings → 📈 Paper Trading** — connect to Alpaca's free paper-trading environment and auto-place bracket orders for every actionable signal.
+
+Credentials can be set via `.env` **or** pasted directly in the Settings page. The Settings page takes precedence over `.env`; click **Load .env defaults** to revert to env-var values.
+
+| Variable | Default | Runtime-mutable | Description |
+|---|---|---|---|
+| `ALPACA_PAPER_URL` | `https://paper-api.alpaca.markets` | ✓ (Settings page) | Base URL for Alpaca's paper trading REST API. Trailing `/v2` is stripped automatically. |
+| `ALPACA_API_KEY_ID` | *(unset)* | ✓ (Settings page) | Key ID from Alpaca → Paper Trading → API Keys. |
+| `ALPACA_API_SECRET_KEY` | *(unset)* | ✓ (Settings page) | Secret key — shown masked with a Show/Hide toggle. Never returned by the API. |
+| `paper_trading_enabled` (DB only) | `false` | ✓ (Settings toggle) | Master switch — enables `PaperTradeSkill` to place orders on every scan. The Paper Orders sidebar and live price table work regardless of this toggle. |
+| `paper_trade_position_size` (DB only) | `500` | ✓ (Settings page) | Notional dollar amount per bracket order. Uses Alpaca fractional shares so any dollar value is valid. |
+| `paper_trade_min_confidence` (DB only) | *(signal floor)* | ✓ (Settings page) | Override the global `CONFIDENCE_FLOOR` just for auto-trading (e.g. set higher to trade only your highest-conviction signals). |
+
+**Test Connection** — the Settings page shows a **Save & Test Connection** button that verifies credentials against `GET /v2/account` before saving, and displays account equity on success.
+
+**Market data** — live prices use `data.alpaca.markets` (separate host, same credentials). No paid subscription required — Alpaca's free tier covers both paper trading and snapshots.
+
+---
+
+## AI Usage
+
+![Settings — AI Usage section](../screenshots/09-settings-ai-usage.png)
+
+> **Settings → ⚡ AI Usage** — aggregated LLM token and call statistics with period selector, charts, cost estimates, and quota limits.
+
+### Period selector
+
+Choose the look-back window with the **Today / 3 days / 7 days / 30 days / 90 days** buttons at the top. The data re-fetches immediately from `GET /usage?days=N`.
+
+### Model selector chips
+
+Chips below the period selector filter all cards and charts to a specific provider + model. The active (configured) provider is auto-selected on page load. Select **All models** to see combined totals.
+
+### Summary cards
+
+| Card | Description |
+|---|---|
+| **Total tokens** | All prompt + completion tokens for the selected period and model |
+| **Prompt** | Input tokens only |
+| **Completion** | Output tokens only |
+| **LLM calls** | Number of API requests; shows `~N/day` average |
+| **Est. cost** | Rough USD estimate based on documented free-tier pricing; shows **$0** for Ollama and free-tier cloud models |
+
+### Charts
+
+| Chart | Description |
+|---|---|
+| **Daily token usage** | Stacked prompt / completion tokens per day (AreaChart ≥3 days, BarChart 1–2 days) |
+| **LLM calls per day** | API call count per day (green bar chart) |
+| **TPM headroom** | Estimated tokens/min vs. provider limit — colour-coded green → amber → red |
+
+### By-source cards
+
+Three usage buckets (always shown; faded when zero):
+
+| Source | What it counts |
+|---|---|
+| **Signals / Explorer** | AI calls from the Dashboard scheduler and Explorer on-demand analysis |
+| **Backtesting runs** | LLM-mode backtest engine calls |
+| **AI Review** | "Get AI Review" button clicks on a completed backtest run |
+
+### Quota / Limits
+
+![Settings — AI Usage quota section](../screenshots/10-settings-ai-usage-quota.png)
+
+The quota panel shows limits for the **selected chip's provider** (not the backend's configured provider), so switching chips updates the note, dashboard link, and limits table immediately.
+
+| Provider | What is shown |
+|---|---|
+| **Groq** | Live rate-limit headers from the last probe call (tokens remaining, reset time, RPM) |
+| **Gemini** | Free-tier documented limits per model (RPM / TPM / RPD); links to Google AI Studio |
+| **Mistral** | Free-tier documented limits per model; links to Mistral console |
+| **Ollama** | "Local model — no rate limits apply" |
+
+Groq free tier reference limits (model-dependent):
+- `30 RPM / 6,000 TPM / 14,400 RPD`
+
+Gemini free tier (gemini-3.5-flash family):
+- `15 RPM / 1,000,000 TPM / 1,500 RPD`
+
+Mistral free tier (La Plateforme trial):
+- `30 RPM / 100,000 TPM / 500 RPD`
 
 ---
 
