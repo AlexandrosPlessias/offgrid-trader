@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "backtest_review_v2.schema.json",
+  "title": "BacktestReviewV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "status",
+    "evidence_quality",
+    "edge_assessment",
+    "deployment_stage",
+    "strengths",
+    "weaknesses",
+    "blocking_issues",
+    "verdict",
+    "next_action"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "backtest_review.v2"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "insufficient_data",
+        "invalid_input"
+      ]
+    },
+    "evidence_quality": {
+      "type": "string",
+      "enum": [
+        "weak",
+        "moderate",
+        "strong"
+      ]
+    },
+    "edge_assessment": {
+      "type": "string",
+      "enum": [
+        "negative",
+        "inconclusive",
+        "positive"
+      ]
+    },
+    "deployment_stage": {
+      "type": "string",
+      "enum": [
+        "reject",
+        "research_only",
+        "paper_trade",
+        "limited_live_candidate"
+      ]
+    },
+    "strengths": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "string",
+        "maxLength": 300
+      }
+    },
+    "weaknesses": {
+      "type": "array",
+      "maxItems": 7,
+      "items": {
+        "type": "string",
+        "maxLength": 300
+      }
+    },
+    "blocking_issues": {
+      "type": "array",
+      "maxItems": 7,
+      "items": {
+        "type": "string",
+        "maxLength": 300
+      }
+    },
+    "verdict": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 700
+    },
+    "next_action": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 400
+    }
+  }
+}
