@@ -1,4 +1,5 @@
 name: App Power
+run-name: App Power — ${{ inputs.action }}
 
 # Manually take the app offline or bring it back online.
 on:
