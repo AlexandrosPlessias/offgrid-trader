@@ -1,0 +1,8 @@
+[tool.ruff.lint.mccabe]
+# Backtest, analysis, and data pipelines are inherently complex; enforcing a low
+# threshold would require splitting functions in ways that hurt readability.
+max-complexity = 30
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI uses Body() as a dependency marker in default args — not a real call-in-default.
+"backend/main.py" = ["B008"]
