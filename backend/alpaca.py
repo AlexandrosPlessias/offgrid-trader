@@ -237,10 +237,14 @@ class AlpacaClient:
             "stop_loss": {"stop_price": str(stop_2dp)},
             "take_profit": {"limit_price": str(tp_2dp)},
         }
+        # Sanitise user-supplied strings before logging to prevent log-injection
+        # (CodeQL py/log-injection: strip CR/LF that could forge log lines).
+        safe_side = side.replace("\r", "").replace("\n", "")
+        safe_ticker = ticker.replace("\r", "").replace("\n", "")
         _log.info(
             "alpaca: placing %s %s qty=%d (notional=$%.0f @ $%.2f) stop=%.2f tp=%.2f",
-            side,
-            ticker,
+            safe_side,
+            safe_ticker,
             qty,
             notional,
             entry_price,

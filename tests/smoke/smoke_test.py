@@ -1369,9 +1369,13 @@ try:
 
     class _FakeAlpaca(_AlpacaClient):
         def __init__(self):
-            self._key_id = "test-key"
-            self._secret_key = "test-secret"  # noqa: S105
-            self._base_url = "https://example.com"
+            # Call superclass __init__ with a valid Alpaca hostname so
+            # _validate_url passes; _post is overridden so no network call is made.
+            super().__init__(
+                key_id="test-key",
+                secret_key="test-secret",  # noqa: S106
+                base_url="https://paper-api.alpaca.markets",
+            )
 
         def _post(self, path, body):
             _posted.append(body)
