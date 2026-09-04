@@ -98,7 +98,11 @@ expected = {
     "/watchlist",
     "/health",
 }
-check("all expected routes present", expected.issubset(paths), f"missing={expected - paths}")
+check(
+    "all expected routes present",
+    expected.issubset(paths),
+    f"missing={expected - paths}",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -134,7 +138,10 @@ check("get_recent_signals round-trip", len(recent) == 1 and recent[0]["ticker"] 
 
 database.save_analysis("TEST", {"trend": "bullish"}, {"ticker": "TEST"})
 hist = database.get_analysis_history("TEST")
-check("analysis_log round-trip", len(hist) == 1 and hist[0]["analysis_json"]["trend"] == "bullish")
+check(
+    "analysis_log round-trip",
+    len(hist) == 1 and hist[0]["analysis_json"]["trend"] == "bullish",
+)
 
 recent_all = database.get_recent_analyses(limit=10)
 check(
@@ -258,31 +265,28 @@ except Exception as exc:  # pragma: no cover
 
 
 # --------------------------------------------------------------------------- #
-# 7. AI analysis with mocked Ollama
+# 7. AI analysis with mocked LLM (provider-agnostic)
 # --------------------------------------------------------------------------- #
-fake_response = mock.Mock()
-fake_response.status_code = 200
-fake_response.json.return_value = {
-    "message": {
-        "content": (
-            '{"trend":"bullish","momentum":"strong","key_levels":{"support":[95],'
-            '"resistance":[110]},"signals":["x"],"opportunity":{"type":"long",'
-            '"confidence":75,"entry":100,"stop":95,"target":110},"risk_factors":["y"]}'
-        )
-    }
-}
-with mock.patch("backend.analysis.requests.post", return_value=fake_response):
+_FAKE_LLM_JSON = (
+    '{"trend":"bullish","momentum":"strong","key_levels":{"support":[95],'
+    '"resistance":[110]},"signals":["x"],"opportunity":{"type":"long",'
+    '"confidence":75,"entry":100,"stop":95,"target":110},"risk_factors":["y"]}'
+)
+# call_llm returns (raw_text, model_used, prompt_tokens, completion_tokens)
+_FAKE_LLM_RETURN = (_FAKE_LLM_JSON, "mock-model", 100, 50)
+with mock.patch("backend.analysis.call_llm", return_value=_FAKE_LLM_RETURN):
     parsed = analysis.analyze(synthetic)
-check("analyze() parses mocked Ollama JSON", parsed.get("trend") == "bullish", repr(parsed))
+check(
+    "analyze() parses mocked Ollama JSON",
+    parsed.get("trend") == "bullish",
+    repr(parsed),
+)
 check("analyze() opportunity normalised", parsed["opportunity"]["type"] == "long")
 
-# Ollama-not-running path.
-import requests as _requests  # noqa: E402
+# LLM unavailable path.
+from backend.analysis import LLMError  # noqa: E402
 
-with mock.patch(
-    "backend.analysis.requests.post",
-    side_effect=_requests.exceptions.ConnectionError(),
-):
+with mock.patch("backend.analysis.call_llm", side_effect=LLMError("offline")):
     err = analysis.analyze(synthetic)
 check("analyze() handles Ollama offline", "error" in err and err["opportunity"] is None)
 
@@ -294,7 +298,10 @@ msg = alerts.format_alert(opps[0])
 check("format_alert builds subject/text", "subject" in msg and "text" in msg)
 
 low_conf = alerts.send_alert({"ticker": "T", "type": "long", "confidence": 10.0})
-check("send_alert skips below floor", low_conf["skipped"] is True and low_conf["sent"] is False)
+check(
+    "send_alert skips below floor",
+    low_conf["skipped"] is True and low_conf["sent"] is False,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -554,7 +561,8 @@ try:
         detail=prompt_text[:200],
     )
     check(
-        "build_prompt contains RECENT NEWS HEADLINES block", "RECENT NEWS HEADLINES" in prompt_text
+        "build_prompt contains RECENT NEWS HEADLINES block",
+        "RECENT NEWS HEADLINES" in prompt_text,
     )
     check("build_prompt news shows source", "(Reuters)" in prompt_text)
     check(
@@ -572,7 +580,9 @@ try:
     _store_json("smoke_test_cache_key", {"hello": "world", "n": 42})
     _got = _cached_json("smoke_test_cache_key")
     check(
-        "_cached_json/_store_json round-trip", _got == {"hello": "world", "n": 42}, detail=str(_got)
+        "_cached_json/_store_json round-trip",
+        _got == {"hello": "world", "n": 42},
+        detail=str(_got),
     )
     check(
         "_cached_json returns None for missing key",
@@ -605,7 +615,11 @@ try:
     # ── 12a. MemoryLayer — load returns {} for unknown ticker ───────────────
     _mem = _MemoryLayer()
     _mem_val = _mem.load("SMOKE_UNKNOWN_TICKER_XYZ")
-    check("MemoryLayer.load returns {} for unknown ticker", _mem_val == {}, detail=str(_mem_val))
+    check(
+        "MemoryLayer.load returns {} for unknown ticker",
+        _mem_val == {},
+        detail=str(_mem_val),
+    )
 
     # ── 12b. MemoryLayer — update and reload ───────────────────────────────
     _ctx_mem = _AgentContext(
@@ -701,7 +715,11 @@ try:
     # ── 12i. Orchestrator priority — unknown ticker gets max priority ───────
     _orch = _Orchestrator(memory=_MemoryLayer())
     _p = _orch.priority("COMPLETELY_UNKNOWN_TICKER_XYZ_999")
-    check("Orchestrator.priority returns inf for unseen ticker", _p == float("inf"), detail=str(_p))
+    check(
+        "Orchestrator.priority returns inf for unseen ticker",
+        _p == float("inf"),
+        detail=str(_p),
+    )
 
 except Exception as exc:
     check("agentic architecture smoke", False, repr(exc))
@@ -844,7 +862,12 @@ try:
 
     # Win: high reaches target before low reaches stop
     _fwd_win = _pd2.DataFrame(
-        {"Open": [101, 102], "High": [103, 110], "Low": [100, 101], "Close": [102, 109]},
+        {
+            "Open": [101, 102],
+            "High": [103, 110],
+            "Low": [100, 101],
+            "Close": [102, 109],
+        },
         index=_pd2.date_range("2024-01-02", periods=2, freq="B"),
     )
     _result_win = evaluate_outcome(_make_signal(100.0, 97.0, 106.0), _fwd_win, max_hold_days=5)
@@ -861,7 +884,12 @@ try:
 
     # Loss: low reaches stop
     _fwd_loss = _pd2.DataFrame(
-        {"Open": [99, 98], "High": [99.5, 98.5], "Low": [96.5, 96.0], "Close": [97, 96.5]},
+        {
+            "Open": [99, 98],
+            "High": [99.5, 98.5],
+            "Low": [96.5, 96.0],
+            "Close": [97, 96.5],
+        },
         index=_pd2.date_range("2024-01-02", periods=2, freq="B"),
     )
     _result_loss = evaluate_outcome(_make_signal(100.0, 97.0, 106.0), _fwd_loss, max_hold_days=5)
@@ -878,7 +906,12 @@ try:
 
     # Same-bar tie-break: stop and target both in same bar → conservative → loss
     _fwd_tie = _pd2.DataFrame(
-        {"Open": [100], "High": [107], "Low": [96], "Close": [101]},  # both 97 stop and 106 target
+        {
+            "Open": [100],
+            "High": [107],
+            "Low": [96],
+            "Close": [101],
+        },  # both 97 stop and 106 target
         index=_pd2.date_range("2024-01-02", periods=1, freq="B"),
     )
     _result_tie = evaluate_outcome(_make_signal(100.0, 97.0, 106.0), _fwd_tie, max_hold_days=5)
@@ -1030,7 +1063,10 @@ try:
     )
     assert _fetched is not None  # narrowed above; assert keeps Pylance happy
     check("get_backtest_run includes trades", len(_fetched.get("trades", [])) == 1)
-    check("get_backtest_run trade has r_multiple", _fetched["trades"][0].get("r_multiple") == 2.0)
+    check(
+        "get_backtest_run trade has r_multiple",
+        _fetched["trades"][0].get("r_multiple") == 2.0,
+    )
 
     delete_backtest_run(_run_id)
     check("delete_backtest_run removes run", get_backtest_run(_run_id) is None)
@@ -1091,8 +1127,8 @@ print("\n[14] News Sentiment Layer")
 try:
     from backend.data import (
         _merge_news,
-        score_news_sentiment,
         fetch_google_news_rss,
+        score_news_sentiment,
     )
     from backend.opportunities import _apply_sentiment_filter
 
@@ -1111,10 +1147,18 @@ try:
 
     # 14b. score_news_sentiment — positive headlines → Bullish label
     _pos_news = [
-        {"headline": "Company beats earnings estimates by wide margin",
-         "source": "Reuters", "url": "", "datetime": ""},
-        {"headline": "Stock surges on record revenue growth",
-         "source": "AP", "url": "", "datetime": ""},
+        {
+            "headline": "Company beats earnings estimates by wide margin",
+            "source": "Reuters",
+            "url": "",
+            "datetime": "",
+        },
+        {
+            "headline": "Stock surges on record revenue growth",
+            "source": "AP",
+            "url": "",
+            "datetime": "",
+        },
     ]
     _sent_pos = score_news_sentiment(_pos_news)
     check(
@@ -1131,10 +1175,18 @@ try:
 
     # 14c. score_news_sentiment — negative headlines → score < 0
     _neg_news = [
-        {"headline": "Stock crashes on terrible earnings miss",
-         "source": "Reuters", "url": "", "datetime": ""},
-        {"headline": "Company faces bankruptcy fears amid falling revenue",
-         "source": "AP", "url": "", "datetime": ""},
+        {
+            "headline": "Stock crashes on terrible earnings miss",
+            "source": "Reuters",
+            "url": "",
+            "datetime": "",
+        },
+        {
+            "headline": "Company faces bankruptcy fears amid falling revenue",
+            "source": "AP",
+            "url": "",
+            "datetime": "",
+        },
     ]
     _sent_neg = score_news_sentiment(_neg_news)
     check(
@@ -1145,18 +1197,34 @@ try:
 
     # 14d. _merge_news — deduplication
     _primary = [
-        {"headline": "Apple beats estimates",
-         "source": "Reuters", "url": "http://a.com/1", "datetime": ""},
-        {"headline": "Apple opens new store",
-         "source": "AP", "url": "http://a.com/2", "datetime": ""},
+        {
+            "headline": "Apple beats estimates",
+            "source": "Reuters",
+            "url": "http://a.com/1",
+            "datetime": "",
+        },
+        {
+            "headline": "Apple opens new store",
+            "source": "AP",
+            "url": "http://a.com/2",
+            "datetime": "",
+        },
     ]
     _supplement = [
         # duplicate (case-insensitive)
-        {"headline": "Apple Beats Estimates",
-         "source": "GNews", "url": "http://b.com/1", "datetime": ""},
+        {
+            "headline": "Apple Beats Estimates",
+            "source": "GNews",
+            "url": "http://b.com/1",
+            "datetime": "",
+        },
         # new
-        {"headline": "Apple CEO interview",
-         "source": "GNews", "url": "http://b.com/2", "datetime": ""},
+        {
+            "headline": "Apple CEO interview",
+            "source": "GNews",
+            "url": "http://b.com/2",
+            "datetime": "",
+        },
     ]
     _merged = _merge_news(_primary, _supplement, max_total=10)
     _merged_headlines = [item["headline"].lower() for item in _merged]
@@ -1178,12 +1246,10 @@ try:
 
     # 14e. _merge_news — max_total cap
     _big_primary = [
-        {"headline": f"Story {i}", "source": "S", "url": "", "datetime": ""}
-        for i in range(8)
+        {"headline": f"Story {i}", "source": "S", "url": "", "datetime": ""} for i in range(8)
     ]
     _big_supp = [
-        {"headline": f"Extra {i}", "source": "G", "url": "", "datetime": ""}
-        for i in range(8)
+        {"headline": f"Extra {i}", "source": "G", "url": "", "datetime": ""} for i in range(8)
     ]
     _merged_capped = _merge_news(_big_primary, _big_supp, max_total=10)
     check(
@@ -1193,7 +1259,12 @@ try:
     )
 
     # 14f. _apply_sentiment_filter — Bullish strong boosts long opportunity
-    _opp_long = {"ticker": "AAPL", "type": "long", "confidence": 60, "rules_checked": {}}
+    _opp_long = {
+        "ticker": "AAPL",
+        "type": "long",
+        "confidence": 60,
+        "rules_checked": {},
+    }
     _sent_strong_bull = {"score": 0.4, "label": "Bullish", "article_count": 3}
     _filtered_bull = _apply_sentiment_filter([_opp_long], _sent_strong_bull)
     check(
@@ -1208,7 +1279,12 @@ try:
     )
 
     # 14g. _apply_sentiment_filter — Bearish hurts long opportunity
-    _opp_long2 = {"ticker": "AAPL", "type": "long", "confidence": 60, "rules_checked": {}}
+    _opp_long2 = {
+        "ticker": "AAPL",
+        "type": "long",
+        "confidence": 60,
+        "rules_checked": {},
+    }
     _sent_bear = {"score": -0.4, "label": "Bearish", "article_count": 3}
     _filtered_bear = _apply_sentiment_filter([_opp_long2], _sent_bear)
     check(
@@ -1218,14 +1294,24 @@ try:
     )
 
     # 14h. _apply_sentiment_filter — confidence never goes below 0 or above 100
-    _opp_edge_high = {"ticker": "AAPL", "type": "long", "confidence": 99, "rules_checked": {}}
+    _opp_edge_high = {
+        "ticker": "AAPL",
+        "type": "long",
+        "confidence": 99,
+        "rules_checked": {},
+    }
     _filtered_edge = _apply_sentiment_filter([_opp_edge_high], _sent_strong_bull)
     check(
         "_apply_sentiment_filter confidence never exceeds 100",
         _filtered_edge[0]["confidence"] <= 100,
         detail=str(_filtered_edge),
     )
-    _opp_edge_low = {"ticker": "AAPL", "type": "long", "confidence": 1, "rules_checked": {}}
+    _opp_edge_low = {
+        "ticker": "AAPL",
+        "type": "long",
+        "confidence": 1,
+        "rules_checked": {},
+    }
     _filtered_edge_low = _apply_sentiment_filter([_opp_edge_low], _sent_bear)
     check(
         "_apply_sentiment_filter confidence never goes below 0",
@@ -1236,6 +1322,7 @@ try:
     # 14i. fetch_google_news_rss — returns list (may be empty if network unavailable)
     try:
         import socket
+
         socket.setdefaulttimeout(5)
         _gnews = fetch_google_news_rss("AAPL", n=3)
         check(
@@ -1252,13 +1339,129 @@ try:
             )
     except Exception as _gnews_exc:
         # Network may be unavailable in CI; graceful degradation is acceptable
-        check("fetch_google_news_rss graceful on network error", True, detail=repr(_gnews_exc))
+        check(
+            "fetch_google_news_rss graceful on network error",
+            True,
+            detail=repr(_gnews_exc),
+        )
 
     check("news sentiment layer smoke complete", True)
 
 except Exception:
     import traceback as _traceback14
+
     check("news sentiment layer smoke", False, _traceback14.format_exc()[-400:])
+
+
+# --------------------------------------------------------------------------- #
+# 15. Alpaca bracket order — qty calculation + price rounding
+# --------------------------------------------------------------------------- #
+print("\n[15] Alpaca bracket order — qty / price rounding")
+
+try:
+    from backend.alpaca import AlpacaClient as _AlpacaClient
+    from backend.database import save_signal as _save_signal
+    from backend.skills import AgentContext as _AC15
+    from backend.skills.paper_trade import PaperTradeSkill as _PTS
+
+    # ── 15a. place_bracket_order builds qty body, rounds prices to 2dp ──────
+    _posted: list[dict] = []
+
+    class _FakeAlpaca(_AlpacaClient):
+        def __init__(self):
+            self._key_id = "test-key"
+            self._secret_key = "test-secret"  # noqa: S105
+            self._base_url = "https://example.com"
+
+        def _post(self, path, body):
+            _posted.append(body)
+            return {"id": "fake-order-id", "status": "accepted"}
+
+    _client = _FakeAlpaca()
+    _client.place_bracket_order(
+        ticker="NVDA",
+        side="buy",
+        notional=500,
+        entry_price=228.0,
+        stop_price=219.2636,  # sub-penny — must be rounded
+        take_profit_price=239.6077,  # sub-penny — must be rounded
+    )
+
+    check(
+        "place_bracket_order uses qty not notional",
+        _posted and "qty" in _posted[-1] and "notional" not in _posted[-1],
+    )
+    check(
+        "place_bracket_order qty = floor(500/228) = 2",
+        _posted[-1].get("qty") == "2",
+        detail=str(_posted[-1].get("qty")),
+    )
+    check(
+        "place_bracket_order stop rounded to 2dp",
+        _posted[-1]["stop_loss"]["stop_price"] == "219.26",
+        detail=str(_posted[-1]["stop_loss"]),
+    )
+    check(
+        "place_bracket_order take_profit rounded to 2dp",
+        _posted[-1]["take_profit"]["limit_price"] == "239.61",
+        detail=str(_posted[-1]["take_profit"]),
+    )
+
+    # ── 15b. PaperTradeSkill places order for actionable signal ─────────────
+    _sig_id = _save_signal(
+        {
+            "ticker": "NVDA",
+            "type": "long",
+            "confidence": 80.0,
+            "source": "ai",
+            "entry": 228.0,
+            "stop": 219.2636,
+            "target": 239.6077,
+            "price": 228.0,
+            "reasons": ["smoke"],
+        }
+    )
+
+    _ctx15 = _AC15(
+        ticker="NVDA",
+        actionable=[
+            {
+                "ticker": "NVDA",
+                "type": "long",
+                "confidence": 80.0,
+                "entry": 228.0,
+                "stop": 219.2636,
+                "target": 239.6077,
+                "price": 228.0,
+            }
+        ],
+    )
+    _ctx15.saved_signal_ids = {"NVDA": _sig_id}
+
+    with mock.patch(
+        "backend.skills.paper_trade.get_client", return_value=_FakeAlpaca()
+    ), mock.patch(
+        "backend.skills.paper_trade.get_setting",
+        side_effect=lambda k, d="": {
+            "paper_trading_enabled": "true",
+            "paper_trade_position_size": "500",
+            "paper_trade_min_confidence": "",
+        }.get(k, d),
+    ):
+        _result15 = _PTS().run(_ctx15)
+
+    check(
+        "PaperTradeSkill places order for actionable signal",
+        _result15.success and len(_result15.data.get("orders_placed", [])) == 1,
+        detail=str(_result15),
+    )
+
+    check("Alpaca bracket order smoke complete", True)
+
+except Exception:
+    import traceback as _tb15
+
+    check("Alpaca bracket order smoke", False, _tb15.format_exc()[-400:])
 
 
 # --------------------------------------------------------------------------- #

@@ -61,9 +61,7 @@ def _validate_url(url: str) -> str:
     """
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https":
-        raise AlpacaError(
-            f"Alpaca base URL must use HTTPS (got scheme {parsed.scheme!r})"
-        )
+        raise AlpacaError(f"Alpaca base URL must use HTTPS (got scheme {parsed.scheme!r})")
     if parsed.hostname not in _ALLOWED_HOSTS:
         raise AlpacaError(
             f"Alpaca base URL host {parsed.hostname!r} is not an allowed "
@@ -200,37 +198,54 @@ class AlpacaClient:
         *,
         ticker: str,
         side: str,  # "buy" | "sell"
-        notional: float,  # fixed $ amount
+        notional: float,  # fixed $ amount — converted to whole shares internally
+        entry_price: float,  # current price used to derive share qty
         stop_price: float,
         take_profit_price: float,
     ) -> dict[str, Any]:
         """Place a market bracket order (entry at market + stop-loss + take-profit).
 
-        Uses ``notional`` (dollar amount) so fractional shares are handled
-        automatically by Alpaca for supported securities.
+        Alpaca does not allow ``notional`` (fractional) for bracket orders —
+        it raises "fractional orders must be simple orders".  We therefore
+        compute whole-share ``qty`` from ``notional / entry_price`` (minimum 1
+        share).  Stop and take-profit prices are rounded to 2 decimal places to
+        satisfy Alpaca's minimum pricing increment requirement.
 
         Returns the raw Alpaca order dict.
         """
         if not self._key_id or not self._secret_key:
             raise AlpacaError("Alpaca credentials not configured")
 
+        qty = int(notional / entry_price) if entry_price > 0 else 0
+        if qty < 1:
+            raise AlpacaError(
+                f"Position size ${notional:.0f} is too small to buy 1 share of {ticker} "
+                f"at ${entry_price:.2f} — minimum required: ${entry_price:.2f}. "
+                f"Increase 'Position size $' in Settings → Paper Trading."
+            )
+        # Alpaca rejects sub-penny increments on limit/stop legs
+        stop_2dp = round(stop_price, 2)
+        tp_2dp = round(take_profit_price, 2)
+
         body: dict[str, Any] = {
             "symbol": ticker,
-            "notional": str(round(notional, 2)),
+            "qty": str(qty),
             "side": side,
             "type": "market",
             "time_in_force": "day",
             "order_class": "bracket",
-            "stop_loss": {"stop_price": str(round(stop_price, 4))},
-            "take_profit": {"limit_price": str(round(take_profit_price, 4))},
+            "stop_loss": {"stop_price": str(stop_2dp)},
+            "take_profit": {"limit_price": str(tp_2dp)},
         }
         _log.info(
-            "alpaca: placing %s %s notional=$%.2f stop=%.4f tp=%.4f",
+            "alpaca: placing %s %s qty=%d (notional=$%.0f @ $%.2f) stop=%.2f tp=%.2f",
             side,
             ticker,
+            qty,
             notional,
-            stop_price,
-            take_profit_price,
+            entry_price,
+            stop_2dp,
+            tp_2dp,
         )
         return self._post("/v2/orders", body)
 
