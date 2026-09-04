@@ -228,3 +228,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 my_temporary_notes
+guide.md
+my_temporary_notes.md

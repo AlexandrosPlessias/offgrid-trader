@@ -1,0 +1,49 @@
+# Fly.io app configuration for offgrid-trader backend (FastAPI + SQLite).
+# Docs: https://fly.io/docs/reference/configuration/
+#
+# One-time setup (run from repo root after `flyctl auth login`):
+#   fly apps create offgrid-trader          # choose a globally-unique name
+#   fly volumes create offgrid_trader_data --region lhr --size 1
+#   fly secrets set \
+#     ADMIN_TOKEN=<strong-random-secret>    \
+#     LLM_PROVIDER=groq                     \
+#     GROQ_API_KEY=gsk_...                  \
+#     LLM_FALLBACK_PROVIDER=gemini          \
+#     GEMINI_API_KEY=AIza...                \
+#     CORS_ORIGINS=https://<your-app>.vercel.app
+#
+# Subsequent deploys are handled by .github/workflows/deploy.yml.
+
+app            = "offgrid-trader"   # ← change to your Fly app name
+primary_region = "lhr"
+
+[build]
+  dockerfile = "infra/backend/Dockerfile"
+  # Build context is the repo root; all COPY paths in the Dockerfile are relative to it.
+
+[env]
+  DATABASE_PATH = "/app/data/offgrid_trader.db"
+  LLM_PROVIDER  = "groq"   # Ollama is not available on Fly; use a cloud provider
+
+[[mounts]]
+  source      = "offgrid_trader_data"
+  destination = "/app/data"
+
+[http_service]
+  internal_port       = 8000
+  force_https         = true
+  auto_stop_machines  = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[http_service.checks]]
+  grace_period = "20s"
+  interval     = "15s"
+  method       = "GET"
+  path         = "/health"
+  timeout      = "5s"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus     = 1
+  memory   = "512mb"

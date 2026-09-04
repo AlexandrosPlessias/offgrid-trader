@@ -1028,10 +1028,7 @@ def fetch_finnhub_news(ticker: str, api_key: str, n: int = 5) -> list[dict[str, 
 
 
 # Google News RSS template — key-free, always available
-_GNEWS_RSS_URL = (
-    "https://news.google.com/rss/search"
-    "?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
-)
+_GNEWS_RSS_URL = "https://news.google.com/rss/search" "?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
 
 
 def fetch_google_news_rss(ticker: str, n: int = 10) -> list[dict[str, Any]]:
@@ -1053,6 +1050,7 @@ def fetch_google_news_rss(ticker: str, n: int = 10) -> list[dict[str, Any]]:
 
     try:
         import calendar
+
         import feedparser  # type: ignore[import-untyped]
     except ImportError:
         _log.warning("gnews: feedparser not installed — Google News RSS disabled")
@@ -1078,18 +1076,22 @@ def fetch_google_news_rss(ticker: str, n: int = 10) -> list[dict[str, Any]]:
                     continue
                 # <source> tag is a dict in feedparser
                 source_meta = entry.get("source") or {}
-                source = source_meta.get("title") if isinstance(source_meta, dict) else "Google News"
+                source = (
+                    source_meta.get("title") if isinstance(source_meta, dict) else "Google News"
+                )
                 # published_parsed → Unix epoch via calendar.timegm
                 dt_epoch: int | None = None
                 if entry.get("published_parsed"):
                     dt_epoch = int(calendar.timegm(entry.published_parsed))
-                result.append({
-                    "headline": headline,
-                    "source": source or "Google News",
-                    "channel": "Google News RSS",
-                    "url": entry.get("link") or "",
-                    "datetime": dt_epoch,
-                })
+                result.append(
+                    {
+                        "headline": headline,
+                        "source": source or "Google News",
+                        "channel": "Google News RSS",
+                        "url": entry.get("link") or "",
+                        "datetime": dt_epoch,
+                    }
+                )
 
             span.set_attribute("article_count", len(result))
             _cache_set(_cache_key, result)
@@ -1141,7 +1143,9 @@ def score_news_sentiment(news: list[dict[str, Any]]) -> dict[str, Any]:
         return _neutral
 
     try:
-        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer  # type: ignore[import-untyped]
+        from vaderSentiment.vaderSentiment import (
+            SentimentIntensityAnalyzer,  # type: ignore[import-untyped]
+        )
     except ImportError:
         _log.warning("score_news_sentiment: vaderSentiment not installed — returning Neutral")
         return _neutral
@@ -1157,8 +1161,12 @@ def score_news_sentiment(news: list[dict[str, Any]]) -> dict[str, Any]:
         if not text:
             continue
         compound = round(sia.polarity_scores(text)["compound"], 4)
-        item_label = "Bullish" if compound > 0.05 else ("Bearish" if compound < -0.05 else "Neutral")
-        scored.append({"headline": item.get("headline", ""), "score": compound, "label": item_label})
+        item_label = (
+            "Bullish" if compound > 0.05 else ("Bearish" if compound < -0.05 else "Neutral")
+        )
+        scored.append(
+            {"headline": item.get("headline", ""), "score": compound, "label": item_label}
+        )
 
     if not scored:
         return _neutral

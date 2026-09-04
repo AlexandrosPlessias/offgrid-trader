@@ -1,0 +1,7 @@
+{
+  "rootDirectory": "frontend",
+  "framework": "vite",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "installCommand": "npm ci"
+}

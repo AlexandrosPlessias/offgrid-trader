@@ -12,6 +12,7 @@ import logging
 
 from backend.alpaca import AlpacaError, get_client
 from backend.database import (
+    get_open_order_by_ticker_side,
     get_paper_order_by_signal,
     get_setting,
     save_paper_order,
@@ -34,7 +35,7 @@ class PaperTradeSkill(Skill):
     can_retry = False
 
     def run(self, ctx: AgentContext) -> SkillResult:
-        if get_setting("paper_trading_enabled", "false") != "true":
+        if get_setting("paper_trading_enabled", "true") != "true":
             return SkillResult(success=True, data={"skipped": True})
 
         if not ctx.actionable:
@@ -65,18 +66,24 @@ class PaperTradeSkill(Skill):
                 )
                 continue
 
-            # PersistSkill stores {ticker: signal_id} on ctx.saved_signal_ids.
-            signal_id: int | None = (
-                ctx.saved_signal_ids.get(opp["ticker"])
-                if hasattr(ctx, "saved_signal_ids")
-                else None
-            )
+            # PersistSkill stores {ticker: signal_id} in ctx.saved_signal_ids (dict).
+            signal_id: int | None = ctx.saved_signal_ids.get(opp["ticker"])
 
-            # Dedup: skip if this signal already has an order.
+            side = "buy" if opp.get("type") == "long" else "sell"
+
+            # Dedup by signal_id (exact match) or by open ticker+side (prevents
+            # duplicate positions across multiple scan runs for the same ticker).
             if signal_id and get_paper_order_by_signal(signal_id):
                 _log.debug(
                     "paper_trade: order already exists for signal %d (%s)",
                     signal_id,
+                    opp["ticker"],
+                )
+                continue
+            if get_open_order_by_ticker_side(opp["ticker"], side):
+                _log.debug(
+                    "paper_trade: open %s %s order already exists — skipping",
+                    side,
                     opp["ticker"],
                 )
                 continue
@@ -87,13 +94,26 @@ class PaperTradeSkill(Skill):
                 _log.warning("paper_trade: skipping %s — missing stop or target", opp["ticker"])
                 continue
 
-            side = "buy" if opp.get("type") == "long" else "sell"
+            entry_price = float(opp.get("entry") or opp.get("price") or 1)
+
+            # Guard: skip if the notional budget can't even buy 1 whole share.
+            if entry_price > 0 and int(notional / entry_price) < 1:
+                _log.warning(
+                    "paper_trade: skipping %s — $%.0f notional too small for "
+                    "1 share at $%.2f (need $%.2f). Increase position size in Settings.",
+                    opp["ticker"],
+                    notional,
+                    entry_price,
+                    entry_price,
+                )
+                continue
 
             try:
                 result = client.place_bracket_order(
                     ticker=opp["ticker"],
                     side=side,
                     notional=notional,
+                    entry_price=entry_price,
                     stop_price=stop,
                     take_profit_price=target,
                 )
@@ -109,6 +129,13 @@ class PaperTradeSkill(Skill):
                         "entry_price": opp.get("entry"),
                         "stop_price": stop,
                         "take_profit_price": target,
+                        # Denormalised signal fields — stored directly so they
+                        # survive even if the signal row is later deleted.
+                        "signal_confidence": opp.get("confidence"),
+                        "signal_source": (
+                            opp.get("source") or "+".join(opp.get("sources") or []) or None
+                        ),
+                        "signal_timestamp": opp.get("timestamp"),
                     }
                 )
                 placed.append(alpaca_order_id or opp["ticker"])
