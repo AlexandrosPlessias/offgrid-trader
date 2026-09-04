@@ -118,6 +118,12 @@ class LLMConfig:
     # Timeout (seconds) for cloud LLM calls
     cloud_timeout: int = field(default_factory=lambda: _env_int("CLOUD_LLM_TIMEOUT", 60))
 
+    # Fallback provider — automatically used when the primary returns HTTP 429.
+    # Both keys can also be overridden at runtime via DB settings
+    # (llm_fallback_provider / llm_fallback_model).
+    fallback_provider: str = field(default_factory=lambda: _env_str("LLM_FALLBACK_PROVIDER", ""))
+    fallback_model: str = field(default_factory=lambda: _env_str("LLM_FALLBACK_MODEL", ""))
+
     # Custom endpoint (only used when provider == "custom")
     custom_base_url: str = field(default_factory=lambda: _env_str("LLM_BASE_URL", ""))
     custom_api_key: str = field(default_factory=lambda: _env_str("LLM_API_KEY", ""))
@@ -284,7 +290,7 @@ class AlpacaConfig:
     """
 
     paper_url: str = field(
-        default_factory=lambda: _env_str("ALPACA_PAPER_URL", "https://paper-api.alpaca.markets")
+        default_factory=lambda: _env_str("ALPACA_PAPER_URL", "https://paper-api.alpaca.markets/v2")
     )
     key_id: str = field(default_factory=lambda: _env_str("ALPACA_API_KEY_ID", ""))
     secret_key: str = field(default_factory=lambda: _env_str("ALPACA_API_SECRET_KEY", ""))
@@ -332,11 +338,10 @@ class Settings:
         default_factory=lambda: _env_str("SCHEDULER_AUTO_START", "false").lower() == "true"
     )
 
-    # Admin token — used to gate GET /settings/llm/key (key-reveal endpoint).
-    # Set ADMIN_TOKEN in .env to choose your own password.
-    # If not set, a random UUID is auto-generated at first startup and stored
-    # in the DB (key: admin_token); it is also logged once so you can retrieve
-    # it from `docker logs offgrid-trader-backend`.
+    # Admin token — gates the entire API via AdminTokenMiddleware.
+    # Set ADMIN_TOKEN in .env (or via `fly secrets set`) for all deployments
+    # accessible over the internet.  When empty, the middleware is a no-op
+    # (all routes are open — safe for local/dev use only).
     admin_token: str = field(default_factory=lambda: _env_str("ADMIN_TOKEN", ""))
 
     finnhub_api_key: str = field(default_factory=lambda: _env_str("FINNHUB_API_KEY", ""))
