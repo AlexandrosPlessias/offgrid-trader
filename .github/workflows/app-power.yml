@@ -1,0 +1,94 @@
+name: App Power
+
+# Manually take the app offline or bring it back online.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Take the app offline (stop) or bring it back online (start)'
+        required: true
+        type: choice
+        options: [stop, start]
+      confirm:
+        description: 'Type the app name to confirm: offgrid-trader'
+        required: true
+        type: string
+
+env:
+  FLY_APP: offgrid-trader
+
+jobs:
+  check:
+    name: Validate confirmation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify app name
+        run: |
+          if [ "${{ inputs.confirm }}" != "$FLY_APP" ]; then
+            echo "Confirmation does not match '$FLY_APP'. Aborting."
+            exit 1
+          fi
+
+  backend:
+    name: Backend → Fly.io
+    needs: check
+    runs-on: ubuntu-latest
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # min_machines_running = 0 in fly.toml keeps machines from auto-restarting.
+      - name: Stop machines
+        if: inputs.action == 'stop'
+        run: flyctl scale count 0 -a "$FLY_APP" --yes
+
+      - name: Redeploy
+        if: inputs.action == 'start'
+        run: flyctl deploy --remote-only -a "$FLY_APP"
+
+  frontend:
+    name: Frontend → Vercel
+    needs: check
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Remove production deployment
+        if: inputs.action == 'stop'
+        run: |
+          PROD_URL=$(vercel ls "$FLY_APP" --prod --token=${{ secrets.VERCEL_TOKEN }} 2>/dev/null \
+            | grep -o 'https://[^ ]*' | head -1)
+          if [ -z "$PROD_URL" ]; then
+            echo "No production deployment found — already offline."
+            exit 0
+          fi
+          echo "Removing $PROD_URL"
+          vercel remove "$PROD_URL" --yes --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Pull Vercel environment
+        if: inputs.action == 'start'
+        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: frontend
+
+      - name: Build
+        if: inputs.action == 'start'
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: frontend
+
+      - name: Deploy pre-built output
+        if: inputs.action == 'start'
+        run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: frontend
