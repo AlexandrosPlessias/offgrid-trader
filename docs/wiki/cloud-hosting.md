@@ -215,6 +215,10 @@ The script:
 3. Prompts once for your Vercel personal access token (create at
    **https://vercel.com/account/tokens**) and sets `VERCEL_TOKEN`.
 
+> Create the token under **Account Settings → Tokens**, scoped to your team.
+> Tokens created elsewhere (for example project-level tokens) are rejected — the
+> CLI cannot read project settings with them, and `vercel pull` fails in CI.
+
 Verify:
 
 ```bash
