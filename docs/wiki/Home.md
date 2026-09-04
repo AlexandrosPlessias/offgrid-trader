@@ -27,9 +27,13 @@ AlertSkill        → optional Gmail SMTP · Telegram bot
 MemoryLayer       → update ticker_memory for next scan
 ```
 
-The **Orchestrator** sorts watchlist tickers by scan staleness and caps concurrency at 3 (respects Ollama VRAM). Results are visible in the React UI (Dashboard · Explorer · Learn · Settings) and via the REST API. Live progress streams via SSE — including `retry` and `memory` events.
+The **Orchestrator** sorts watchlist tickers by scan staleness and caps concurrency at 3 (respects Ollama VRAM). Results are visible in the React UI and via the REST API. Live progress streams via SSE — including `retry` and `memory` events.
 
-After each scan, the scheduler syncs open Alpaca paper orders (status, fill price, P&L) back to the local DB. The **Dashboard** shows a live watchlist price table (Price · Chg% · VWAP · Vol · H/L) updated every 30 s during market hours and a collapsible **Paper Orders** sidebar with account equity, positions, and recent orders.
+**Navigation:**
+- **Left (primary):** Dashboard · Explorer · Trading · Learn
+- **Right (secondary):** Backtesting · Logs · Portainer · ⚙ Settings
+
+After each scan, the scheduler syncs open Alpaca paper orders (status, fill price, P&L) back to the local DB. The **Dashboard** shows a live watchlist price table (Price · Chg% · VWAP · Vol · H/L) updated every 30 s during market hours and a collapsible **Paper Orders** sidebar for quick order glances. The dedicated **Trading** tab provides the full paper-trading dashboard: account metrics, portfolio equity curve, insight charts (Orders by Status, Max Gain/Loss, Confidence, Realised P&L), open positions table, and a full orders table with expandable per-row detail.
 
 ---
 
@@ -43,9 +47,13 @@ After each scan, the scheduler syncs open Alpaca paper orders (status, fill pric
 |---|---|
 | ![Explorer](../screenshots/02-explorer.png) | ![Settings](../screenshots/05-settings.png) |
 
-| Paper Orders sidebar | Paper Trading settings |
+| Paper Orders sidebar (Dashboard) | Trading page — account + charts |
 |---|---|
-| ![Paper Orders sidebar](../screenshots/11-dashboard-paper-orders.png) | ![Paper Trading settings](../screenshots/12-settings-paper-trading.png) |
+| ![Paper Orders sidebar](../screenshots/11-dashboard-paper-orders.png) | ![Trading page](../screenshots/13-trading-page.png) |
+
+| Trading page — orders table | Signal card with order status |
+|---|---|
+| ![Orders table](../screenshots/14-trading-orders.png) | ![Signal card](../screenshots/15-signal-card-order.png) |
 
 ### Explorer — section walkthrough (AAPL)
 

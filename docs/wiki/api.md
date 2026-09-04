@@ -689,6 +689,43 @@ curl http://localhost:8010/paper/positions
 
 ---
 
+### `POST /paper/orders/place`
+
+Manually place a bracket order for a given signal or opportunity. Respects the same deduplication rules as the scheduler (`signal_id` match **or** open `ticker+side` match). Returns `placed: false` with a `reason` instead of erroring when a duplicate is detected.
+
+```bash
+curl -X POST http://localhost:8010/paper/orders/place \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ticker":"NVDA","side":"buy","entry":226.05,"stop":219.26,"target":239.61}'
+```
+
+**Request body:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `ticker` | string | ✓ | Stock symbol |
+| `side` | `"buy"` \| `"sell"` | ✓ | Direction |
+| `entry` | float | ✓ | Entry price — used to compute `qty = floor(notional / entry)` |
+| `stop` | float | ✓ | Stop-loss price (rounded to 2 dp) |
+| `target` | float | ✓ | Take-profit price (rounded to 2 dp) |
+| `notional` | float | — | Position size in $ (defaults to Settings value) |
+| `signal_id` | int | — | Links order to a stored signal for dedup |
+
+**Response (success):**
+```json
+{"placed": true, "alpaca_order_id": "abc123", "status": "accepted"}
+```
+
+**Response (dedup blocked):**
+```json
+{"placed": false, "reason": "ticker_open", "detail": "An open buy order for NVDA already exists"}
+```
+
+**Errors:** `400` paper trading disabled · `502` Alpaca API error (e.g. budget too small for 1 share)
+
+---
+
 ### `POST /paper/orders/{order_id}/cancel`
 
 Cancel a pending order by its local DB id. Calls `DELETE /v2/orders/{alpaca_id}` on Alpaca then updates the local status.
