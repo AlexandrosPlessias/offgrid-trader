@@ -43,6 +43,13 @@ echo "Vercel personal access token cannot be read back from the CLI."
 echo "Create one at: https://vercel.com/account/tokens"
 read -rsp "Paste token here (input hidden): " VERCEL_TOKEN
 echo
+# Rejects tokens that cannot read project settings (e.g. project-level tokens).
+if ! vercel whoami --token "$VERCEL_TOKEN" >/dev/null 2>&1; then
+  echo "ERROR: Not a valid Vercel account token."
+  echo "       Create one under Account Settings → Tokens:"
+  echo "       https://vercel.com/account/tokens (scope it to the 'offgrid-trader' team)"
+  exit 1
+fi
 gh secret set VERCEL_TOKEN --body "$VERCEL_TOKEN" --repo "$REPO"
 echo "  ✓ VERCEL_TOKEN"
 
