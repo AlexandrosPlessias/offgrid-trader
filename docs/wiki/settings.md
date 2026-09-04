@@ -55,9 +55,15 @@ environment-derived configuration and clears saved UI overrides when saved.
 | `LLM_API_KEY` | *(unset)* | ✓ (Settings page) | API key for `custom` provider. |
 | `LLM_MODEL` | *(unset)* | ✓ (Settings page) | Model name for `custom` provider. |
 | `llm_reasoning_effort` (DB setting only) | `none` | ✓ (Settings page or `POST /settings/llm`) | Reasoning effort (`none`/`low`/`medium`/`high`) sent to Groq/Mistral always, and to Gemini only when non-default (Gemini 3.x rejects `none`). |
+| `LLM_FALLBACK_PROVIDER` | *(unset)* | ✓ (Settings page or `POST /settings/llm`) | Provider to use automatically when the primary provider returns HTTP 429. Same values as `LLM_PROVIDER`. Leave blank to disable fallback. |
+| `LLM_FALLBACK_MODEL` | *(unset)* | ✓ (Settings page or `POST /settings/llm`) | Model to use with the fallback provider. Leave blank to use that provider's default model. |
 | `CLOUD_LLM_TIMEOUT` | `60` | ✗ | Seconds to wait for a cloud provider response. |
 
 **`make infra` auto-skip:** when `LLM_PROVIDER ≠ ollama`, Ollama containers are skipped automatically (saves RAM/VRAM). Override: `bash infra/start-infra.sh --with-ollama`.
+
+> **Security note:** `GET /settings` never returns the `admin_token` value (or any raw
+> API key). API keys are stored in the DB and only exposed as boolean "is set" flags.
+> See [Security](security.md) for the full auth design.
 
 ---
 

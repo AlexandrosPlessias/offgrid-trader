@@ -120,7 +120,7 @@ async def sync_paper_orders() -> None:
     Runs in the background every scan cycle.  Skipped when paper trading
     is disabled or no Alpaca credentials are configured.
     """
-    if get_setting("paper_trading_enabled", "false") != "true":
+    if get_setting("paper_trading_enabled", "true") != "true":
         return
 
     from .alpaca import AlpacaError, get_client  # local import — avoids startup cost
@@ -163,6 +163,7 @@ class MonitorScheduler:
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self.last_run: str | None = None
+        self.next_run: str | None = None
         self.running = False
 
     async def _loop(self) -> None:
@@ -177,7 +178,8 @@ class MonitorScheduler:
                     _log.info("market open — scanning %d tickers", len(tickers))
                     try:
                         results = await scan_watchlist(send_alerts=True)
-                        self.last_run = datetime.now(settings.market_hours.tzinfo).isoformat()
+                        now = datetime.now(settings.market_hours.tzinfo)
+                        self.last_run = now.isoformat()
                         total = sum(len(r.get("actionable", [])) for r in results)
                         _log.info("scan complete — %d actionable signal(s)", total)
                     except Exception as exc:  # pragma: no cover - defensive
@@ -201,6 +203,11 @@ class MonitorScheduler:
                     )
                     * 60,
                 )
+                from datetime import timedelta
+
+                self.next_run = (
+                    datetime.now(settings.market_hours.tzinfo) + timedelta(seconds=interval_seconds)
+                ).isoformat()
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=interval_seconds)
                 except asyncio.TimeoutError:
@@ -237,6 +244,7 @@ class MonitorScheduler:
             "running": self.running,
             "market_open": is_market_open(),
             "last_run": self.last_run,
+            "next_run": self.next_run,
             "scan_interval_minutes": effective_interval,
             "watchlist": get_effective_watchlist(),
         }

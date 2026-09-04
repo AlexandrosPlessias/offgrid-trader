@@ -198,7 +198,84 @@ before use:
 
 ---
 
+## Quota fallback (automatic provider switching)
+
+If a provider returns **HTTP 429** (rate-limit or daily quota exceeded), the backend
+automatically retries the same prompt on a second **fallback** provider — no manual
+action needed, no analysis is lost.
+
+### How it works
+
+```
+call_llm()
+  1. Try primary provider (e.g. Groq)
+     ↳ HTTP 429  → raises QuotaError
+  2. Warning logged: "provider 'groq' quota hit — trying next"
+  3. Try fallback provider (e.g. Gemini)
+     ↳ success → return result as normal
+```
+
+`QuotaError` is the only exception that triggers the fallback chain. Any other
+`LLMError` (authentication failure, network timeout, bad JSON) surfaces immediately
+without retrying — so misconfigurations are not silently hidden.
+
+### Configuring via the Settings page
+
+1. Open **Settings → 🧠 AI Provider**.
+2. Scroll to the **Fallback provider** section below the primary settings.
+3. Select a provider from the **Fallback provider** dropdown (e.g. *Gemini*).
+4. Optionally set a **Fallback model** (leave blank to use that provider's default).
+5. Paste the fallback provider's API key in the **API Key** field *after switching the
+   primary provider dropdown to the fallback provider temporarily*, then switch back.
+   (Alternatively, set `GEMINI_API_KEY` in `.env` — the fallback key is picked up from
+   the same env-var fields as the primary.)
+6. Click **Save AI Provider settings**.
+
+> The fallback provider **must** have its own API key configured (either via `.env` or
+> the Settings page). Selecting a fallback without a key will cause the fallback call
+> to fail with an auth error.
+
+### Configuring via `.env`
+
+```bash
+# Primary provider
+LLM_PROVIDER=groq
+GROQ_API_KEY=gsk_...
+
+# Fallback — used automatically when primary returns HTTP 429
+LLM_FALLBACK_PROVIDER=gemini
+LLM_FALLBACK_MODEL=gemini-3.5-flash-lite   # optional — leave blank for provider default
+GEMINI_API_KEY=AIza...
+```
+
+### Fly.io / cloud deployment
+
+Set both primary and fallback secrets in one `fly secrets set` command:
+
+```bash
+fly secrets set \
+  LLM_PROVIDER=groq \
+  GROQ_API_KEY=gsk_... \
+  LLM_FALLBACK_PROVIDER=gemini \
+  GEMINI_API_KEY=AIza... \
+  LLM_FALLBACK_MODEL=gemini-3.5-flash-lite
+```
+
+### Which errors trigger fallback vs. fail fast?
+
+| Error type | Behaviour |
+|---|---|
+| HTTP 429 / `RateLimitError` | Fallback triggered → `QuotaError` |
+| HTTP 401 / auth failure | Fail immediately (`LLMError`) |
+| HTTP 5xx / server error | Fail immediately (`LLMError`) |
+| Network timeout / connection refused | Fail immediately (`LLMError`) |
+| Invalid JSON in response | Fail immediately (`LLMError`) |
+
+---
+
 ## Related pages
 
 - [Settings reference](settings.md) — full variable reference including all AI Provider fields
 - [Architecture](architecture.md) — how the LLM call fits into the pipeline
+- [Cloud hosting](cloud-hosting.md) — step-by-step Fly.io + Vercel account guide
+- [Security](security.md) — admin token, login screen, key masking

@@ -1,11 +1,27 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import {
   ResponsiveContainer,
   BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ReferenceLine,
   AreaChart, Area, CartesianGrid,
+  PieChart, Pie, Legend,
+  LineChart, Line,
 } from 'recharts'
 
-const API = '/api'
+const API = import.meta.env.VITE_API_URL ?? '/api'
+
+/** Return auth headers for every API call. Reads from sessionStorage so it is
+ *  always current without needing React state. */
+function getAuthHeaders() {
+  const token = sessionStorage.getItem('admin_token')
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+/** Called whenever the backend returns HTTP 401.
+ *  Clears the stored token and fires a DOM event so App re-renders the login screen. */
+function signal401() {
+  sessionStorage.removeItem('admin_token')
+  window.dispatchEvent(new CustomEvent('auth-expired'))
+}
 
 // ─── SSE stream reader ────────────────────────────────────────────────────────
 // Reads a POST SSE stream and yields parsed JSON payloads.
@@ -14,10 +30,11 @@ const API = '/api'
 async function* readSSEStream(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
     body: JSON.stringify(body),
   })
   if (!res.ok) {
+    if (res.status === 401) { if (sessionStorage.getItem('admin_token')) signal401(); throw new Error('Unauthorized') }
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail ?? `HTTP ${res.status}`)
   }
@@ -139,7 +156,10 @@ function usePolling(path, intervalMs = 0) {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(API + path)
+      const res = await fetch(API + path, { headers: getAuthHeaders() })
+      // Only force re-login if we actually had a token — prevents stale pre-login
+      // requests from wiping a token the user set while the request was in-flight.
+      if (res.status === 401) { if (sessionStorage.getItem('admin_token')) signal401(); return }
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       setData(await res.json())
       setError(null)
@@ -419,7 +439,7 @@ function PriceHistoryChart({ ticker }) {
     setLoading(true)
     setHistError(null)
     try {
-      const res = await fetch(`${API}/market-data/${ticker}/history`)
+      const res = await fetch(`${API}/market-data/${ticker}/history`, { headers: getAuthHeaders() })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setHistory(data.candles ?? [])
@@ -596,9 +616,22 @@ function fmtTokens(n) {
   return String(n)
 }
 
-function Header({ health, usage, btTodayTokens = 0, activeView, onViewChange }) {
+function Header({ health, usage, btTodayTokens = 0, activeView, onViewChange, clock }) {
   const ok   = health?.status === 'ok'
   const open = health?.scheduler?.market_open
+
+  // Countdown helper shared with the header market pill
+  const fmtCountdown = (isoStr) => {
+    if (!isoStr) return null
+    const diffMs = new Date(isoStr) - Date.now()
+    if (diffMs <= 0) return null
+    const totalMin = Math.floor(diffMs / 60000)
+    const h = Math.floor(totalMin / 60)
+    const m = totalMin % 60
+    return h > 0 ? `${h}h ${m}m` : `${m}m`
+  }
+  const closeIn = clock?.is_open  && clock?.next_close ? fmtCountdown(clock.next_close) : null
+  const openIn  = !clock?.is_open && clock?.next_open  ? fmtCountdown(clock.next_open)  : null
 
   // Model label — provider + model from /health
   const provider  = health?.llm_provider ?? null
@@ -652,16 +685,16 @@ function Header({ health, usage, btTodayTokens = 0, activeView, onViewChange }) 
             Explorer
           </button>
           <button
+            className={`nav-tab ${activeView === 'paper' ? 'active' : ''}`}
+            onClick={() => onViewChange('paper')}
+          >
+            Trading
+          </button>
+          <button
             className={`nav-tab ${activeView === 'education' ? 'active' : ''}`}
             onClick={() => onViewChange('education')}
           >
             Learn
-          </button>
-          <button
-            className={`nav-tab ${activeView === 'backtest' ? 'active' : ''}`}
-            onClick={() => onViewChange('backtest')}
-          >
-            Backtesting
           </button>
         </nav>
 
@@ -681,9 +714,13 @@ function Header({ health, usage, btTodayTokens = 0, activeView, onViewChange }) 
           {health && (
             <span
               className={`live-chip ${open ? 'live-chip-market-open' : 'live-chip-market-closed'}`}
-              title={open ? 'US equity market is currently open' : 'US equity market is currently closed'}
+              title={open
+                ? (closeIn ? `Closes in ${closeIn}` : 'US equity market is currently open')
+                : (openIn  ? `Opens in ${openIn}`   : 'US equity market is currently closed')}
             >
-              {open ? '🟢 Market Open' : '🔴 Market Closed'}
+              {open ? '🟢 US Market Open' : '🔴 US Market Closed'}
+              {open  && closeIn && <span style={{ fontWeight: 400, opacity: 0.75, marginLeft: 5 }}>· closes in {closeIn}</span>}
+              {!open && openIn  && <span style={{ fontWeight: 400, opacity: 0.75, marginLeft: 5 }}>· opens in {openIn}</span>}
             </span>
           )}
           {health && modelLabel && (
@@ -708,13 +745,25 @@ function Header({ health, usage, btTodayTokens = 0, activeView, onViewChange }) 
       </div>
       <div className="header-right">
         <div className="header-tools">
+          <button
+            className={`nav-tab ${activeView === 'backtest' ? 'active' : ''}`}
+            onClick={() => onViewChange('backtest')}
+            style={{ fontSize: 12 }}
+          >
+            Backtesting
+          </button>
           <a href="http://localhost:18889" target="_blank" rel="noreferrer" className="tool-btn" title="Aspire — traces & logs">Logs</a>
           <a href="http://localhost:9000"  target="_blank" rel="noreferrer" className="tool-btn" title="Portainer — container management">Portainer</a>
           <button
             className={`tool-btn ${activeView === 'settings' ? 'tool-btn-active' : ''}`}
             onClick={() => onViewChange('settings')}
             title="Settings"
-          >⚙️</button>
+            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '3px 8px' }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 15.5A3.5 3.5 0 0 1 8.5 12 3.5 3.5 0 0 1 12 8.5a3.5 3.5 0 0 1 3.5 3.5 3.5 3.5 0 0 1-3.5 3.5m7.43-2.92c.04-.34.07-.69.07-1.08s-.03-.74-.07-1.08l2.33-1.82c.21-.17.27-.46.14-.7l-2.2-3.82c-.14-.24-.42-.32-.66-.24l-2.74 1.1c-.57-.44-1.18-.8-1.84-1.08l-.42-2.9c-.04-.26-.27-.46-.54-.46H9.5c-.27 0-.5.2-.54.46l-.42 2.9c-.66.28-1.27.64-1.84 1.08l-2.74-1.1c-.24-.08-.52 0-.66.24l-2.2 3.82c-.14.24-.07.53.14.7L3.57 10c-.04.34-.07.69-.07 1.08s.03.74.07 1.08L1.24 13.98c-.21.17-.27.46-.14.7l2.2 3.82c.14.24.42.32.66.24l2.74-1.1c.57.44 1.18.8 1.84 1.08l.42 2.9c.04.26.27.46.54.46h4.4c.27 0 .5-.2.54-.46l.42-2.9c.66-.28 1.27-.64 1.84-1.08l2.74 1.1c.24.08.52 0 .66-.24l2.2-3.82c.14-.24.07-.53-.14-.7l-2.33-1.9z"/>
+            </svg>
+          </button>
         </div>
       </div>
     </header>
@@ -723,7 +772,7 @@ function Header({ health, usage, btTodayTokens = 0, activeView, onViewChange }) 
 
 // ─── Watchlist card ───────────────────────────────────────────────────────────
 
-function WatchlistCard({ wl, onWatchlistChange }) {
+function WatchlistCard({ wl, onWatchlistChange, signals }) {
   const [newTicker,  setNewTicker]  = useState('')
   const [adding,     setAdding]     = useState(false)
   const [snapshots,  setSnapshots]  = useState({})   // ticker → normalised snapshot
@@ -737,7 +786,7 @@ function WatchlistCard({ wl, onWatchlistChange }) {
     if (!tickers.length) return
     setSnapLoading(true)
     try {
-      const r = await fetch(`${API}/paper/market/snapshots?symbols=${tickers.join(',')}`)
+      const r = await fetch(`${API}/paper/market/snapshots?symbols=${tickers.join(',')}`, { headers: getAuthHeaders() })
       if (!r.ok) throw new Error()
       const d = await r.json()
       setSnapshots(d.snapshots ?? {})
@@ -760,7 +809,9 @@ function WatchlistCard({ wl, onWatchlistChange }) {
 
   if (!wl) return <div className="card skeleton" style={{ minHeight: 100 }} />
 
-  const { scan_interval_minutes, scheduler } = wl
+  const scheduler = wl.scheduler
+  // Prefer the scheduler's live DB value; fall back to the env-default top-level field
+  const scan_interval_minutes = scheduler?.scan_interval_minutes ?? wl.scan_interval_minutes
 
   const addTicker = async () => {
     const t = newTicker.trim().toUpperCase()
@@ -769,7 +820,7 @@ function WatchlistCard({ wl, onWatchlistChange }) {
     try {
       await fetch(`${API}/watchlist`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ ticker: t }),
       })
       setNewTicker('')
@@ -780,7 +831,7 @@ function WatchlistCard({ wl, onWatchlistChange }) {
   }
 
   const removeTicker = async (ticker) => {
-    await fetch(`${API}/watchlist/${ticker}`, { method: 'DELETE' })
+    await fetch(`${API}/watchlist/${ticker}`, { method: 'DELETE', headers: getAuthHeaders() })
     onWatchlistChange()
   }
 
@@ -812,7 +863,7 @@ function WatchlistCard({ wl, onWatchlistChange }) {
         {snapError && <span style={{ fontSize: 10, color: 'var(--dim)', marginLeft: 6 }}>· no live prices</span>}
         {!marketOpen && hasLiveData && (
           <span style={{ fontSize: 10, color: 'var(--dim)', marginLeft: 8, fontStyle: 'italic' }}>
-            ⚫ market closed · prices from last session
+            prices from last session
           </span>
         )}
       </div>
@@ -896,6 +947,26 @@ function WatchlistCard({ wl, onWatchlistChange }) {
           disabled={adding || !newTicker.trim()}
         >+</button>
       </div>
+      {/* Last signal detection timestamp */}
+      {(() => {
+        const rows = signals?.signals ?? []
+        const latest = rows[0]
+        if (!latest?.created_at) return null
+        return (
+          <div style={{ fontSize: 10, color: 'var(--dim)', marginTop: 8, paddingTop: 6, borderTop: '1px solid var(--border)', display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span>🔔 Last signal:</span>
+            <span title={latest.created_at} style={{ color: 'var(--fg)' }}>
+              {new Date(latest.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+            </span>
+            <span>·</span>
+            <span style={{ color: 'var(--fg)' }}>{latest.ticker}</span>
+            <span>·</span>
+            <span style={{ color: latest.type === 'long' ? 'var(--green)' : 'var(--red)' }}>{latest.type}</span>
+            <span>·</span>
+            <span>{latest.confidence}% conf</span>
+          </div>
+        )
+      })()}
     </section>
   )
 }
@@ -1034,6 +1105,31 @@ function LLMReasoning({ analysis, defaultOpen = false }) {
 // ─── Analysis result ─────────────────────────────────────────────────────────
 
 function AnalysisResult({ result, onExplore }) {
+  const [orderStates, setOrderStates] = useState({}) // { index: null|'placing'|'placed'|'exists'|errorStr }
+
+  const placeOrderFromResult = async (opp, idx) => {
+    setOrderStates(s => ({ ...s, [idx]: 'placing' }))
+    try {
+      const res = await fetch(`${API}/paper/orders/place`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({
+          ticker:             result.ticker,
+          side:               opp.type === 'long' ? 'buy' : 'sell',
+          entry:              opp.entry ?? opp.price,
+          stop:               opp.stop,
+          target:             opp.target,
+          signal_confidence:  opp.confidence ?? null,
+          signal_source:      opp.source ?? (opp.sources ? opp.sources.join('+') : null),
+          signal_timestamp:   opp.timestamp ?? null,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) setOrderStates(s => ({ ...s, [idx]: data.detail ?? 'Error' }))
+      else setOrderStates(s => ({ ...s, [idx]: data.placed ? 'placed' : 'exists' }))
+    } catch { setOrderStates(s => ({ ...s, [idx]: 'Error' })) }
+  }
+
   // result is the SSE type:"result" payload — includes market_data
   const {
     ticker,
@@ -1066,25 +1162,51 @@ function AnalysisResult({ result, onExplore }) {
             <thead>
               <tr>
                 <th>Type</th><th>Conf</th><th>Price</th>
-                <th>Entry</th><th>Stop</th><th>Target</th><th>Source</th>
+                <th>Entry</th><th>Stop</th><th>Target</th><th>Source</th><th></th>
               </tr>
             </thead>
             <tbody>
-              {actionable.map((opp, i) => (
-                <tr key={i}>
-                  <td>
-                    <span className={`badge ${opp.type}`}>{opp.type?.toUpperCase() ?? '—'}</span>
-                  </td>
-                  <td>{(opp.confidence ?? 0).toFixed(0)}%</td>
-                  <td>{opp.price?.toFixed(2) ?? '—'}</td>
-                  <td>{opp.entry?.toFixed(2) ?? '—'}</td>
-                  <td>{opp.stop?.toFixed(2) ?? '—'}</td>
-                  <td>{opp.target?.toFixed(2) ?? '—'}</td>
-                  <td className="text-dim source-cell">
-                    {opp.source ?? (opp.sources ?? []).join('+') ?? '—'}
-                  </td>
-                </tr>
-              ))}
+              {actionable.map((opp, i) => {
+                const os = orderStates[i]
+                const canPlace = opp.stop != null && opp.target != null
+                return (
+                  <tr key={i}>
+                    <td>
+                      <span className={`badge ${opp.type}`}>{opp.type?.toUpperCase() ?? '—'}</span>
+                    </td>
+                    <td>{(opp.confidence ?? 0).toFixed(0)}%</td>
+                    <td>{opp.price?.toFixed(2) ?? '—'}</td>
+                    <td>{opp.entry?.toFixed(2) ?? '—'}</td>
+                    <td>{opp.stop?.toFixed(2) ?? '—'}</td>
+                    <td>{opp.target?.toFixed(2) ?? '—'}</td>
+                    <td className="text-dim source-cell">
+                      {opp.source ?? (opp.sources ?? []).join('+') ?? '—'}
+                    </td>
+                    <td>
+                      {canPlace && os !== 'placed' && os !== 'exists' && (
+                        <button
+                          onClick={() => placeOrderFromResult(opp, i)}
+                          disabled={os === 'placing'}
+                          style={{
+                            fontSize: 10, padding: '2px 8px', borderRadius: 4,
+                            cursor: os === 'placing' ? 'wait' : 'pointer',
+                            background: 'color-mix(in srgb, var(--accent) 12%, transparent)',
+                            border: '1px solid color-mix(in srgb, var(--accent) 30%, transparent)',
+                            color: 'var(--accent)', fontWeight: 600, whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {os === 'placing' ? '⏳' : '📈 Place'}
+                        </button>
+                      )}
+                      {os === 'placed'  && <span style={{ fontSize: 10, color: 'var(--green)' }}>✓ Placed</span>}
+                      {os === 'exists'  && <span style={{ fontSize: 10, color: 'var(--dim)'   }}>Already exists</span>}
+                      {os && !['placing','placed','exists'].includes(os) && (
+                        <span style={{ fontSize: 10, color: 'var(--red)' }} title={os}>✗ Error</span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -1234,7 +1356,7 @@ function SignalDetail({ signal, onClose }) {
 
   useEffect(() => {
     setLoading(true)
-    fetch(`${API}/analysis/${signal.ticker}?limit=5`)
+    fetch(`${API}/analysis/${signal.ticker}?limit=5`, { headers: getAuthHeaders() })
       .then(r => r.json())
       .then(data => {
         const history = data.history ?? []
@@ -1283,10 +1405,36 @@ const SOURCE_LABEL = {
   macro_regime:      'Macro',
 }
 
-function SignalCard({ r, expanded, onToggle, onDelete }) {
+function SignalCard({ r, expanded, onToggle, onDelete, existingOrder = null }) {
   const isLong   = r.type === 'long'
   const conf     = r.confidence ?? 0
   const modelTag = r.llm_model || null
+  const [orderState, setOrderState] = useState(null) // null | 'placing' | 'placed' | 'exists' | string(error)
+
+  const placeOrder = async (e) => {
+    e.stopPropagation()
+    setOrderState('placing')
+    try {
+      const res = await fetch(`${API}/paper/orders/place`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({
+          ticker:             r.ticker,
+          side:               r.type === 'long' ? 'buy' : 'sell',
+          entry:              r.entry ?? r.price,
+          stop:               r.stop,
+          target:             r.target,
+          signal_id:          r.id,
+          signal_confidence:  r.confidence ?? null,
+          signal_source:      r.source ?? (r.sources ? r.sources.join('+') : null),
+          signal_timestamp:   r.timestamp ?? null,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) setOrderState(data.detail ?? 'Error')
+      else setOrderState(data.placed ? 'placed' : 'exists')
+    } catch { setOrderState('Error') }
+  }
 
   // ── R:R context ──────────────────────────────────────────────────────────
   // For a long: risk = entry − stop (positive), reward = target − entry
@@ -1420,14 +1568,27 @@ function SignalCard({ r, expanded, onToggle, onDelete }) {
         </div>
       )}
 
-      {/* source chips */}
-      {r.source && (
-        <div className="signal-sources">
-          {r.source.split('+').map(s => (
-            <span key={s} className="signal-chip">{SOURCE_LABEL[s.trim()] ?? s.trim()}</span>
-          ))}
-        </div>
-      )}
+      {/* source chips + LLM/Rules badge on the same row */}
+      <div className="signal-sources">
+        {r.source && r.source.split('+').map(s => (
+          <span key={s} className="signal-chip">{SOURCE_LABEL[s.trim()] ?? s.trim()}</span>
+        ))}
+        <span
+          title={r.llm_model ? `AI model: ${r.llm_model}` : 'Signal generated by rule-based engine (no LLM)'}
+          style={{
+            marginLeft: 'auto',
+            fontSize: 9, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase',
+            padding: '2px 6px', borderRadius: 4, flexShrink: 0,
+            background: r.llm_model
+              ? 'color-mix(in srgb, var(--accent) 15%, transparent)'
+              : 'color-mix(in srgb, var(--dim) 10%, transparent)',
+            color: r.llm_model ? 'var(--accent)' : 'var(--dim)',
+            border: `1px solid ${r.llm_model ? 'color-mix(in srgb, var(--accent) 30%, transparent)' : 'color-mix(in srgb, var(--dim) 20%, transparent)'}`,
+          }}
+        >
+          {r.llm_model ? '🤖 LLM' : '📐 Rules'}
+        </span>
+      </div>
 
       {/* expanded: LLM reasoning */}
       {expanded && r.llm_analysis && (
@@ -1437,34 +1598,88 @@ function SignalCard({ r, expanded, onToggle, onDelete }) {
         </div>
       )}
 
-      {modelTag && (
-        <span className="signal-model-bubble" title={`Model: ${modelTag}`}>{modelTag}</span>
+      {/* Manual place order — centred, shows existing order status when one exists */}
+      {r.stop != null && r.target != null && (
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 6 }}>
+          {existingOrder && orderState == null ? (
+            /* Order already exists — show status as disabled badge */
+            <button
+              disabled
+              title={`Alpaca order: ${existingOrder.alpaca_order_id ?? '—'}`}
+              style={{
+                fontSize: 11, padding: '3px 12px', borderRadius: 5, cursor: 'default', fontWeight: 600,
+                background: 'color-mix(in srgb, var(--dim) 10%, transparent)',
+                border: '1px solid color-mix(in srgb, var(--dim) 25%, transparent)',
+                color: 'var(--dim)', opacity: 0.85,
+              }}
+            >
+              📋 {(existingOrder.status ?? 'order placed').replace(/_/g, ' ').toUpperCase()}
+            </button>
+          ) : (
+            <>
+              {orderState !== 'placed' && orderState !== 'exists' && (
+                <button
+                  onClick={placeOrder}
+                  disabled={orderState === 'placing'}
+                  style={{
+                    fontSize: 11, padding: '3px 12px', borderRadius: 5,
+                    cursor: orderState === 'placing' ? 'wait' : 'pointer',
+                    background: 'color-mix(in srgb, var(--accent) 12%, transparent)',
+                    border: '1px solid color-mix(in srgb, var(--accent) 30%, transparent)',
+                    color: 'var(--accent)', fontWeight: 600,
+                  }}
+                >
+                  {orderState === 'placing' ? '⏳ Placing…' : '📈 Place Paper Order'}
+                </button>
+              )}
+              {orderState === 'placed' && <span style={{ fontSize: 11, color: 'var(--green)' }}>✓ Order placed</span>}
+              {orderState === 'exists'  && <span style={{ fontSize: 11, color: 'var(--dim)' }}>ℹ Order already exists</span>}
+              {orderState && !['placing','placed','exists'].includes(orderState) && (
+                <span style={{ fontSize: 11, color: 'var(--red)' }}>✗ {orderState}</span>
+              )}
+            </>
+          )}
+        </div>
       )}
+
     </div>
   )
 }
 
-function SignalsTable({ signals, reload }) {
+function SignalsTable({ signals, reload, signalOrderMap = {} }) {
   const [open,         setOpen]         = useState(false)
-  const [filterSide,   setFilterSide]   = useState('all')
-  const [filterConf,   setFilterConf]   = useState(0)
-  const [filterTicker, setFilterTicker] = useState('')
-  const [expanded,     setExpanded]     = useState(null)
+  const [filterSide,     setFilterSide]     = useState('all')
+  const [filterConf,     setFilterConf]     = useState(null)   // null = data min (no filter)
+  const [filterMaxPrice, setFilterMaxPrice] = useState(null)   // null = data max (no filter)
+  const [filterTicker,   setFilterTicker]   = useState('')
+  const [expanded,       setExpanded]       = useState(null)
 
   if (!signals) return <div className="card skeleton" style={{ minHeight: 80 }} />
 
   const allRows = signals.signals ?? []
 
+  // Derive actual boundaries from stored signals
+  const confs  = allRows.map(r => r.confidence ?? 0)
+  const prices = allRows.map(r => r.price ?? r.entry ?? 0).filter(p => p > 0)
+  const dataConfMin  = confs.length  ? Math.floor(Math.min(...confs)  / 5)  * 5  : 0
+  const dataConfMax  = confs.length  ? Math.ceil(Math.max(...confs)   / 5)  * 5  : 100
+  const dataPriceMin = prices.length ? Math.floor(Math.min(...prices) / 10) * 10 : 0
+  const dataPriceMax = prices.length ? Math.ceil(Math.max(...prices)  / 10) * 10 : 1000
+  const activeConf     = filterConf     ?? dataConfMin   // floor: hide below this
+  const activeMaxPrice = filterMaxPrice ?? dataPriceMax  // ceiling: hide above this
+
   const rows = allRows.filter(r => {
     if (filterSide !== 'all' && r.type !== filterSide) return false
-    if ((r.confidence ?? 0) < filterConf) return false
+    if ((r.confidence ?? 0) < activeConf) return false
     if (filterTicker && !r.ticker?.includes(filterTicker.toUpperCase())) return false
+    const p = r.price ?? r.entry ?? 0
+    if (p > activeMaxPrice) return false
     return true
   })
 
   const handleDelete = async (id) => {
     if (!confirm('Delete this signal?')) return
-    await fetch(`${API}/signals/${id}`, { method: 'DELETE' }).catch(() => {})
+    await fetch(`${API}/signals/${id}`, { method: 'DELETE', headers: getAuthHeaders() }).catch(() => {})
     if (expanded === id) setExpanded(null)
     reload()
   }
@@ -1519,15 +1734,33 @@ function SignalsTable({ signals, reload }) {
           <div className="filter-group">
             <label className="filter-label">Min conf</label>
             <input
-              type="range" min={0} max={100} step={5}
-              value={filterConf}
-              onChange={e => setFilterConf(Number(e.target.value))}
+              type="range" min={dataConfMin} max={dataConfMax} step={1}
+              value={activeConf}
+              onChange={e => {
+                const v = Number(e.target.value)
+                setFilterConf(v <= dataConfMin ? null : v)
+              }}
               className="filter-range"
             />
-            <span className="filter-val">{filterConf}%</span>
+            <span className="filter-val">{activeConf}%</span>
           </div>
 
           <div className="filter-group">
+            <label className="filter-label">Max price</label>
+            <input
+              type="range" min={dataPriceMin} max={dataPriceMax} step={10}
+              value={activeMaxPrice}
+              onChange={e => {
+                const v = Number(e.target.value)
+                setFilterMaxPrice(v >= dataPriceMax ? null : v)
+              }}
+              className="filter-range"
+            />
+            <span className="filter-val">${activeMaxPrice}</span>
+          </div>
+
+          {/* Ticker + Clear always grouped together on the right */}
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
             <input
               type="text"
               placeholder="Ticker…"
@@ -1535,17 +1768,16 @@ function SignalsTable({ signals, reload }) {
               onChange={e => setFilterTicker(e.target.value)}
               className="filter-ticker-input"
             />
+            {(filterSide !== 'all' || filterConf !== null || filterMaxPrice !== null || filterTicker) && (
+              <button
+                className="btn-ghost"
+                style={{ fontSize: 12, whiteSpace: 'nowrap' }}
+                onClick={() => { setFilterSide('all'); setFilterConf(null); setFilterMaxPrice(null); setFilterTicker('') }}
+              >
+                Clear filters
+              </button>
+            )}
           </div>
-
-          {(filterSide !== 'all' || filterConf > 0 || filterTicker) && (
-            <button
-              className="btn-ghost"
-              style={{ fontSize: 12 }}
-              onClick={() => { setFilterSide('all'); setFilterConf(0); setFilterTicker('') }}
-            >
-              Clear filters
-            </button>
-          )}
         </div>
       )}
 
@@ -1565,6 +1797,7 @@ function SignalsTable({ signals, reload }) {
               expanded={expanded === r.id}
               onToggle={() => setExpanded(prev => prev === r.id ? null : r.id)}
               onDelete={() => handleDelete(r.id)}
+              existingOrder={signalOrderMap[r.id] ?? null}
             />
           ))}
         </div>
@@ -1578,6 +1811,9 @@ function SignalsTable({ signals, reload }) {
 function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
   const [ticker, setTicker] = useState(initialResult?.ticker ?? '')
   const { streaming, steps, result: streamResult, error, run } = useAnalyzeStream()
+  const [historyExpanded, setHistoryExpanded] = useState(false)
+  // Section 7 place-order state — must live here, not inside the render IIFE
+  const [sec7Orders, setSec7Orders] = useState({})
 
   // Use streamed result if available, otherwise show pre-loaded result from dashboard
   const result    = streamResult ?? initialResult
@@ -1589,7 +1825,7 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
   const errors      = result?.errors ?? []
   const rulesChecked = result?.rules_checked ?? null  // always present even when no opps fire
 
-  const handleRun = () => run(ticker)
+  const handleRun = () => { run(ticker); setHistoryExpanded(false) }
 
   return (
     <div className="explorer-page">
@@ -1618,7 +1854,11 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
       </div>
 
       {/* Analysis History panel — collapsible, lives in Explorer */}
-      <AnalysisHistoryPanel onOpenInExplorer={onOpenInExplorer} />
+      <AnalysisHistoryPanel
+        onOpenInExplorer={onOpenInExplorer}
+        expanded={historyExpanded}
+        onToggleExpanded={setHistoryExpanded}
+      />
 
       {/* Empty state */}
       {result?._from_history && (
@@ -1979,15 +2219,16 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
       )}
 
       {/* Section 5 — AI reasoning */}
-      {analysis && !analysis.error && (() => {
+      {analysis && (() => {
         // Prefer per-analysis model info (recorded at run time) over the
         // global default model from /health — shows what actually ran.
         const perAnalysisModel    = analysis.llm_model    || null
         const perAnalysisProvider = analysis.llm_provider || null
         const displayModel        = perAnalysisModel    || modelName
         const displayProvider     = perAnalysisProvider || null
+        const llmDisabled         = !!analysis.error || !perAnalysisProvider
         return (
-          <div className="explorer-section">
+          <div className="explorer-section" style={{ position: 'relative' }}>
             <div className="section-header">
               <span className="section-badge">5</span>
               <span className="section-label">
@@ -2015,7 +2256,21 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
                 : `Running via ${perAnalysisProvider} cloud inference.`
               }
             </p>
-            <LLMReasoning analysis={analysis} defaultOpen={true} />
+            <LLMReasoning analysis={analysis} defaultOpen={!llmDisabled} />
+            {llmDisabled && (
+              <div style={{
+                position: 'absolute', inset: 0, borderRadius: 8, zIndex: 2,
+                backdropFilter: 'blur(5px)', WebkitBackdropFilter: 'blur(5px)',
+                background: 'rgba(10,15,10,0.55)',
+                display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6,
+              }}>
+                <span style={{ fontSize: 22 }}>🤖</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: '#aaa' }}>LLM not applied</span>
+                <span style={{ fontSize: 11, color: '#666', textAlign: 'center', maxWidth: 260 }}>
+                  AI reasoning is disabled — enable a provider in <strong>Settings → AI Provider</strong> to activate this section.
+                </span>
+              </div>
+            )}
           </div>
         )
       })()}
@@ -2501,44 +2756,120 @@ function ExplorerPage({ initialResult, onBack, modelName, onOpenInExplorer }) {
                   : <span className="signals-subfloor">All {opps.length} signal(s) below confidence floor</span>
                 }
               </div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Type</th><th>Confidence</th><th>Price</th>
-                      <th>Entry</th><th>Stop</th><th>Target</th><th>Source</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...opps]
-                      .sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))
-                      .map((opp, i) => {
-                        const isActionable = actionable.some(
-                          a => a.type === opp.type && Math.abs((a.confidence ?? 0) - (opp.confidence ?? 0)) < 0.5
-                        )
-                        return (
-                          <tr key={i} className={isActionable ? '' : 'row-subfloor'}>
-                            <td><span className={`badge ${opp.type}`}>{opp.type?.toUpperCase() ?? '—'}</span></td>
-                            <td>
-                              <span className={isActionable ? 'conf-value conf-ok' : 'conf-value conf-sub'}>
-                                {(opp.confidence ?? 0).toFixed(0)}%
-                              </span>
-                              {!isActionable && <span className="subfloor-tag">below floor</span>}
-                            </td>
-                            <td>{opp.price?.toFixed(2) ?? '—'}</td>
-                            <td>{opp.entry?.toFixed(2) ?? '—'}</td>
-                            <td>{opp.stop?.toFixed(2) ?? '—'}</td>
-                            <td>{opp.target?.toFixed(2) ?? '—'}</td>
-                            <td className="text-dim source-cell">
-                              {opp.source ?? (opp.sources ?? []).join('+') ?? '—'}
-                            </td>
-                          </tr>
-                        )
-                      })
-                    }
-                  </tbody>
-                </table>
-              </div>
+              {(() => {
+                const placeFromSec7 = async (opp, idx) => {
+                  setSec7Orders(s => ({ ...s, [idx]: 'placing' }))
+                  try {
+                    const res = await fetch(`${API}/paper/orders/place`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                      body: JSON.stringify({
+                        ticker:            result.ticker,
+                        side:              opp.type === 'long' ? 'buy' : 'sell',
+                        entry:             opp.entry ?? opp.price,
+                        stop:              opp.stop,
+                        target:            opp.target,
+                        signal_confidence: opp.confidence ?? null,
+                        signal_source:     opp.source ?? (opp.sources ? opp.sources.join('+') : null),
+                        signal_timestamp:  opp.timestamp ?? null,
+                      }),
+                    })
+                    const data = await res.json()
+                    if (!res.ok) setSec7Orders(s => ({ ...s, [idx]: data.detail ?? 'Error' }))
+                    else setSec7Orders(s => ({ ...s, [idx]: data.placed ? 'placed' : 'exists' }))
+                  } catch { setSec7Orders(s => ({ ...s, [idx]: 'Error' })) }
+                }
+                const sorted = [...opps].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))
+                return (
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Direction</th><th>Mode</th><th>Confidence</th><th>Price</th>
+                          <th>Entry</th><th>Stop</th><th>Target</th><th>Source</th><th></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sorted.map((opp, i) => {
+                          const isActionable = actionable.some(
+                            a => a.type === opp.type && Math.abs((a.confidence ?? 0) - (opp.confidence ?? 0)) < 0.5
+                          )
+                          const os = sec7Orders[i]
+                          const canPlace = opp.stop != null && opp.target != null
+                          const srcList = opp.sources ?? (opp.source ? opp.source.split('+') : [])
+                          const hasLlm  = srcList.some(s => s.trim() === 'ai')
+                                       || (opp.score_breakdown?.rules_checked?.ai?.fired === true)
+                          return (
+                            <tr key={i} className={isActionable ? '' : 'row-subfloor'}>
+                              <td>
+                                <span className={`badge ${opp.type}`}>
+                                  {opp.type === 'long' ? '▲' : opp.type === 'short' ? '▼' : ''} {opp.type?.toUpperCase() ?? '—'}
+                                </span>
+                              </td>
+                              <td>
+                                <span
+                                  title={hasLlm ? 'Signal includes AI/LLM contribution' : 'Signal from rule-based engine only (no LLM)'}
+                                  style={{
+                                    fontSize: 9, fontWeight: 700, letterSpacing: 0.4,
+                                    textTransform: 'uppercase', padding: '2px 5px', borderRadius: 4,
+                                    background: hasLlm
+                                      ? 'color-mix(in srgb, var(--accent) 15%, transparent)'
+                                      : 'color-mix(in srgb, var(--dim) 10%, transparent)',
+                                    color: hasLlm ? 'var(--accent)' : 'var(--dim)',
+                                    border: `1px solid ${hasLlm ? 'color-mix(in srgb, var(--accent) 30%, transparent)' : 'color-mix(in srgb, var(--dim) 20%, transparent)'}`,
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  {hasLlm ? '🤖 LLM' : '📐 Rules'}
+                                </span>
+                              </td>
+                              <td>
+                                <span className={isActionable ? 'conf-value conf-ok' : 'conf-value conf-sub'}>
+                                  {(opp.confidence ?? 0).toFixed(0)}%
+                                </span>
+                                {!isActionable && <span className="subfloor-tag">below floor</span>}
+                              </td>
+                              <td>{opp.price?.toFixed(2) ?? '—'}</td>
+                              <td>{opp.entry?.toFixed(2) ?? '—'}</td>
+                              <td>{opp.stop?.toFixed(2) ?? '—'}</td>
+                              <td>{opp.target?.toFixed(2) ?? '—'}</td>
+                              <td className="text-dim source-cell">
+                                {opp.source ?? (opp.sources ?? []).join('+') ?? '—'}
+                              </td>
+                              <td>
+                                {canPlace && os !== 'placed' && os !== 'exists' && (
+                                  <button
+                                    onClick={() => placeFromSec7(opp, i)}
+                                    disabled={os === 'placing'}
+                                    title={!isActionable ? 'Place order even though signal is below confidence floor' : 'Place paper order'}
+                                    style={{
+                                      fontSize: 10, padding: '2px 7px', borderRadius: 4,
+                                      cursor: os === 'placing' ? 'wait' : 'pointer',
+                                      background: isActionable
+                                        ? 'color-mix(in srgb, var(--accent) 12%, transparent)'
+                                        : 'color-mix(in srgb, var(--dim) 10%, transparent)',
+                                      border: `1px solid ${isActionable ? 'color-mix(in srgb, var(--accent) 30%, transparent)' : 'color-mix(in srgb, var(--dim) 20%, transparent)'}`,
+                                      color: isActionable ? 'var(--accent)' : 'var(--dim)',
+                                      fontWeight: 600, whiteSpace: 'nowrap',
+                                    }}
+                                  >
+                                    {os === 'placing' ? '⏳' : '📈 Place'}
+                                  </button>
+                                )}
+                                {os === 'placed' && <span style={{ fontSize: 10, color: 'var(--green)' }}>✓ Placed</span>}
+                                {os === 'exists' && <span style={{ fontSize: 10, color: 'var(--dim)' }}>Exists</span>}
+                                {os && !['placing','placed','exists'].includes(os) && (
+                                  <span style={{ fontSize: 10, color: 'var(--red)' }} title={os}>✗ Error</span>
+                                )}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )
+              })()}
             </>
           )}
         </div>
@@ -2713,11 +3044,13 @@ function EducationPage() {
             adjustment is applied to matching opportunities.
           </li>
           <li>
-            <strong>Local Ollama AI</strong> — all of the above (price, indicators, balance
+            <strong>AI analysis</strong> — all of the above (price, indicators, balance
             sheet health, macro environment, P/E, recent news) is assembled into a structured
-            prompt and sent to the local model (default: <code>qwen2.5:14b</code>).
-            Nothing leaves your machine. Every LLM call is traced in Aspire with input/output
-            token counts and time-to-first-token (TTFT).
+            prompt and sent to the configured LLM provider: <strong>local Ollama</strong> (default,
+            nothing leaves your machine), or a cloud provider (<strong>Groq · Gemini · Mistral · custom</strong>)
+            — configured in Settings → AI Provider. When LLM is disabled the pipeline continues
+            with rules only (the AI reasoning section in Explorer shows a blur overlay).
+            Every LLM call is traced in Aspire with token counts and TTFT.
           </li>
           <li>
             <strong>Rule-based opportunity detection</strong> — four deterministic checks run
@@ -3370,48 +3703,68 @@ function EducationPage() {
         <p className="section-desc">
           Paper trading lets you simulate real trades without risking actual money. MarketSage
           connects to Alpaca's free paper-trading environment — every actionable signal
-          automatically places a bracket order (entry at market price, stop-loss, and
-          take-profit attached) on a virtual $100 k account.
+          can automatically place a bracket order (entry at market price, stop-loss, and
+          take-profit attached) on a virtual $100 k account. The dedicated <strong>Trading</strong> tab
+          in the top navigation shows the full paper-trading dashboard.
         </p>
 
         <h4 className="edu-sub-heading">How it works end-to-end</h4>
         <ol className="edu-steps">
           <li>
             <strong>Signal fires</strong> — the AI + rule engine marks an opportunity as
-            actionable (confidence ≥ your floor, R:R ≥ 1.5, volatility filter passes).
+            actionable (confidence ≥ your floor). Each signal shows a <strong>🤖 LLM</strong> or <strong>📐 Rules</strong> badge
+            indicating whether the AI contributed to it.
           </li>
           <li>
-            <strong>Bracket order placed</strong> — MarketSage POSTs to Alpaca's paper API:
-            market order for <em>position size</em> dollars, with a stop-loss at the signal's
-            stop price and a take-profit limit at the signal's target price.
+            <strong>Bracket order placed</strong> — MarketSage computes
+            {' '}<code>qty = floor(position_size / entry_price)</code> whole shares, then POSTs to
+            Alpaca with a stop-loss and take-profit leg. Stop and target prices are rounded to
+            2 decimal places (Alpaca requirement). If the budget is too small for even 1 share
+            the order is skipped.
           </li>
           <li>
             <strong>Order tracked</strong> — every scan, open orders are polled and their
-            status (pending → filled → closed) is synced back to the local DB and shown in
-            the Paper Orders panel on the Dashboard.
+            status (pending → filled → closed) is synced back to the local DB.
+            Open the <strong>Trading</strong> tab to see the full orders table — click any row to
+            expand per-order trade math (max loss, max gain, R:R ratio) and signal origin details.
           </li>
           <li>
             <strong>P&amp;L computed</strong> — Alpaca returns filled average price and
-            realised P&amp;L. Day equity change is shown in the account summary.
+            realised P&amp;L. The Trading tab shows an area chart of cumulative P&amp;L
+            over time with a 7D / 30D / 90D / All filter.
           </li>
         </ol>
 
-        <h4 className="edu-sub-heading">Live market data panel</h4>
+        <h4 className="edu-sub-heading">Manual order placement</h4>
         <p className="section-desc">
-          The Dashboard Watchlist shows a live price table updated every 30 seconds during
-          market hours — Price, Day Chg%, VWAP, Volume, High/Low, and last-update timestamp —
-          fetched from Alpaca's free market data API. When the market is closed polling stops
-          and the table shows last-session prices labelled "market closed".
+          You don't have to wait for the scheduler. Every signal card on the Dashboard has a
+          centred <strong>📈 Place Paper Order</strong> button. If an order already exists for
+          that signal, the button is replaced by a disabled status badge (e.g. <em>PENDING NEW</em>).
+          The Analysis Explorer also provides a Place button for every detected signal —
+          including those below the confidence floor.
         </p>
+
+        <h4 className="edu-sub-heading">Trading page charts</h4>
+        <table className="edu-macro-table">
+          <thead><tr><th>Chart</th><th>What it shows</th><th>When visible</th></tr></thead>
+          <tbody>
+            <tr><td>Orders by Status</td><td>Donut of pending / filled / cancelled counts</td><td>Any orders</td></tr>
+            <tr><td>Max Gain / Max Loss</td><td>Green/red bars per order; cumulative total + net footer</td><td>Any orders with stop &amp; target</td></tr>
+            <tr><td>Confidence per Order</td><td>Bar chart, colour-coded by band; dashed floor line</td><td>Any orders</td></tr>
+            <tr><td>Realised P&amp;L</td><td>Cumulative area chart with 7D / 30D / 90D / All filter</td><td>Closed orders only</td></tr>
+            <tr><td>P&amp;L by Ticker</td><td>Bar per ticker, green/red</td><td>Closed orders only</td></tr>
+            <tr><td>Win / Loss</td><td>Donut + win rate %</td><td>Closed orders only</td></tr>
+          </tbody>
+        </table>
 
         <h4 className="edu-sub-heading">Settings</h4>
         <table className="edu-macro-table">
           <thead><tr><th>Setting</th><th>Default</th><th>What it controls</th></tr></thead>
           <tbody>
             <tr><td>Paper trading enabled</td><td>off</td><td>Master toggle — turns off auto order placement while keeping the data panel active</td></tr>
-            <tr><td>Position size per trade</td><td>$500</td><td>Notional dollar amount sent to Alpaca per bracket order</td></tr>
-            <tr><td>Min confidence to trade</td><td>signal floor</td><td>Override the global confidence floor specifically for auto-trading (set higher to trade only your best signals)</td></tr>
-            <tr><td>Alpaca Paper API URL</td><td>https://paper-api.alpaca.markets</td><td>Override if using a different Alpaca region</td></tr>
+            <tr><td>Position size per trade</td><td>$500</td><td>Target $ per bracket order. Actual cost = <code>floor(size/price) × price</code></td></tr>
+            <tr><td>Min confidence to trade</td><td>signal floor</td><td>Override the global confidence floor specifically for auto-trading</td></tr>
+            <tr><td>Alpaca Paper API URL</td><td>https://paper-api.alpaca.markets/v2</td><td>Must include <code>/v2</code> — without it the account endpoint returns empty data</td></tr>
           </tbody>
         </table>
 
@@ -3419,15 +3772,20 @@ function EducationPage() {
         <ol className="edu-steps">
           <li>Create a free account at <strong>app.alpaca.markets</strong> and click <em>Paper Trading</em>.</li>
           <li>Copy your <strong>API Key ID</strong> and <strong>Secret Key</strong> from the Alpaca dashboard.</li>
-          <li>Open <strong>Settings → Paper Trading</strong> in MarketSage, paste the keys, and click <em>Save &amp; Test Connection</em>.</li>
+          <li>Open <strong>Settings → Paper Trading</strong> in MarketSage, paste the keys, and click <em>Save &amp; Test Connection</em>. The account equity ($100 k) appears on success.</li>
           <li>Enable the <strong>Paper trading enabled</strong> toggle and set your position size.</li>
-          <li>Wait for the next scheduled scan (or trigger one manually) — orders appear in the Paper Orders panel automatically.</li>
+          <li>Wait for the next scheduled scan, trigger one manually, or click <strong>📈 Place Paper Order</strong> on any signal card — orders appear on the <strong>Trading</strong> page.</li>
         </ol>
 
         <div className="edu-callout">
           <strong>Free tier is sufficient.</strong> Alpaca's free paper-trading account gives
           full REST API access to both the trading API and the market data API (snapshots,
           VWAP, volume). No paid subscription is needed to use any feature in MarketSage.
+          <br /><br />
+          <strong>Whole shares only.</strong> Alpaca does not allow fractional shares on bracket
+          orders. For high-priced stocks (e.g. a $958 stock with a $500 budget), the order is
+          skipped rather than buying 1 share at nearly 2× the intended size. Increase your
+          position size if you want to trade expensive stocks.
         </div>
       </EduSection>
 
@@ -3543,15 +3901,18 @@ function EducationPage() {
 
 // ─── Analysis history panel ──────────────────────────────────────────────────
 
-function AnalysisHistoryPanel({ onOpenInExplorer }) {
-  const [expanded, setExpanded] = useState(false)
+function AnalysisHistoryPanel({ onOpenInExplorer, expanded: extExpanded, onToggleExpanded }) {
+  const [localExpanded, setLocalExpanded] = useState(false)
+  const expanded    = extExpanded !== undefined ? extExpanded : localExpanded
+  const setExpanded = onToggleExpanded ? (v) => onToggleExpanded(typeof v === 'function' ? v(expanded) : v)
+                                       : setLocalExpanded
   const [history, setHistory] = useState(null)
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState(null)
 
   const load = useCallback(() => {
     setLoading(true); setErr(null)
-    fetch(`${API}/analysis?limit=25`)
+    fetch(`${API}/analysis?limit=25`, { headers: getAuthHeaders() })
       .then(r => r.json())
       .then(data => { setHistory(data.history ?? []); setLoading(false) })
       .catch(e  => { setErr(e.message); setLoading(false) })
@@ -3578,7 +3939,7 @@ function AnalysisHistoryPanel({ onOpenInExplorer }) {
 
   const handleDelete = async (id) => {
     if (!confirm('Delete this analysis entry?')) return
-    await fetch(`${API}/analysis/${id}`, { method: 'DELETE' }).catch(() => {})
+    await fetch(`${API}/analysis/${id}`, { method: 'DELETE', headers: getAuthHeaders() }).catch(() => {})
     load()
   }
 
@@ -3614,6 +3975,7 @@ function AnalysisHistoryPanel({ onOpenInExplorer }) {
                     <th>Ticker</th>
                     <th>Trend</th>
                     <th>Confidence</th>
+                    <th>Mode</th>
                     <th>Run at</th>
                     <th></th>
                     <th></th>
@@ -3621,14 +3983,40 @@ function AnalysisHistoryPanel({ onOpenInExplorer }) {
                 </thead>
                 <tbody>
                   {history.map(row => {
-                    const aj    = row.analysis_json ?? {}
-                    const trend = aj.trend ?? '—'
-                    const conf  = aj.opportunity?.confidence
+                    const aj      = row.analysis_json ?? {}
+                    // When LLM is disabled, analysis_json.trend / .opportunity are null;
+                    // fall back to the rule-based opportunities stored alongside the record.
+                    const bestOpp = (row.opportunities ?? [])
+                      .slice().sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))[0]
+                    const rawTrend = aj.trend
+                    const trend    = rawTrend && rawTrend !== 'neutral'
+                      ? rawTrend
+                      : bestOpp?.type === 'long'  ? 'bullish'
+                      : bestOpp?.type === 'short' ? 'bearish'
+                      : rawTrend ?? '—'
+                    const conf = aj.opportunity?.confidence ?? bestOpp?.confidence
                     return (
                       <tr key={row.id}>
                         <td><span className="badge-ticker">{row.ticker}</span></td>
                         <td><span className={`rbadge trend-${trend}`}>{trend}</span></td>
                         <td>{conf != null && conf > 0 ? `${conf.toFixed(0)}%` : '—'}</td>
+                        <td>
+                          <span
+                            title={row.llm_model ? `Model: ${row.llm_model}` : 'Rule-based engine — LLM was disabled'}
+                            style={{
+                              fontSize: 9, fontWeight: 700, letterSpacing: 0.4,
+                              textTransform: 'uppercase', padding: '2px 5px', borderRadius: 4,
+                              background: row.llm_provider
+                                ? 'color-mix(in srgb, var(--accent) 15%, transparent)'
+                                : 'color-mix(in srgb, var(--dim) 10%, transparent)',
+                              color: row.llm_provider ? 'var(--accent)' : 'var(--dim)',
+                              border: `1px solid ${row.llm_provider ? 'color-mix(in srgb, var(--accent) 30%, transparent)' : 'color-mix(in srgb, var(--dim) 20%, transparent)'}`,
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {row.llm_provider ? '🤖 LLM' : '📐 Rules'}
+                          </span>
+                        </td>
                         <td className="ts">{fmtTime(row.created_at)}</td>
                         <td>
                           <button className="btn-open-history" onClick={() => openRow(row)}>
@@ -3672,7 +4060,7 @@ function UsageSection({ usage: usageProp, onRefresh }) {
   // Fetch usage for the selected period whenever it changes.
   const fetchLocalUsage = (days) => {
     setLocalLoading(true)
-    fetch(`${API}/usage?days=${days}`)
+    fetch(`${API}/usage?days=${days}`, { headers: getAuthHeaders() })
       .then(r => r.json())
       .then(d => { setLocalUsage(d); setLocalLoading(false) })
       .catch(() => setLocalLoading(false))
@@ -3692,7 +4080,7 @@ function UsageSection({ usage: usageProp, onRefresh }) {
 
   // Auto-fetch quota once on mount so limits are visible without a button click.
   useEffect(() => {
-    fetch(`${API}/provider/quota`)
+    fetch(`${API}/provider/quota`, { headers: getAuthHeaders() })
       .then(r => r.json())
       .then(setQuota)
       .catch(e => setQuotaErr(e.message))
@@ -4212,9 +4600,6 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
   const [llmBaseUrl,   setLlmBaseUrl]   = useState('')
   const [llmApiKeySet, setLlmApiKeySet] = useState(false)
   const [showLlmApiKey, setShowLlmApiKey] = useState(false)
-  // Admin token — loaded from GET /settings; sent as X-Admin-Token header
-  // when the user clicks "Show" to reveal their LLM API key.
-  const [adminToken, setAdminToken] = useState('')
   const [llmStatus,    setLlmStatus]    = useState(null)
   const [llmErr,       setLlmErr]       = useState('')
   const [useEnvDefaults, setUseEnvDefaults] = useState(false)
@@ -4224,6 +4609,8 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
   const [llmReasoningEffort,   setLlmReasoningEffort]   = useState('none')
   const [providerModels,       setProviderModels]       = useState([])
   const [modelChoice,          setModelChoice]          = useState('')
+  const [llmFallbackProvider,  setLlmFallbackProvider]  = useState('')
+  const [llmFallbackModel,     setLlmFallbackModel]     = useState('')
 
   // ── Signal-scan LLM switch ──────────────────────────────────────────────────
   const [signalLlmEnabled,     setSignalLlmEnabled]     = useState(true)
@@ -4234,7 +4621,7 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
     try {
       const r = await fetch(`${API}/settings/signal-scan-llm`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ enabled }),
       })
       if (!r.ok) throw new Error(await r.text())
@@ -4313,7 +4700,7 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
       }
       const r = await fetch(`${API}/settings/alpaca`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify(body),
       })
       if (!r.ok) throw new Error(await r.text())
@@ -4344,7 +4731,7 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
       if (alpacaSecret) body.secret_key = alpacaSecret
       const r = await fetch(`${API}/settings/alpaca/test`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify(body),
       })
       if (!r.ok) throw new Error(await r.text())
@@ -4357,18 +4744,10 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
     }
   }
 
-  const revealAlpacaSecret = async () => {
-    try {
-      const r = await fetch(`${API}/settings/alpaca/secret`, {
-        headers: { 'X-Admin-Token': adminToken },
-      })
-      if (!r.ok) throw new Error('Unauthorized')
-      const d = await r.json()
-      setAlpacaSecret(d.secret || '')
-      setShowAlpacaSecret(true)
-    } catch (e) {
-      setAlpacaSecret('')
-    }
+  const revealAlpacaSecret = () => {
+    // Key reveal removed for security — keys are write-only from the browser.
+    // To verify the current secret, use `fly secrets list` in your terminal.
+    setShowAlpacaSecret(v => !v)
   }
 
   // ── Scheduler + scan interval ───────────────────────────────────────────────
@@ -4393,7 +4772,7 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
 
   const loadPerfSettings = async () => {
     try {
-      const r = await fetch(`${API}/settings/performance`)
+      const r = await fetch(`${API}/settings/performance`, { headers: getAuthHeaders() })
       if (!r.ok) return
       const d = await r.json()
       setPerfSettings(d)
@@ -4424,7 +4803,7 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
   const loadCacheStats = async () => {
     setCacheStatsErr(null)
     try {
-      const r = await fetch(`${API}/data/cache/stats`)
+      const r = await fetch(`${API}/data/cache/stats`, { headers: getAuthHeaders() })
       if (!r.ok) throw new Error(await r.text())
       setCacheStats(await r.json())
     } catch (e) { setCacheStatsErr(String(e)) }
@@ -4433,7 +4812,7 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
   const evictCache = async (hours) => {
     setCacheEvictStatus('clearing')
     try {
-      const r = await fetch(`${API}/data/cache?older_than_hours=${hours}`, { method: 'DELETE' })
+      const r = await fetch(`${API}/data/cache?older_than_hours=${hours}`, { method: 'DELETE', headers: getAuthHeaders() })
       if (!r.ok) throw new Error(await r.text())
       const d = await r.json()
       setCacheEvictStatus(`ok:${d.deleted}`)
@@ -4445,15 +4824,14 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
   // Load on mount
   useEffect(() => {
     Promise.all([
-      fetch(`${API}/settings`).then(r => r.json()),
-      fetch(`${API}/settings/models`).then(r => r.json()),
+      fetch(`${API}/settings`, { headers: getAuthHeaders() }).then(r => r.json()),
+      fetch(`${API}/settings/models`, { headers: getAuthHeaders() }).then(r => r.json()),
     ]).then(([cfg, m]) => {
       // LLM provider
       setLlmProvider(cfg.llm_provider ?? 'ollama')
       setLlmApiKeySet(cfg.llm_api_key_set ?? false)
       setLlmModel(cfg.llm_model ?? '')
       setLlmBaseUrl(cfg.llm_base_url ?? '')
-      setAdminToken(cfg.admin_token ?? '')
       setLlmModelEnvDefault(cfg.llm_model_env_default ?? '')
       setLlmBaseUrlEnvDefault(cfg.llm_base_url_env_default ?? '')
       setLlmApiKeyEnvSet(cfg.llm_api_key_env_set ?? false)
@@ -4486,8 +4864,8 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
   const loadProviderSettings = async (provider) => {
     const query = `?provider=${encodeURIComponent(provider)}`
     const [cfg, modelData] = await Promise.all([
-      fetch(`${API}/settings${query}`).then(r => r.json()),
-      fetch(`${API}/settings/models${query}`).then(r => r.json()),
+      fetch(`${API}/settings${query}`, { headers: getAuthHeaders() }).then(r => r.json()),
+      fetch(`${API}/settings/models${query}`, { headers: getAuthHeaders() }).then(r => r.json()),
     ])
     setLlmApiKeySet(cfg.llm_api_key_set ?? false)
     setLlmModel(cfg.llm_model ?? '')
@@ -4496,6 +4874,8 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
     setLlmBaseUrlEnvDefault(cfg.llm_base_url_env_default ?? '')
     setLlmApiKeyEnvSet(cfg.llm_api_key_env_set ?? false)
     setLlmReasoningEffort(cfg.llm_reasoning_effort ?? 'none')
+    setLlmFallbackProvider(cfg.llm_fallback_provider ?? '')
+    setLlmFallbackModel(cfg.llm_fallback_model ?? '')
     if (provider === 'ollama') setModels(modelData.models ?? [])
     else setProviderModels(modelData.models ?? [])
   }
@@ -4514,8 +4894,10 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
         if (llmBaseUrl) body.base_url = llmBaseUrl
       }
       if (supportsReasoning) body.reasoning_effort = llmReasoningEffort
+      body.fallback_provider = llmFallbackProvider
+      body.fallback_model    = llmFallbackModel
       const r = await fetch(`${API}/settings/llm`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify(body),
       })
       if (!r.ok) throw new Error(await r.text())
@@ -4534,7 +4916,7 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
       body.model = useEnvDefaults ? '' : model
       if (timeout) body.timeout = parseInt(timeout, 10)
       const r = await fetch(`${API}/settings/ollama`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify(body),
       })
       if (!r.ok) throw new Error(await r.text())
@@ -4548,7 +4930,7 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
     setSchedStatus('saving'); setSchedErr('')
     try {
       await fetch(`${API}/settings/scan-interval`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ minutes: parseInt(scanInterval, 10) }),
       })
       setSchedStatus('ok')
@@ -4561,7 +4943,7 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
     setSchedulerRunning(next)          // optimistic update
     try {
       const r = await fetch(`${API}/settings/scheduler`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ running: next }),
       })
       if (r.ok) {
@@ -4577,7 +4959,7 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
     const next = !alertsOn
     try {
       await fetch(`${API}/settings/alerts`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ enabled: next }),
       })
       setAlertsOn(next)
@@ -4590,7 +4972,7 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
     if (!window.confirm('Clear ALL signals and analysis history? App settings (watchlist, model, interval) will be preserved. This cannot be undone.')) return
     setResetStatus('clearing')
     try {
-      const r = await fetch(`${API}/data/reset`, { method: 'POST' })
+      const r = await fetch(`${API}/data/reset`, { method: 'POST', headers: getAuthHeaders() })
       if (!r.ok) throw new Error(await r.text())
       setResetStatus('ok')
       setTimeout(() => setResetStatus(null), 4000)
@@ -4810,13 +5192,18 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
                    } />
             <button type="button" className="settings-secret-toggle"
                     disabled={useAlpacaEnvDefaults}
-                    onClick={async () => {
+                    onClick={() => {
                       if (showAlpacaSecret) { setAlpacaSecret(''); setShowAlpacaSecret(false) }
-                      else { await revealAlpacaSecret() }
+                      else { revealAlpacaSecret() }
                     }}>
               {showAlpacaSecret ? 'Hide' : 'Show'}
             </button>
           </div>
+          {!useAlpacaEnvDefaults && alpacaSecretSet && !alpacaSecret && (
+            <span className="text-dim" style={{ fontSize: 12, marginTop: 4, display: 'block' }}>
+              ✓ Secret is set — to verify the value, use <code className="inline-code">fly secrets list</code>
+            </span>
+          )}
         </div>
 
         <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0 16px', opacity: 0.4 }} />
@@ -4947,26 +5334,8 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
                 <button
                   type="button"
                   className="settings-secret-toggle"
-                  onClick={async () => {
-                    if (showLlmApiKey) {
-                      // Hiding: clear the revealed value, go back to dots
-                      if (!llmApiKey.replace(/•/g, '')) setLlmApiKey('')
-                      setShowLlmApiKey(false)
-                    } else {
-                      // Showing: fetch the real key if we don't have it typed yet
-                      if (!llmApiKey && savedApiKeyMask) {
-                        try {
-                          const r = await fetch(`${API}/settings/llm/key`, {
-                            headers: adminToken ? { 'X-Admin-Token': adminToken } : {},
-                          })
-                          const { key } = await r.json()
-                          if (key) setLlmApiKey(key)
-                        } catch (_) { /* silently stay on dots */ }
-                      }
-                      setShowLlmApiKey(true)
-                    }
-                  }}
-                  title={showLlmApiKey ? 'Hide API key' : 'Show API key'}
+                  onClick={() => setShowLlmApiKey(v => !v)}
+                  title={showLlmApiKey ? 'Hide API key' : 'Show/hide typed key'}
                   aria-label={showLlmApiKey ? 'Hide API key' : 'Show API key'}
                 >
                   {showLlmApiKey ? 'Hide' : 'Show'}
@@ -4974,7 +5343,7 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
               </div>
               {!envDefaultsActive && llmApiKeySet && !llmApiKey && (
                 <span className="text-dim" style={{ fontSize: 12, marginTop: 4, display: 'block' }}>
-                  ✓ API key is set
+                  ✓ API key is set — to rotate it, paste a new key above and save
                 </span>
               )}
             </div>
@@ -5113,6 +5482,43 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
               Pull new models: <code className="inline-code">docker exec ollama ollama pull &lt;model&gt;</code>
             </p>
           </>
+        )}
+
+        {/* ── Fallback provider (auto-used on HTTP 429 / quota) ──────────── */}
+        <div className="settings-field" style={{ marginTop: 18, borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+          <label className="settings-label">
+            Fallback provider
+            <span className="text-dim" style={{ fontSize: 12, marginLeft: 6 }}>
+              (auto-used when primary returns quota / HTTP 429)
+            </span>
+          </label>
+          <select
+            value={llmFallbackProvider}
+            onChange={e => setLlmFallbackProvider(e.target.value)}
+            className="settings-select"
+          >
+            <option value="">— disabled —</option>
+            <option value="ollama">🖥️ Ollama (local)</option>
+            <option value="groq">⚡ Groq Cloud</option>
+            <option value="gemini">✨ Google Gemini</option>
+            <option value="mistral">🌬️ Mistral AI</option>
+            <option value="custom">🔧 Custom endpoint</option>
+          </select>
+        </div>
+        {llmFallbackProvider && llmFallbackProvider !== llmProvider && (
+          <div className="settings-field">
+            <label className="settings-label">
+              Fallback model
+              <span className="text-dim" style={{ fontSize: 12, marginLeft: 6 }}>(leave blank for provider default)</span>
+            </label>
+            <input
+              type="text"
+              value={llmFallbackModel}
+              onChange={e => setLlmFallbackModel(e.target.value)}
+              placeholder="e.g. gemini-3.5-flash-lite"
+              className="settings-select"
+            />
+          </div>
         )}
 
         <SaveRow
@@ -5328,6 +5734,898 @@ function fmtPct(v) { return v == null ? '—' : (v * 100).toFixed(1) + '%' }
 function fmtR(v)   { return v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(2) + 'R' }
 function fmtNum(v) { return v == null ? '—' : v.toLocaleString() }
 
+// ─── Paper Trading Page ───────────────────────────────────────────────────────
+
+function PaperTradingPage({ initialExpandedOrder = null, onExpandedOrderConsumed }) {
+  const [account,   setAccount]   = useState(null)
+  const [positions, setPositions] = useState([])
+  const [orders,    setOrders]    = useState([])
+  const [history,   setHistory]   = useState(null)
+  const [loading,   setLoading]   = useState(false)
+  const [error,     setError]     = useState(null)
+  const [orderFilter,    setOrderFilter]    = useState('all') // all | open | filled | cancelled
+  const [cancelling,     setCancelling]     = useState({})
+  const [expandedOrder,  setExpandedOrder]  = useState(null)
+  const [expandedPos,    setExpandedPos]    = useState(null) // expanded open-position row
+  const [pnlDays,        setPnlDays]        = useState(30)   // P&L chart day window
+  const initialConsumed = useRef(false)
+
+  // When navigated from sidebar, auto-expand and scroll to the target order
+  useEffect(() => {
+    if (initialExpandedOrder && orders.length > 0 && !initialConsumed.current) {
+      initialConsumed.current = true
+      setExpandedOrder(initialExpandedOrder)
+      setOrderFilter('all')
+      onExpandedOrderConsumed?.()
+      setTimeout(() => {
+        document.getElementById(`paper-order-${initialExpandedOrder}`)
+          ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }, 150)
+    }
+  }, [initialExpandedOrder, orders, onExpandedOrderConsumed])
+
+  const fmtMoney = (v, dp = 2) =>
+    v == null ? '—' : `$${parseFloat(v).toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp })}`
+  const fmtPct   = (v) => v == null ? '' : `${v >= 0 ? '+' : ''}${parseFloat(v).toFixed(2)}%`
+  const fmtPnl   = (v) => v == null ? '—' : (
+    <span style={{ color: parseFloat(v) >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 600 }}>
+      {parseFloat(v) >= 0 ? '+' : ''}{fmtMoney(v)}
+    </span>
+  )
+
+  const load = useCallback(async () => {
+    setLoading(true); setError(null)
+    try {
+      const [accR, posR, ordR, hisR] = await Promise.all([
+        fetch(`${API}/paper/account`,  { headers: getAuthHeaders() }),
+        fetch(`${API}/paper/positions`,{ headers: getAuthHeaders() }),
+        fetch(`${API}/paper/orders?limit=200`, { headers: getAuthHeaders() }),
+        fetch(`${API}/paper/history?period=1M&timeframe=1D`, { headers: getAuthHeaders() }),
+      ])
+      if (accR.ok) { const d = await accR.json(); setAccount(d.account ?? null) }
+      if (posR.ok) setPositions((await posR.json()).positions ?? [])
+      if (ordR.ok) setOrders((await ordR.json()).orders ?? [])
+      if (hisR.ok) setHistory(await hisR.json())
+    } catch { setError('Failed to load paper trading data') }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const cancelOrder = async (dbId, alpacaId) => {
+    setCancelling(c => ({ ...c, [dbId]: true }))
+    try {
+      await fetch(`${API}/paper/orders/${dbId}/cancel`, { method: 'POST', headers: getAuthHeaders() })
+      await load()
+    } finally { setCancelling(c => { const n={...c}; delete n[dbId]; return n }) }
+  }
+
+  // ── Equity sparkline (SVG) ───────────────────────────────────────────────────
+  const EquityChart = () => {
+    if (!history?.equity?.length) return <div style={{ color: 'var(--dim)', fontSize: 12 }}>No portfolio history yet</div>
+    const equity = history.equity.filter(v => v != null)
+    const ts     = history.timestamp ?? []
+    if (equity.length < 2) return null
+    const W = 600, H = 100, pad = 4
+    const min = Math.min(...equity), max = Math.max(...equity)
+    const range = max - min || 1
+    const pts = equity.map((v, i) => {
+      const x = pad + (i / (equity.length - 1)) * (W - pad * 2)
+      const y = H - pad - ((v - min) / range) * (H - pad * 2)
+      return `${x},${y}`
+    }).join(' ')
+    const isUp = equity[equity.length - 1] >= equity[0]
+    const color = isUp ? '#34d399' : '#f87171'
+    const startDate = ts[0]  ? new Date(ts[0]  * 1000).toLocaleDateString() : ''
+    const endDate   = ts[ts.length - 1] ? new Date(ts[ts.length - 1] * 1000).toLocaleDateString() : ''
+    const pnl = equity[equity.length - 1] - equity[0]
+    const pnlPct = equity[0] ? ((pnl / equity[0]) * 100).toFixed(2) : '0.00'
+    return (
+      <div style={{ padding: '10px 0' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+          <span style={{ fontSize: 11, color: 'var(--dim)' }}>{startDate} – {endDate}</span>
+          <span style={{ fontSize: 12, fontWeight: 700, color }}>
+            {pnl >= 0 ? '+' : ''}{fmtMoney(pnl)} ({pnl >= 0 ? '+' : ''}{pnlPct}%)
+          </span>
+        </div>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 80 }}>
+          <polyline points={pts} fill="none" stroke={color} strokeWidth="2" />
+          <line x1={pad} y1={H - pad - ((equity[0] - min) / range) * (H - pad * 2)}
+                x2={W - pad} y2={H - pad - ((equity[0] - min) / range) * (H - pad * 2)}
+                stroke="#444" strokeWidth="1" strokeDasharray="4 3" />
+        </svg>
+      </div>
+    )
+  }
+
+  const statusColor = (s) => ({
+    filled: 'var(--green)', partially_filled: 'var(--green)',
+    cancelled: 'var(--dim)', canceled: 'var(--dim)',
+    expired: 'var(--dim)', rejected: '#f87171',
+    pending_new: '#fbbf24', accepted: '#fbbf24', held: '#fbbf24',
+  }[s] ?? 'var(--dim)')
+
+  const filteredOrders = orders.filter(o => {
+    if (orderFilter === 'open')      return ['pending_new','accepted','held','partially_filled'].includes(o.status)
+    if (orderFilter === 'filled')    return ['filled','partially_filled'].includes(o.status)
+    if (orderFilter === 'cancelled') return ['cancelled','canceled','expired','rejected'].includes(o.status)
+    return true
+  })
+
+  return (
+    <div style={{ maxWidth: 1100, margin: '0 auto', padding: '24px 20px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+      {/* Header row */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>📈 Paper Trading</h2>
+        <button className="btn-ghost" onClick={load} disabled={loading} style={{ fontSize: 12 }}>
+          {loading ? '↻ Loading…' : '↻ Refresh'}
+        </button>
+      </div>
+
+      {error && <div style={{ fontSize: 12, color: '#f87171' }}>{error}</div>}
+
+      {/* Account stats panel */}
+      {account && (() => {
+        const dayPnl    = account.day_pnl ?? 0
+        const dayPnlPct = account.day_pnl_pct ?? 0
+        const dayColor  = dayPnl >= 0 ? 'var(--green)' : 'var(--red)'
+        const tile = (label, value, sub) => (
+          <div key={label} style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px' }}>
+            <div style={{ fontSize: 10, color: 'var(--dim)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>{label}</div>
+            <div style={{ fontSize: 15, fontWeight: 700 }}>{value}</div>
+            {sub && <div style={{ fontSize: 10, color: 'var(--dim)', marginTop: 2 }}>{sub}</div>}
+          </div>
+        )
+        return (
+          <>
+            {/* Primary row */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+              {tile('Portfolio Value', fmtMoney(account.portfolio_value ?? account.equity))}
+              {tile('Equity',         fmtMoney(account.equity))}
+              {tile('Day P&L',
+                <span style={{ color: dayColor, fontWeight: 700 }}>
+                  {dayPnl >= 0 ? '+' : ''}{fmtMoney(dayPnl)}
+                </span>,
+                <span style={{ color: dayColor }}>{dayPnl >= 0 ? '+' : ''}{parseFloat(dayPnlPct).toFixed(2)}%</span>
+              )}
+              {tile('Cash',          fmtMoney(account.cash))}
+              {tile('Buying Power',  fmtMoney(account.buying_power),
+                account.multiplier ? `${account.multiplier}× margin` : undefined)}
+            </div>
+            {/* Secondary row — exposure + margin */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+              {tile('Long Exposure',       fmtMoney(account.long_market_value),  'open long positions')}
+              {tile('Short Exposure',      fmtMoney(account.short_market_value), 'open short positions')}
+              {tile('Maintenance Margin',  fmtMoney(account.maintenance_margin), 'min equity required')}
+              {tile('Daytrade Count',      account.daytrade_count ?? 0,           'PDT limit: 3 in 5 days')}
+            </div>
+          </>
+        )
+      })()}
+
+      {/* Equity curve */}
+      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '14px 16px' }}>
+        <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Portfolio Equity (1 month)</div>
+        <EquityChart />
+      </div>
+
+      {/* Insights — always shown when orders exist */}
+      {orders.length > 0 && (() => {
+        const cardStyle = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '14px 16px', flex: '1 1 240px', minWidth: 0 }
+        const titleStyle = { fontSize: 12, fontWeight: 700, marginBottom: 10 }
+        const dimStyle = { fontSize: 10, color: 'var(--dim)' }
+        const closed = orders.filter(o => o.realized_pnl != null)
+
+        // ── Orders by status (all orders) ─────────────────────────────────────
+        const statusGroups = Object.entries(
+          orders.reduce((acc, o) => {
+            const s = (o.status ?? 'unknown').replace(/_/g, ' ')
+            acc[s] = (acc[s] ?? 0) + 1; return acc
+          }, {})
+        ).map(([name, value]) => ({ name, value }))
+
+        // ── Max potential gain / max potential loss per order (all pending) ────
+        const pendingOrders = orders.filter(o => o.entry_price && o.stop_price && o.take_profit_price)
+        const riskRewardData = pendingOrders.map(o => {
+          const qty = o.qty != null ? parseFloat(o.qty) : Math.floor((o.notional ?? 500) / o.entry_price)
+          const loss = Math.abs(o.entry_price - o.stop_price) * qty
+          const gain = Math.abs(o.take_profit_price - o.entry_price) * qty
+          return { ticker: `${o.ticker} ${o.side === 'buy' ? '▲' : '▼'}`, loss: parseFloat(loss.toFixed(2)), gain: parseFloat(gain.toFixed(2)) }
+        })
+
+        // ── Confidence distribution (all orders) ─────────────────────────────
+        const confData = orders
+          .filter(o => o.signal_confidence != null)
+          .map(o => ({ ticker: o.ticker, conf: o.signal_confidence }))
+          .sort((a, b) => b.conf - a.conf)
+
+        // ── P&L by ticker (only closed) ───────────────────────────────────────
+        const pnlByTicker = closed.length > 0 ? Object.entries(
+          closed.reduce((acc, o) => { acc[o.ticker] = (acc[o.ticker] ?? 0) + parseFloat(o.realized_pnl ?? 0); return acc }, {})
+        ).map(([ticker, pnl]) => ({ ticker, pnl: parseFloat(pnl.toFixed(2)) })).sort((a, b) => b.pnl - a.pnl) : []
+
+        // ── Win/Loss (only closed) ────────────────────────────────────────────
+        const wins   = closed.filter(o => (o.realized_pnl ?? 0) > 0).length
+        const losses = closed.filter(o => (o.realized_pnl ?? 0) <= 0).length
+        const pieData = [
+          { name: `Wins (${wins})`,     value: wins,   fill: '#34d399' },
+          { name: `Losses (${losses})`, value: losses, fill: '#f87171' },
+        ].filter(d => d.value > 0)
+
+        return (
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+
+            {/* Orders by status donut */}
+            <div style={cardStyle}>
+              <div style={titleStyle}>Orders by Status</div>
+              <ResponsiveContainer width="100%" height={160}>
+                <PieChart>
+                  <Pie data={statusGroups} cx="50%" cy="50%" innerRadius={35} outerRadius={60}
+                    dataKey="value" paddingAngle={2} labelLine={false}
+                    label={({ name, value }) => `${value}`}>
+                    {statusGroups.map((_, i) => (
+                      <Cell key={i} fill={['#fbbf24','#34d399','#f87171','#60a5fa','#a78bfa'][i % 5]} />
+                    ))}
+                  </Pie>
+                  <Legend iconSize={8} wrapperStyle={{ fontSize: 10 }} />
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Max gain vs max loss per order */}
+            {riskRewardData.length > 0 && (() => {
+              const totalGain = riskRewardData.reduce((s, o) => s + o.gain, 0)
+              const totalLoss = riskRewardData.reduce((s, o) => s + o.loss, 0)
+              const net = totalGain - totalLoss
+              return (
+                <div style={cardStyle}>
+                  <div style={titleStyle}>Max Gain / Max Loss per Order <span style={dimStyle}>(all open)</span></div>
+                  <ResponsiveContainer width="100%" height={160}>
+                    <BarChart data={riskRewardData} barCategoryGap="20%" margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                      <XAxis dataKey="ticker" tick={{ fontSize: 9 }} axisLine={false} tickLine={false} />
+                      <YAxis tick={{ fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={v => `$${v}`} width={44} />
+                      <Tooltip formatter={(v, n) => [`$${v.toFixed(2)}`, n === 'gain' ? 'Max gain' : 'Max loss']} />
+                      <ReferenceLine y={0} stroke="var(--border)" />
+                      <Bar dataKey="gain" fill="#34d399" radius={[3,3,0,0]} name="gain" />
+                      <Bar dataKey="loss" fill="#f87171" radius={[3,3,0,0]} name="loss" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                  {/* Cumulative totals */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid var(--border)', paddingTop: 8, marginTop: 4, fontSize: 11 }}>
+                    <div style={{ display: 'flex', gap: 16 }}>
+                      <span>Total max gain: <strong style={{ color: '#34d399' }}>+${totalGain.toFixed(2)}</strong></span>
+                      <span>Total max loss: <strong style={{ color: '#f87171' }}>−${totalLoss.toFixed(2)}</strong></span>
+                    </div>
+                    <span style={{ fontWeight: 700, color: net >= 0 ? '#34d399' : '#f87171' }}>
+                      Net: {net >= 0 ? '+' : '−'}${Math.abs(net).toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              )
+            })()}
+
+            {/* Confidence per order */}
+            {confData.length > 0 && (
+              <div style={cardStyle}>
+                <div style={titleStyle}>Signal Confidence per Order</div>
+                <ResponsiveContainer width="100%" height={160}>
+                  <BarChart data={confData} barCategoryGap="20%" margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                    <XAxis dataKey="ticker" tick={{ fontSize: 9 }} axisLine={false} tickLine={false} />
+                    <YAxis tick={{ fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={v => `${v}%`} domain={[60, 100]} width={36} />
+                    <Tooltip formatter={v => [`${v}%`, 'Confidence']} />
+                    <ReferenceLine y={75} stroke="var(--border)" strokeDasharray="3 2" label={{ value: 'floor', position: 'right', fontSize: 9, fill: 'var(--dim)' }} />
+                    <Bar dataKey="conf" radius={[3,3,0,0]}>
+                      {confData.map((entry, i) => (
+                        <Cell key={i} fill={entry.conf >= 85 ? '#34d399' : entry.conf >= 75 ? '#fbbf24' : '#f87171'} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+                <div style={dimStyle}>Dashed = confidence floor</div>
+              </div>
+            )}
+
+            {/* Realised P&L by ticker — only when closed orders exist */}
+            {pnlByTicker.length > 0 && (
+              <div style={cardStyle}>
+                <div style={titleStyle}>Realised P&L by Ticker</div>
+                <ResponsiveContainer width="100%" height={160}>
+                  <BarChart data={pnlByTicker} barCategoryGap="30%" margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                    <XAxis dataKey="ticker" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
+                    <YAxis tick={{ fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={v => `$${v}`} width={40} />
+                    <Tooltip formatter={v => [`$${v.toFixed(2)}`, 'P&L']} />
+                    <ReferenceLine y={0} stroke="var(--border)" />
+                    <Bar dataKey="pnl" radius={[3,3,0,0]}>
+                      {pnlByTicker.map((entry, i) => <Cell key={i} fill={entry.pnl >= 0 ? '#34d399' : '#f87171'} />)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {/* Win / Loss donut — only when closed orders exist */}
+            {pieData.length > 0 && (
+              <div style={cardStyle}>
+                <div style={titleStyle}>Win / Loss <span style={dimStyle}>({closed.length > 0 ? ((wins/closed.length)*100).toFixed(0) : 0}% win rate)</span></div>
+                <ResponsiveContainer width="100%" height={160}>
+                  <PieChart>
+                    <Pie data={pieData} cx="50%" cy="50%" innerRadius={40} outerRadius={65}
+                      dataKey="value" paddingAngle={2} labelLine={false}
+                      label={({ percent }) => `${(percent*100).toFixed(0)}%`}>
+                      {pieData.map((entry, i) => <Cell key={i} fill={entry.fill} />)}
+                    </Pie>
+                    <Legend iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                    <Tooltip />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+          </div>
+        )
+      })()}
+
+      {/* Realised P&L over time */}
+      {(() => {
+        const cutoff = pnlDays === 0 ? null : new Date(Date.now() - pnlDays * 86400000)
+        const closed = orders
+          .filter(o => o.realized_pnl != null && (o.filled_at || o.closed_at))
+          .filter(o => !cutoff || new Date(o.filled_at || o.closed_at) >= cutoff)
+          .sort((a, b) => new Date(a.filled_at || a.closed_at) - new Date(b.filled_at || b.closed_at))
+
+        let cum = 0
+        const chartData = closed.map(o => {
+          cum += parseFloat(o.realized_pnl ?? 0)
+          return {
+            label: `${o.ticker} ${new Date(o.filled_at || o.closed_at).toLocaleDateString([], { month:'short', day:'numeric' })}`,
+            pnl:   parseFloat(parseFloat(o.realized_pnl).toFixed(2)),
+            cum:   parseFloat(cum.toFixed(2)),
+          }
+        })
+
+        const DAY_OPTS = [7, 30, 90, 0]
+        const isUp = chartData.length ? chartData[chartData.length - 1].cum >= 0 : true
+        const lineColor = isUp ? '#34d399' : '#f87171'
+
+        return (
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '14px 16px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+              <span style={{ fontSize: 12, fontWeight: 700 }}>Realised P&L</span>
+              <div style={{ display: 'flex', gap: 4, marginLeft: 'auto' }}>
+                {DAY_OPTS.map(d => (
+                  <button key={d} onClick={() => setPnlDays(d)}
+                    style={{
+                      fontSize: 10, padding: '2px 8px', borderRadius: 10, cursor: 'pointer',
+                      background: pnlDays === d ? 'var(--accent)' : 'transparent',
+                      color: pnlDays === d ? '#fff' : 'var(--dim)',
+                      border: `1px solid ${pnlDays === d ? 'var(--accent)' : 'var(--border)'}`,
+                      fontWeight: pnlDays === d ? 700 : 400,
+                    }}
+                  >{d === 0 ? 'All' : `${d}D`}</button>
+                ))}
+              </div>
+            </div>
+            {chartData.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--dim)', padding: '20px 0', textAlign: 'center' }}>
+                No closed orders in the selected period.
+              </div>
+            ) : (
+              <>
+                <ResponsiveContainer width="100%" height={180}>
+                  <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%"  stopColor={lineColor} stopOpacity={0.25} />
+                        <stop offset="95%" stopColor={lineColor} stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis dataKey="label" tick={{ fontSize: 9 }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
+                    <YAxis tick={{ fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={v => `$${v}`} width={44} />
+                    <Tooltip
+                      formatter={(v, n) => [`$${parseFloat(v).toFixed(2)}`, n === 'cum' ? 'Cumulative P&L' : 'Trade P&L']}
+                      contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 11 }}
+                    />
+                    <ReferenceLine y={0} stroke="var(--border)" strokeDasharray="4 2" />
+                    <Area type="monotone" dataKey="cum" stroke={lineColor} strokeWidth={2}
+                      fill="url(#pnlGrad)" name="cum" dot={{ r: 3, fill: lineColor }} />
+                  </AreaChart>
+                </ResponsiveContainer>
+                <div style={{ display: 'flex', gap: 20, borderTop: '1px solid var(--border)', paddingTop: 8, marginTop: 4, fontSize: 11 }}>
+                  <span>Trades: <strong>{chartData.length}</strong></span>
+                  <span>Total P&L: <strong style={{ color: lineColor }}>{cum >= 0 ? '+' : ''}${cum.toFixed(2)}</strong></span>
+                  <span style={{ marginLeft: 'auto', color: 'var(--dim)' }}>{pnlDays === 0 ? 'All time' : `Last ${pnlDays} days`}</span>
+                </div>
+              </>
+            )}
+          </div>
+        )
+      })()}
+
+      {/* Open positions — P&L over time line chart */}
+      {positions.length > 0 && (() => {
+        // Match each position to its DB order to get the placement timestamp
+        const posWithOrders = positions.map(p => {
+          const ticker = p.symbol ?? p.ticker
+          const isLong = parseFloat(p.qty ?? 0) >= 0
+          const side   = isLong ? 'buy' : 'sell'
+          const ord    = orders.find(o => o.ticker === ticker && o.side === side &&
+            ['pending_new','accepted','held','partially_filled'].includes(o.status))
+            ?? orders.find(o => o.ticker === ticker && o.side === side)
+          return { ticker, upnl: parseFloat(p.unrealized_pl ?? 0), startIso: ord?.created_at ?? null }
+        }).filter(p => p.startIso != null)
+
+        if (posWithOrders.length === 0) return null
+
+        const now = new Date()
+        // Build time axis: each position's open date + current time (de-duped, sorted)
+        const axisTimes = [...new Map(
+          [...posWithOrders.map(p => p.startIso), now.toISOString()]
+            .map(iso => [new Date(iso).getTime(), new Date(iso)])
+        ).values()].sort((a, b) => a - b)
+
+        // For each time point compute each ticker's linearly-interpolated P&L (0 → current)
+        const chartData = axisTimes.map(t => {
+          const point = {
+            label: t >= now
+              ? 'Now'
+              : t.toLocaleDateString([], { month: 'short', day: 'numeric' })
+                + ' ' + t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          }
+          let total = 0
+          posWithOrders.forEach(({ ticker, upnl, startIso }) => {
+            const start = new Date(startIso)
+            if (t < start) {
+              point[ticker] = null
+            } else {
+              const progress = now > start ? (t - start) / (now - start) : 1
+              const val = parseFloat((upnl * progress).toFixed(2))
+              point[ticker] = val
+              total += val
+            }
+          })
+          point['Total'] = parseFloat(total.toFixed(2))
+          return point
+        })
+
+        const totalUpnl  = posWithOrders.reduce((s, p) => s + p.upnl, 0)
+        const totalColor = totalUpnl >= 0 ? '#34d399' : '#f87171'
+        const COLORS     = ['#60a5fa', '#fbbf24', '#a78bfa', '#22d3ee', '#fb923c', '#f472b6']
+
+        return (
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '14px 16px' }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 700 }}>Open Positions — Unrealised P&L over Time</span>
+              <span style={{ fontWeight: 700, color: totalColor, fontSize: 13 }}>
+                {totalUpnl >= 0 ? '+' : ''}{fmtMoney(totalUpnl)} total
+              </span>
+            </div>
+            <ResponsiveContainer width="100%" height={210}>
+              <LineChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                <XAxis dataKey="label" tick={{ fontSize: 9 }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
+                <YAxis tick={{ fontSize: 10 }} axisLine={false} tickLine={false}
+                  tickFormatter={v => `$${v}`} width={44} />
+                <Tooltip
+                  formatter={(v, n) => v != null
+                    ? [`${v >= 0 ? '+' : ''}$${Math.abs(v).toFixed(2)}`, n]
+                    : [null, n]}
+                  contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 11 }}
+                />
+                <ReferenceLine y={0} stroke="var(--border)" strokeDasharray="4 2" />
+                {posWithOrders.map(({ ticker }, i) => (
+                  <Line key={ticker} type="monotone" dataKey={ticker}
+                    stroke={COLORS[i % COLORS.length]} strokeWidth={1.5}
+                    dot={{ r: 3 }} connectNulls={false} />
+                ))}
+                {/* Aggregate total — dashed, thicker */}
+                <Line type="monotone" dataKey="Total"
+                  stroke={totalColor} strokeWidth={2.5} strokeDasharray="5 3"
+                  dot={{ r: 4, fill: totalColor }} />
+                <Legend iconSize={8} wrapperStyle={{ fontSize: 10 }} />
+              </LineChart>
+            </ResponsiveContainer>
+            <div style={{ fontSize: 10, color: 'var(--dim)', marginTop: 4 }}>
+              Each line = linear estimate from $0 at order placement → current unrealised P&amp;L.
+              Dashed = portfolio total.
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* Open positions table */}
+      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '14px 16px' }}>
+        <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 10 }}>
+          Open Positions <span style={{ color: 'var(--dim)', fontWeight: 400 }}>({positions.length})</span>
+          {positions.length > 0 && <span style={{ fontSize: 10, color: 'var(--dim)', fontWeight: 400, marginLeft: 6 }}>· click a row for order details</span>}
+        </div>
+        {positions.length === 0
+          ? <div style={{ fontSize: 12, color: 'var(--dim)' }}>No open positions.</div>
+          : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th>Ticker</th><th>Side</th><th>Qty</th><th>Avg Entry</th>
+                    <th>Current Price</th><th>Market Value</th><th>Unrealised P&L</th><th>P&L %</th>
+                    <th>Stop</th><th>Target</th><th>Conf %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {positions.map((p, i) => {
+                    const ticker   = p.symbol ?? p.ticker
+                    const isLong   = parseFloat(p.qty ?? 0) >= 0
+                    const side     = isLong ? 'buy' : 'sell'
+                    // Find the most-recent matching order for stop/target/signal info
+                    const matchOrd = orders.find(o => o.ticker === ticker && o.side === side &&
+                      ['pending_new','accepted','held','partially_filled'].includes(o.status))
+                      ?? orders.find(o => o.ticker === ticker && o.side === side)
+                    const isExpPos = expandedPos === i
+                    const qty      = Math.abs(parseFloat(p.qty ?? 0))
+                    const upnl     = parseFloat(p.unrealized_pl ?? 0)
+                    const upnlPct  = p.unrealized_plpc != null ? parseFloat(p.unrealized_plpc) * 100 : null
+                    const upnlColor = upnl >= 0 ? 'var(--green)' : 'var(--red)'
+                    // Risk / reward based on matched order
+                    const riskPer  = matchOrd?.entry_price != null && matchOrd?.stop_price != null
+                      ? Math.abs(matchOrd.entry_price - matchOrd.stop_price) : null
+                    const rewPer   = matchOrd?.entry_price != null && matchOrd?.take_profit_price != null
+                      ? Math.abs(matchOrd.take_profit_price - matchOrd.entry_price) : null
+                    const maxLoss  = riskPer != null ? riskPer * qty : null
+                    const maxGain  = rewPer  != null ? rewPer  * qty : null
+                    return (
+                      <Fragment key={i}>
+                        <tr style={{ cursor: matchOrd ? 'pointer' : 'default' }}
+                          onClick={() => matchOrd && setExpandedPos(isExpPos ? null : i)}>
+                          <td style={{ width: 20, color: 'var(--dim)', fontSize: 11, userSelect: 'none' }}>
+                            {matchOrd ? (isExpPos ? '▾' : '▸') : ''}
+                          </td>
+                          <td><span className="badge-ticker">{ticker}</span></td>
+                          <td><span className={`badge ${isLong ? 'long' : 'short'}`}>{isLong ? '▲ LONG' : '▼ SHORT'}</span></td>
+                          <td>{qty}</td>
+                          <td>{fmtMoney(p.avg_entry_price)}</td>
+                          <td>{fmtMoney(p.current_price)}</td>
+                          <td>{fmtMoney(p.market_value)}</td>
+                          <td>
+                            <span style={{ color: upnlColor, fontWeight: 600 }}>
+                              {upnl >= 0 ? '+' : ''}{fmtMoney(upnl)}
+                            </span>
+                          </td>
+                          <td style={{ color: upnlColor }}>
+                            {upnlPct != null ? `${upnl >= 0 ? '+' : ''}${upnlPct.toFixed(2)}%` : '—'}
+                          </td>
+                          <td>
+                            {matchOrd?.stop_price != null ? (
+                              <div style={{ lineHeight: 1.4 }}>
+                                <span style={{ color: 'var(--red)' }}>{fmtMoney(matchOrd.stop_price)}</span>
+                                {maxLoss != null && <div style={{ fontSize: 10, color: 'var(--red)', opacity: 0.8 }}>−{fmtMoney(maxLoss)}</div>}
+                              </div>
+                            ) : '—'}
+                          </td>
+                          <td>
+                            {matchOrd?.take_profit_price != null ? (
+                              <div style={{ lineHeight: 1.4 }}>
+                                <span style={{ color: 'var(--green)' }}>{fmtMoney(matchOrd.take_profit_price)}</span>
+                                {maxGain != null && <div style={{ fontSize: 10, color: 'var(--green)', opacity: 0.8 }}>+{fmtMoney(maxGain)}</div>}
+                              </div>
+                            ) : '—'}
+                          </td>
+                          <td>{matchOrd?.signal_confidence != null ? `${matchOrd.signal_confidence.toFixed(0)}%` : '—'}</td>
+                        </tr>
+                        {/* Expanded position detail panel */}
+                        {isExpPos && matchOrd && (
+                          <tr style={{ background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
+                            <td colSpan={12} style={{ padding: '10px 18px' }}>
+                              <div style={{ display: 'flex', gap: 0, flexWrap: 'wrap', fontSize: 11 }}>
+                                {/* Position metrics */}
+                                <div style={{ paddingRight: 24 }}>
+                                  <div style={{ fontSize: 9, color: 'var(--dim)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 5 }}>Position</div>
+                                  <div style={{ display: 'grid', gridTemplateColumns: 'max-content max-content', columnGap: 8, rowGap: 2 }}>
+                                    {[
+                                      ['Shares',     <span style={{ fontWeight: 700 }}>{qty}</span>],
+                                      ['Avg Entry',  fmtMoney(p.avg_entry_price)],
+                                      ['Mkt Value',  fmtMoney(p.market_value)],
+                                      ['Unrealised', <span style={{ color: upnlColor, fontWeight: 700 }}>{upnl >= 0 ? '+' : ''}{fmtMoney(upnl)}</span>],
+                                      ['Cost Basis', fmtMoney(parseFloat(p.avg_entry_price ?? 0) * qty)],
+                                    ].map(([label, val], idx) => (
+                                      <Fragment key={idx}>
+                                        <span style={{ color: 'var(--dim)' }}>{label}</span>
+                                        <span>{val}</span>
+                                      </Fragment>
+                                    ))}
+                                  </div>
+                                </div>
+                                {/* Order bracket */}
+                                <div style={{ paddingLeft: 24, paddingRight: 24, borderLeft: '1px solid var(--border)' }}>
+                                  <div style={{ fontSize: 9, color: 'var(--dim)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 5 }}>Bracket Order</div>
+                                  <div style={{ display: 'grid', gridTemplateColumns: 'max-content max-content', columnGap: 8, rowGap: 2 }}>
+                                    {[
+                                      ['Entry',      fmtMoney(matchOrd.entry_price)],
+                                      ['Stop',       <span style={{ color: 'var(--red)' }}>{fmtMoney(matchOrd.stop_price)}</span>],
+                                      ['Target',     <span style={{ color: 'var(--green)' }}>{fmtMoney(matchOrd.take_profit_price)}</span>],
+                                      ['Max Loss',   maxLoss != null ? <span style={{ color: 'var(--red)', fontWeight: 700 }}>−{fmtMoney(maxLoss)}</span> : '—'],
+                                      ['Max Gain',   maxGain != null ? <span style={{ color: 'var(--green)', fontWeight: 700 }}>+{fmtMoney(maxGain)}</span> : '—'],
+                                      ['R:R',        riskPer && rewPer ? <span style={{ fontWeight: 700 }}>{(rewPer / riskPer).toFixed(1)}×</span> : '—'],
+                                      ['Status',     <span style={{ fontSize: 10, fontWeight: 700, color: statusColor(matchOrd.status), textTransform: 'uppercase' }}>{(matchOrd.status ?? '—').replace(/_/g,' ')}</span>],
+                                    ].map(([label, val], idx) => (
+                                      <Fragment key={idx}>
+                                        <span style={{ color: 'var(--dim)' }}>{label}</span>
+                                        <span>{val}</span>
+                                      </Fragment>
+                                    ))}
+                                  </div>
+                                </div>
+                                {/* Signal origin */}
+                                <div style={{ paddingLeft: 24, borderLeft: '1px solid var(--border)' }}>
+                                  <div style={{ fontSize: 9, color: 'var(--dim)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 5 }}>Signal</div>
+                                  <div style={{ display: 'grid', gridTemplateColumns: 'max-content max-content', columnGap: 8, rowGap: 2 }}>
+                                    {(() => {
+                                      const hasAi = (matchOrd.signal_source ?? '').split('+').some(s => s.trim() === 'ai')
+                                      return [
+                                        ['Conf',    <span style={{ fontWeight: 700 }}>{matchOrd.signal_confidence != null ? `${matchOrd.signal_confidence.toFixed(0)}%` : '—'}</span>],
+                                        ['Mode',    <span style={{
+                                          fontSize: 9, fontWeight: 700, textTransform: 'uppercase', padding: '1px 5px', borderRadius: 3,
+                                          background: hasAi ? 'color-mix(in srgb, var(--accent) 15%, transparent)' : 'color-mix(in srgb, var(--dim) 10%, transparent)',
+                                          color: hasAi ? 'var(--accent)' : 'var(--dim)',
+                                          border: `1px solid ${hasAi ? 'color-mix(in srgb, var(--accent) 30%, transparent)' : 'color-mix(in srgb, var(--dim) 20%, transparent)'}`,
+                                        }}>{hasAi ? '🤖 LLM' : '📐 Rules'}</span>],
+                                        ['Sources', <span style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                                          {(matchOrd.signal_source ?? '—').split('+').map((s, idx2) => <span key={idx2}>{s.trim()}</span>)}
+                                        </span>],
+                                        ['Placed',  matchOrd.created_at ? new Date(matchOrd.created_at).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '—'],
+                                      ].map(([label, val], idx) => (
+                                        <Fragment key={idx}>
+                                          <span style={{ color: 'var(--dim)' }}>{label}</span>
+                                          <span>{val}</span>
+                                        </Fragment>
+                                      ))
+                                    })()}
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )
+        }
+      </div>
+
+      {/* Orders table */}
+      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '14px 16px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 12, fontWeight: 700 }}>Orders</span>
+          <span style={{ fontSize: 11, color: 'var(--dim)' }}>({filteredOrders.length})</span>
+          <div style={{ display: 'flex', gap: 4, marginLeft: 'auto' }}>
+            {['all','open','filled','cancelled'].map(f => (
+              <button key={f} onClick={() => setOrderFilter(f)}
+                style={{
+                  fontSize: 10, padding: '2px 9px', borderRadius: 12, cursor: 'pointer', textTransform: 'capitalize',
+                  background: orderFilter === f ? 'var(--accent)' : 'transparent',
+                  color: orderFilter === f ? '#fff' : 'var(--dim)',
+                  border: `1px solid ${orderFilter === f ? 'var(--accent)' : 'var(--border)'}`,
+                  fontWeight: orderFilter === f ? 700 : 400,
+                }}
+              >{f}</button>
+            ))}
+          </div>
+        </div>
+        {filteredOrders.length === 0
+          ? <div style={{ fontSize: 12, color: 'var(--dim)' }}>No orders yet.</div>
+          : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th>Ticker</th><th>Direction</th><th>Status</th>
+                    <th>Position Size</th><th>Entry</th><th>Stop</th><th>Take Profit</th>
+                    <th>Filled @</th><th>Realised P&L</th>
+                    <th>Conf %</th><th>Source</th><th>Placed</th><th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredOrders.map(o => {
+                    const isOpen = ['pending_new','accepted','held','partially_filled'].includes(o.status)
+                    // Derive whole-share qty (same formula used when placing the order).
+                    // No max(1,...) here — if floor < 1 the order should never have been placed.
+                    const sharesQty  = o.qty != null
+                      ? parseFloat(o.qty)
+                      : (o.entry_price ? Math.floor((o.notional ?? 500) / o.entry_price) : null)
+                    const actualCost = sharesQty != null && o.entry_price ? sharesQty * o.entry_price : null
+                    // Per-position risk / reward in $
+                    const isLong  = o.side === 'buy'
+                    const riskPer = o.entry_price != null && o.stop_price != null
+                      ? Math.abs(o.entry_price - o.stop_price) : null
+                    const rewPer  = o.entry_price != null && o.take_profit_price != null
+                      ? Math.abs(o.take_profit_price - o.entry_price) : null
+                    const maxLoss = riskPer != null && sharesQty != null ? riskPer * sharesQty : null
+                    const maxGain = rewPer  != null && sharesQty != null ? rewPer  * sharesQty : null
+                    const rr      = maxLoss && maxGain ? (maxGain / maxLoss).toFixed(1) : null
+                    const isExpanded = expandedOrder === o.id
+                    const fmtTs = (iso) => iso ? new Date(iso).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '—'
+                    return (
+                      <Fragment key={o.id}>
+                      <tr
+                        id={`paper-order-${o.id}`}
+                        style={{ cursor: 'pointer' }}
+                        onClick={() => setExpandedOrder(isExpanded ? null : o.id)}
+                      >
+                        <td style={{ width: 20, color: 'var(--dim)', fontSize: 11, userSelect: 'none' }}>
+                          {isExpanded ? '▾' : '▸'}
+                        </td>
+                        <td><span className="badge-ticker">{o.ticker}</span></td>
+                        <td>
+                          <span className={`badge ${o.side === 'buy' ? 'long' : 'short'}`}>
+                            {o.side === 'buy' ? '▲ LONG' : '▼ SHORT'}
+                          </span>
+                        </td>
+                        <td>
+                          <span style={{ fontSize: 10, fontWeight: 700, color: statusColor(o.status), textTransform: 'uppercase', display: 'flex', flexDirection: 'column', lineHeight: 1.3 }}>
+                            {(o.status ?? '—').replace(/_/g,' ').split(' ').map((w, i) => <span key={i}>{w}</span>)}
+                          </span>
+                        </td>
+                        {/* Position size: whole shares + actual cost */}
+                        <td title={`Target: $${o.notional ?? '—'} → ${sharesQty ?? '?'} whole share(s) @ ${fmtMoney(o.entry_price)}`}>
+                          <div style={{ lineHeight: 1.4 }}>
+                            <span style={{ fontWeight: 700 }}>{sharesQty ?? '—'} shares</span>
+                            {actualCost != null && (
+                              <div style={{ fontSize: 10, color: 'var(--dim)' }}>{fmtMoney(actualCost)}</div>
+                            )}
+                          </div>
+                        </td>
+                        <td>{fmtMoney(o.entry_price)}</td>
+                        <td>
+                          <div style={{ lineHeight: 1.4 }}>
+                            <span style={{ color: 'var(--red)' }}>{fmtMoney(o.stop_price)}</span>
+                            {maxLoss != null && (
+                              <div style={{ fontSize: 10, color: 'var(--red)', opacity: 0.8 }}>−{fmtMoney(maxLoss)}</div>
+                            )}
+                          </div>
+                        </td>
+                        <td>
+                          <div style={{ lineHeight: 1.4 }}>
+                            <span style={{ color: 'var(--green)' }}>{fmtMoney(o.take_profit_price)}</span>
+                            {maxGain != null && (
+                              <div style={{ fontSize: 10, color: 'var(--green)', opacity: 0.8 }}>+{fmtMoney(maxGain)}</div>
+                            )}
+                          </div>
+                        </td>
+                        <td>
+                          <div style={{ lineHeight: 1.4 }}>
+                            {fmtMoney(o.filled_avg_price)}
+                            {rr != null && <div style={{ fontSize: 10, color: 'var(--dim)' }}>R:R {rr}×</div>}
+                          </div>
+                        </td>
+                        <td>{fmtPnl(o.realized_pnl)}</td>
+                        <td>{o.signal_confidence != null ? `${o.signal_confidence.toFixed(0)}%` : '—'}</td>
+                        <td className="text-dim" style={{ fontSize: 10 }}>
+                          {(o.signal_source ?? '—').split('+').map((s, i) => (
+                            <div key={i}>{s.trim()}</div>
+                          ))}
+                        </td>
+                        <td className="ts" style={{ fontSize: 10, lineHeight: 1.4 }}>
+                          {o.created_at ? (
+                            <>
+                              <div>{new Date(o.created_at).toLocaleDateString([], { month:'short', day:'numeric' })}</div>
+                              <div>{new Date(o.created_at).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}</div>
+                            </>
+                          ) : '—'}
+                        </td>
+                        <td>
+                          {isOpen && (
+                            <button
+                              onClick={() => cancelOrder(o.id, o.alpaca_order_id)}
+                              disabled={cancelling[o.id]}
+                              style={{ fontSize: 10, padding: '2px 7px', borderRadius: 4, cursor: 'pointer',
+                                background: 'color-mix(in srgb, var(--red) 12%, transparent)',
+                                border: '1px solid color-mix(in srgb, var(--red) 30%, transparent)',
+                                color: 'var(--red)', fontWeight: 600 }}
+                            >
+                              {cancelling[o.id] ? '…' : 'Cancel'}
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                      {/* Expanded detail row */}
+                      {isExpanded && (
+                        <tr style={{ background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
+                          <td colSpan={14} style={{ padding: '10px 18px' }}>
+                            {/* Tight 3-column layout — each column is a definition grid (label · value side-by-side) */}
+                            <div style={{ display: 'flex', gap: 0, flexWrap: 'wrap', fontSize: 11 }}>
+
+                              {/* Trade math */}
+                              <div style={{ paddingRight: 24 }}>
+                                <div style={{ fontSize: 9, color: 'var(--dim)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 5 }}>Trade Math</div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'max-content max-content', columnGap: 8, rowGap: 2 }}>
+                                  {[
+                                    ['Shares',          <span style={{ fontWeight: 700 }}>{sharesQty ?? '—'}</span>],
+                                    ['Invested',        fmtMoney(actualCost)],
+                                    ['Risk/share',      <span style={{ color: 'var(--red)' }}>{riskPer != null ? `−${fmtMoney(riskPer)}` : '—'}</span>],
+                                    ['Reward/share',    <span style={{ color: 'var(--green)' }}>{rewPer != null ? `+${fmtMoney(rewPer)}` : '—'}</span>],
+                                    ['Max loss',        <span style={{ color: 'var(--red)', fontWeight: 700 }}>{maxLoss != null ? `−${fmtMoney(maxLoss)}` : '—'}</span>],
+                                    ['Max gain',        <span style={{ color: 'var(--green)', fontWeight: 700 }}>{maxGain != null ? `+${fmtMoney(maxGain)}` : '—'}</span>],
+                                    ['R:R',             <span style={{ fontWeight: 700 }}>{rr != null ? `${rr}×` : '—'}</span>],
+                                  ].map(([label, val], idx) => (
+                                    <Fragment key={idx}>
+                                      <span style={{ color: 'var(--dim)', paddingTop: idx === 4 ? 4 : undefined, borderTop: idx === 4 ? '1px solid var(--border)' : undefined }}>{label}</span>
+                                      <span style={{ paddingTop: idx === 4 ? 4 : undefined, borderTop: idx === 4 ? '1px solid var(--border)' : undefined }}>{val}</span>
+                                    </Fragment>
+                                  ))}
+                                </div>
+                              </div>
+
+                              {/* Order details */}
+                              <div style={{ paddingLeft: 24, paddingRight: 24, borderLeft: '1px solid var(--border)' }}>
+                                <div style={{ fontSize: 9, color: 'var(--dim)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 5 }}>Order</div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'max-content max-content', columnGap: 8, rowGap: 2 }}>
+                                  {[
+                                    ['Alpaca ID', <span style={{ fontFamily: 'monospace', fontSize: 10 }} title={o.alpaca_order_id}>{o.alpaca_order_id ? o.alpaca_order_id.slice(0,8) + '…' : '—'}</span>],
+                                    ['Signal',    `#${o.signal_id ?? '—'}`],
+                                    ['Placed',    fmtTs(o.created_at)],
+                                    ['Filled',    fmtTs(o.filled_at)],
+                                    ['Closed',    fmtTs(o.closed_at)],
+                                  ].map(([label, val], idx) => (
+                                    <Fragment key={idx}>
+                                      <span style={{ color: 'var(--dim)' }}>{label}</span>
+                                      <span>{val}</span>
+                                    </Fragment>
+                                  ))}
+                                </div>
+                              </div>
+
+                              {/* Signal origin */}
+                              <div style={{ paddingLeft: 24, borderLeft: '1px solid var(--border)' }}>
+                                <div style={{ fontSize: 9, color: 'var(--dim)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 5 }}>Signal</div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'max-content max-content', columnGap: 8, rowGap: 2 }}>
+                                  {(() => {
+                                    const hasAi = (o.signal_source ?? '').split('+').some(s => s.trim() === 'ai')
+                                    return [
+                                      ['Conf',     <span style={{ fontWeight: 700 }}>{o.signal_confidence != null ? `${o.signal_confidence.toFixed(0)}%` : '—'}</span>],
+                                      ['Mode',     <span style={{
+                                        fontSize: 9, fontWeight: 700, textTransform: 'uppercase', padding: '1px 5px', borderRadius: 3,
+                                        background: hasAi ? 'color-mix(in srgb, var(--accent) 15%, transparent)' : 'color-mix(in srgb, var(--dim) 10%, transparent)',
+                                        color: hasAi ? 'var(--accent)' : 'var(--dim)',
+                                        border: `1px solid ${hasAi ? 'color-mix(in srgb, var(--accent) 30%, transparent)' : 'color-mix(in srgb, var(--dim) 20%, transparent)'}`,
+                                      }}>{hasAi ? '🤖 LLM' : '📐 Rules'}</span>],
+                                      ['Sources',  <span style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                                        {(o.signal_source ?? '—').split('+').map((s, i) => <span key={i}>{s.trim()}</span>)}
+                                      </span>],
+                                      ['At',       fmtTs(o.signal_timestamp)],
+                                    ].map(([label, val], idx) => (
+                                      <Fragment key={idx}>
+                                        <span style={{ color: 'var(--dim)' }}>{label}</span>
+                                        <span>{val}</span>
+                                      </Fragment>
+                                    ))
+                                  })()}
+                                </div>
+                              </div>
+
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )
+        }
+      </div>
+    </div>
+  )
+}
+
 const BT_COMPARATOR_COLORS = ['#58a6ff','#34d399','#fbbf24','#f87171','#a855f7','#22d3ee']
 
 function BacktestPage({ wl, usage }) {
@@ -5337,7 +6635,7 @@ function BacktestPage({ wl, usage }) {
   // Distinct tickers from active signals + past backtest runs — for quick-add
   const [signalTickers, setSignalTickers] = useState([])
   useEffect(() => {
-    fetch(`${API}/signals?limit=500`)
+    fetch(`${API}/signals?limit=500`, { headers: getAuthHeaders() })
       .then(r => r.json())
       .then(d => {
         const fromSignals = (d.signals ?? []).map(s => s.ticker).filter(Boolean)
@@ -5366,31 +6664,38 @@ function BacktestPage({ wl, usage }) {
   const [initBalance, setInitBalance] = useState(10000)
   const [posSizePct, setPosSizePct] = useState(10)  // % of balance per trade
 
-  // ── Saved param profiles (localStorage) ──────────────────────────────────
-  const [profiles, setProfiles] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('bt_profiles') || '[]') } catch { return [] }
-  })
+  // ── Saved param profiles (DB-backed) ─────────────────────────────────────
+  const [profiles, setProfiles] = useState([])
   const [profileNameInput, setProfileNameInput] = useState('')
   const [showProfileSave, setShowProfileSave] = useState(false)
 
-  const _saveProfile = () => {
+  const _reloadProfiles = useCallback(() => {
+    fetch(`${API}/backtest/profiles`, { headers: getAuthHeaders() })
+      .then(r => r.json())
+      .then(d => setProfiles(d.profiles ?? []))
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => { _reloadProfiles() }, [_reloadProfiles])
+
+  const _saveProfile = async () => {
     const name = profileNameInput.trim()
     if (!name) return
-    const p = {
-      id: Date.now(),
-      name,
-      createdAt: new Date().toISOString().slice(0, 10),
-      params: {
-        tickers: selTickers,
-        confFloor, maxHold, scanInterval, useLlm, isOos,
-        atrMult, rrRatio, rpm, initBalance, posSizePct, cashoutR,
-      },
-    }
-    const next = [p, ...profiles.filter(x => x.name !== name)]  // replace same name
-    setProfiles(next)
-    try { localStorage.setItem('bt_profiles', JSON.stringify(next)) } catch {}
+    await fetch(`${API}/backtest/profiles`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      body: JSON.stringify({
+        name,
+        params: {
+          tickers: selTickers,
+          confFloor, maxHold, scanInterval, useLlm, isOos,
+          atrMult, rrRatio, rpm, initBalance, posSizePct, cashoutR,
+        },
+      }),
+    }).catch(() => {})
     setProfileNameInput('')
     setShowProfileSave(false)
+    _reloadProfiles()
   }
 
   const _loadProfile = (p) => {
@@ -5409,10 +6714,11 @@ function BacktestPage({ wl, usage }) {
     setCashoutR(q.cashoutR ?? null)
   }
 
-  const _deleteProfile = (id) => {
-    const next = profiles.filter(x => x.id !== id)
-    setProfiles(next)
-    try { localStorage.setItem('bt_profiles', JSON.stringify(next)) } catch {}
+  const _deleteProfile = async (id) => {
+    await fetch(`${API}/backtest/profiles/${id}`, {
+      method: 'DELETE', headers: getAuthHeaders(),
+    }).catch(() => {})
+    _reloadProfiles()
   }
   const [cashoutR, setCashoutR] = useState(null)     // null = disabled; number = R level
 
@@ -5435,7 +6741,7 @@ function BacktestPage({ wl, usage }) {
     catch { return null }
   })
   const loadRun = useCallback((runId) => {
-    fetch(`${API}/backtest/${runId}`)
+    fetch(`${API}/backtest/${runId}`, { headers: getAuthHeaders() })
       .then(res => res.json())
       .then(d => {
         setReport(d)
@@ -5477,7 +6783,7 @@ function BacktestPage({ wl, usage }) {
   const [quotaInfo, setQuotaInfo] = useState(null)
   useEffect(() => {
     if (!useLlm) return
-    fetch(`${API}/provider/quota`).then(r => r.json()).then(setQuotaInfo).catch(() => {})
+    fetch(`${API}/provider/quota`, { headers: getAuthHeaders() }).then(r => r.json()).then(setQuotaInfo).catch(() => {})
   }, [useLlm])
 
   // ── Feature 2: model/provider change detection (no refresh needed) ────────
@@ -5661,7 +6967,7 @@ function BacktestPage({ wl, usage }) {
     else {
       next.add(runId)
       if (!compareData[runId]) {
-        const data = await fetch(`${API}/backtest/${runId}`).then(r => r.json()).catch(() => null)
+        const data = await fetch(`${API}/backtest/${runId}`, { headers: getAuthHeaders() }).then(r => r.json()).catch(() => null)
         if (data) setCompareData(prev => ({...prev, [runId]: data}))
       }
     }
@@ -5707,7 +7013,7 @@ function BacktestPage({ wl, usage }) {
   })()
 
   const deleteRun = async (runId) => {
-    await fetch(`${API}/backtest/${runId}`, { method: 'DELETE' })
+    await fetch(`${API}/backtest/${runId}`, { method: 'DELETE', headers: getAuthHeaders() })
     reloadRuns()
     setCompareSel(s => { const n = new Set(s); n.delete(runId); return n })
   }
@@ -5720,7 +7026,7 @@ function BacktestPage({ wl, usage }) {
     if (!reportRunId) return
     setAiReviewLoading(true); setAiReview(null); setAiReviewError(null)
     try {
-      const res = await fetch(`${API}/backtest/${reportRunId}/review`, { method: 'POST' })
+      const res = await fetch(`${API}/backtest/${reportRunId}/review`, { method: 'POST', headers: getAuthHeaders() })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       setAiReview(await res.json())
     } catch (e) {
@@ -5734,7 +7040,7 @@ function BacktestPage({ wl, usage }) {
     if (!reportRunId) return
     setFloorSuggestLoading(true); setFloorSuggestError(null)
     try {
-      const res = await fetch(`${API}/backtest/${reportRunId}/experiment-advisor`, { method: 'POST' })
+      const res = await fetch(`${API}/backtest/${reportRunId}/experiment-advisor`, { method: 'POST', headers: getAuthHeaders() })
       if (!res.ok) throw new Error(await res.text())
       setFloorSuggest(await res.json())
     } catch (e) { setFloorSuggestError(e.message) }
@@ -5747,7 +7053,7 @@ function BacktestPage({ wl, usage }) {
     try {
       const res = await fetch(`${API}/backtest/compare`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ run_ids: [...compareSel] }),
       })
       if (!res.ok) throw new Error(await res.text())
@@ -7499,29 +8805,32 @@ function BacktestPage({ wl, usage }) {
 
 // ─── Paper Orders Panel ───────────────────────────────────────────────────────
 
-function PaperOrdersPanel({ open, onToggle }) {
-  const [account,    setAccount]    = useState(null)
-  const [clock,      setClock]      = useState(null)
-  const [orders,     setOrders]     = useState([])
-  const [positions,  setPositions]  = useState([])
-  const [loading,    setLoading]    = useState(false)
-  const [error,      setError]      = useState(null)
-  const [cancelling, setCancelling] = useState({})
+function PaperOrdersPanel({ open, onToggle, onOrderClick }) {
+  const [account,      setAccount]      = useState(null)
+  const [clock,        setClock]        = useState(null)
+  const [orders,       setOrders]       = useState([])
+  const [positions,    setPositions]    = useState([])
+  const [paperEnabled, setPaperEnabled] = useState(null)   // null = unknown, true/false = known
+  const [loading,      setLoading]      = useState(false)
+  const [error,        setError]        = useState(null)
+  const [cancelling,   setCancelling]   = useState({})
 
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const [accRes, clkRes, ordRes, posRes] = await Promise.all([
-        fetch('/paper/account'),
-        fetch('/paper/clock'),
-        fetch('/paper/orders'),
-        fetch('/paper/positions'),
+      const [accRes, clkRes, ordRes, posRes, cfgRes] = await Promise.all([
+        fetch(`${API}/paper/account`,    { headers: getAuthHeaders() }),
+        fetch(`${API}/paper/clock`,      { headers: getAuthHeaders() }),
+        fetch(`${API}/paper/orders`,     { headers: getAuthHeaders() }),
+        fetch(`${API}/paper/positions`,  { headers: getAuthHeaders() }),
+        fetch(`${API}/settings`,         { headers: getAuthHeaders() }),
       ])
       if (accRes.ok) { const d = await accRes.json(); setAccount(d.account ?? null) }
       if (clkRes.ok) setClock(await clkRes.json())
       if (ordRes.ok)  setOrders((await ordRes.json()).orders ?? [])
       if (posRes.ok)  setPositions((await posRes.json()).positions ?? [])
+      if (cfgRes.ok) { const d = await cfgRes.json(); setPaperEnabled(d.paper_trading_enabled ?? false) }
     } catch (e) {
       setError('Failed to load paper data')
     } finally {
@@ -7539,7 +8848,7 @@ function PaperOrdersPanel({ open, onToggle }) {
   const cancelOrder = async (dbId, alpacaId) => {
     setCancelling(c => ({ ...c, [dbId]: true }))
     try {
-      await fetch(`/paper/orders/${dbId}/cancel`, { method: 'POST' })
+      await fetch(`${API}/paper/orders/${dbId}/cancel`, { method: 'POST', headers: getAuthHeaders() })
       await load()
     } finally {
       setCancelling(c => { const n = { ...c }; delete n[dbId]; return n })
@@ -7623,22 +8932,17 @@ function PaperOrdersPanel({ open, onToggle }) {
 
       {error && <div style={{ fontSize: 11, color: '#fc9a9a' }}>{error}</div>}
 
-      {/* Market clock pill */}
-      {clock && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
-          <span style={{
-            width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-            background: clock.is_open ? '#69db7c' : '#888',
-            boxShadow: clock.is_open ? '0 0 5px #69db7c' : 'none',
-          }} />
-          <span style={{ color: clock.is_open ? '#69db7c' : '#888', fontWeight: 600 }}>
-            {clock.is_open ? 'Market Open' : 'Market Closed'}
-          </span>
-          {!clock.is_open && clock.next_open && (
-            <span style={{ color: '#555', fontSize: 10 }}>
-              · opens {new Date(clock.next_open).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-            </span>
-          )}
+      {/* Paper trading enabled/disabled badge */}
+      {paperEnabled !== null && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 7,
+          padding: '5px 9px', borderRadius: 6, fontSize: 11,
+          background: paperEnabled ? 'color-mix(in srgb, #69db7c 12%, transparent)' : 'color-mix(in srgb, #fc9a9a 10%, transparent)',
+          border: `1px solid ${paperEnabled ? 'color-mix(in srgb, #69db7c 30%, transparent)' : 'color-mix(in srgb, #fc9a9a 25%, transparent)'}`,
+          color: paperEnabled ? '#69db7c' : '#fc9a9a',
+        }}>
+          <span style={{ fontSize: 9 }}>{paperEnabled ? '●' : '○'}</span>
+          <span style={{ fontSize: 10 }}>{paperEnabled ? 'Auto-trading enabled — orders placed on signals' : 'Auto-trading disabled — enable in Settings → Paper Trading'}</span>
         </div>
       )}
 
@@ -7734,10 +9038,19 @@ function PaperOrdersPanel({ open, onToggle }) {
           <div style={{ color: '#555', fontSize: 12, textAlign: 'center', padding: '8px 0' }}>No orders yet</div>
         )}
         {orders.slice(0, 20).map((o) => (
-          <div key={o.id} style={{
-            padding: '6px 8px', borderRadius: 6, background: '#1a1a2a',
-            marginBottom: 4, fontSize: 12,
-          }}>
+          <div
+            key={o.id}
+            onClick={() => onOrderClick?.(o.id)}
+            style={{
+              padding: '6px 8px', borderRadius: 6, background: '#1a1a2a',
+              marginBottom: 4, fontSize: 12,
+              cursor: onOrderClick ? 'pointer' : 'default',
+              transition: 'background 0.15s',
+            }}
+            onMouseEnter={e => { if (onOrderClick) e.currentTarget.style.background = '#1e2235' }}
+            onMouseLeave={e => { if (onOrderClick) e.currentTarget.style.background = '#1a1a2a' }}
+            title={onOrderClick ? 'Click to view on Trading page' : undefined}
+          >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
               <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
                 <span style={{ fontWeight: 700 }}>{o.ticker}</span>
@@ -7779,14 +9092,253 @@ function PaperOrdersPanel({ open, onToggle }) {
   )
 }
 
+// ─── Login screen ─────────────────────────────────────────────────────────────
+
+const LOGIN_TICKER_TAPE = ['SPY +0.34%','AAPL +1.2%','NVDA -0.8%','TSLA +2.1%','BTC +3.4%','MSFT +0.6%','ACN +1.7%','AMZN -0.3%','META +1.8%','EUROB +4.2%','GOOG +0.9%','GLD -0.2%','QQQ +0.7%','JPM +0.4%']
+const LOGIN_LOGS = [
+  '> Connecting to market data feed…',
+  '> Authenticated with Alpaca Paper API ✓',
+  '> Loading LLM inference engine…',
+  '> Multi-timeframe RSI engine ready ✓',
+  '> Macro regime filter online ✓',
+  '> Opportunity scanner armed ✓',
+  '> All systems nominal. Awaiting operator clearance.',
+]
+
+function LoginScreen({ onLogin }) {
+  const [input, setInput]     = useState('')
+  const [err, setErr]         = useState('')
+  const [loading, setLoading] = useState(false)
+  const [devMode, setDevMode] = useState(null)
+  const [logLines, setLogLines] = useState([])
+  const [shake, setShake]       = useState(false)
+  const inputRef = useRef(null)
+
+  // Boot log animation
+  useEffect(() => {
+    let i = 0
+    const t = setInterval(() => {
+      setLogLines(prev => [...prev, LOGIN_LOGS[i]])
+      i++
+      if (i >= LOGIN_LOGS.length) clearInterval(t)
+    }, 420)
+    return () => clearInterval(t)
+  }, [])
+
+  // Dev mode probe
+  useEffect(() => {
+    fetch(`${API}/auth/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: '' }) })
+      .then(r => r.json()).then(d => { if (d.dev_mode) setDevMode(true) }).catch(() => {})
+  }, [])
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    setLoading(true); setErr('')
+    try {
+      const r = await fetch(`${API}/auth/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: input }),
+      })
+      if (r.ok) {
+        sessionStorage.setItem('admin_token', input)
+        onLogin()
+      } else {
+        setErr('ACCESS DENIED — invalid credentials')
+        setShake(true)
+        setTimeout(() => setShake(false), 600)
+        inputRef.current?.select()
+      }
+    } catch {
+      setErr('OFFLINE — backend unreachable')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', background: '#0a0f0a', overflow: 'hidden', zIndex: 9999 }}>
+
+      {/* ══ Full-width ticker tape ══ */}
+      <div style={{ overflow: 'hidden', background: '#001a00', borderBottom: '1px solid #00ff4125', padding: '6px 0', flexShrink: 0 }}>
+        <div style={{ display: 'flex', gap: 40, whiteSpace: 'nowrap', animation: 'loginTicker 22s linear infinite', fontFamily: '"Courier New", monospace', fontSize: 11, color: '#00ff41', letterSpacing: '0.5px' }}>
+          {[...LOGIN_TICKER_TAPE, ...LOGIN_TICKER_TAPE].map((t, i) => (
+            <span key={i} style={{ color: t.includes('-') ? '#ff4444' : '#00ff41' }}>{t}</span>
+          ))}
+        </div>
+      </div>
+
+      {/* ══ Panels row ══ */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+
+      {/* ══ LEFT — hacker branding ══ */}
+      <div style={{ width: 420, flexShrink: 0, background: '#0a0f0a', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden', borderRight: '1px solid #00ff4120' }}>
+
+        {/* CRT scanline overlay */}
+        <div style={{ pointerEvents: 'none', position: 'absolute', inset: 0, background: 'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,.18) 2px, rgba(0,0,0,.18) 4px)', zIndex: 10 }} />
+
+        {/* Body */}
+        <div style={{ flex: 1, padding: '28px 36px', display: 'flex', flexDirection: 'column', gap: 20, position: 'relative', zIndex: 1 }}>
+
+          {/* Logo */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ width: 36, height: 36, border: '1px solid #00cc33', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, boxShadow: '0 0 8px #00ff4130' }}>📈</div>
+            <span style={{ fontFamily: '"Courier New", monospace', fontSize: 14, color: '#00ff41', textShadow: '0 0 10px #00ff4180', letterSpacing: 3, textTransform: 'uppercase' }}>OffGrid&nbsp;Trader</span>
+          </div>
+
+          {/* Tagline */}
+          <div style={{ fontFamily: '"Courier New", monospace', color: '#00cc33', fontSize: 22, fontWeight: 'bold', lineHeight: 1.3, textShadow: '0 0 15px #00ff4140' }}>
+            Algorithmic signals,<br /><span style={{ color: '#38bdf8', textShadow: '0 0 10px #38bdf850' }}>institutional edge.</span>
+          </div>
+
+          <div style={{ fontFamily: '"Courier New", monospace', fontSize: 12, color: '#4a8f5a', lineHeight: 1.7, maxWidth: 380 }}>
+            Multi-timeframe RSI · macro regime filtering<br />
+            LLM-powered analysis · Alpaca paper execution<br />
+            Running 24/7. Waiting for your clearance.
+          </div>
+
+          {/* Boot log box */}
+          <div style={{ border: '1px solid #00ff4115', background: '#020a02', padding: '14px 16px', borderRadius: 2, display: 'flex', flexDirection: 'column', gap: 4, minHeight: 140 }}>
+            {logLines.map((l, i) => (
+              <div key={i} style={{ fontFamily: '"Courier New", monospace', fontSize: 11, color: l?.startsWith('> All') || l?.includes('✓') ? '#00cc33' : l?.includes('armed') ? '#ffcc00' : '#4a8f5a', opacity: i === logLines.length - 1 ? 1 : 0.8, whiteSpace: 'nowrap' }}>{l}</div>
+            ))}
+            {logLines.length < LOGIN_LOGS.length && (
+              <span style={{ fontFamily: '"Courier New", monospace', fontSize: 11, color: '#00ff41', animation: 'loginBlink 1s step-end infinite' }}>█</span>
+            )}
+          </div>
+
+          {/* Stats */}
+          <div style={{ display: 'flex', gap: 24, marginTop: 'auto', paddingTop: 16, borderTop: '1px solid #00ff4115' }}>
+            {[['15m','Scan int.'],['3×','Timeframes'],['LLM','AI-backed']].map(([v,l]) => (
+              <div key={l}>
+                <div style={{ fontFamily: '"Courier New", monospace', fontSize: 20, color: '#00ff41', textShadow: '0 0 8px #00ff4160' }}>{v}</div>
+                <div style={{ fontFamily: '"Courier New", monospace', fontSize: 10, color: '#3a5a3a', textTransform: 'uppercase', letterSpacing: 1, marginTop: 2 }}>{l}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Status bar */}
+        <div style={{ fontFamily: '"Courier New", monospace', fontSize: 10, color: '#2a4a2a', background: '#010501', padding: '5px 36px', borderTop: '1px solid #00ff4112', letterSpacing: '0.5px', flexShrink: 0, zIndex: 1 }}>
+          SYS: <span style={{ color: '#00cc33' }}>NOMINAL</span> &nbsp;|&nbsp; DB: <span style={{ color: '#00cc33' }}>CONNECTED</span> &nbsp;|&nbsp; STREAM: <span style={{ color: '#00cc33' }}>LIVE</span> &nbsp;|&nbsp; v2.3.0
+        </div>
+      </div>
+
+      {/* ══ RIGHT — hacker form panel ══ */}
+      <div style={{ flex: 1, background: '#050a05', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', padding: '48px 44px', position: 'relative', borderLeft: '1px solid #00ff4115' }}>
+
+        {/* scanlines on right too */}
+        <div style={{ pointerEvents: 'none', position: 'absolute', inset: 0, background: 'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,.18) 2px, rgba(0,0,0,.18) 4px)' }} />
+
+        <div style={{ width: '100%', maxWidth: 400, position: 'relative', zIndex: 1 }}>
+
+          {/* Terminal title bar */}
+          <div style={{ background: '#001a00', border: '1px solid #00ff4130', borderBottom: 'none', borderRadius: '4px 4px 0 0', padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#ff5f57', display: 'inline-block' }} />
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#febc2e', display: 'inline-block' }} />
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#28c840', display: 'inline-block' }} />
+            <span style={{ marginLeft: 8, fontSize: 10, color: '#00ff4160', letterSpacing: 2, fontFamily: '"Courier New", monospace' }}>SECURE TERMINAL — AUTH</span>
+          </div>
+
+          {/* Card body */}
+          <div style={{ border: '1px solid #00ff4130', borderRadius: '0 0 4px 4px', background: '#020a02', boxShadow: '0 0 30px #00ff4115, 0 0 60px #00ff4108', animation: shake ? 'loginShake 0.5s' : undefined }}>
+
+            {/* Operator header */}
+            <div style={{ padding: '18px 20px 0', fontFamily: '"Courier New", monospace' }}>
+              <div style={{ fontSize: 10, color: '#00ff4160', letterSpacing: 2, marginBottom: 4 }}>
+                {devMode ? '// DEV MODE — no credentials required' : '// OPERATOR CLEARANCE REQUIRED'}
+              </div>
+              <div style={{ fontSize: 18, color: '#00ff41', textShadow: '0 0 10px #00ff4160', marginBottom: 2 }}>Access Terminal</div>
+              <div style={{ fontSize: 11, color: '#3a6a3a', marginBottom: 16 }}>Enter your admin token to authenticate.</div>
+            </div>
+
+            {/* Form */}
+            <form onSubmit={handleSubmit} style={{ padding: '0 20px 20px', fontFamily: '"Courier New", monospace' }}>
+
+              <div style={{ fontSize: 10, color: '#3a6a3a', letterSpacing: 1, marginBottom: 6 }}>ACCESS_TOKEN</div>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: 14 }}>
+                <span style={{ color: '#00ff41', fontSize: 14, padding: '9px 10px', background: '#001a00', border: '1px solid #00ff4140', borderRight: 'none', borderRadius: '3px 0 0 3px', flexShrink: 0 }}>$</span>
+                <input
+                  ref={inputRef}
+                  type="password"
+                  value={input}
+                  onChange={e => { setInput(e.target.value); setErr('') }}
+                  placeholder={devMode ? 'press ENTER to continue' : 'enter access token…'}
+                  autoFocus
+                  autoComplete="current-password"
+                  style={{
+                    flex: 1, padding: '9px 12px',
+                    background: '#001a00', color: '#00ff41',
+                    border: '1px solid #00ff4140', borderRight: 'none',
+                    outline: 'none', fontSize: 13,
+                    fontFamily: 'inherit', letterSpacing: 2,
+                  }}
+                />
+                <button
+                  type="submit"
+                  disabled={loading}
+                  style={{
+                    padding: '9px 16px', background: loading ? '#001a00' : '#00ff4115',
+                    color: '#00ff41', border: '1px solid #00ff4140',
+                    borderRadius: '0 3px 3px 0', cursor: loading ? 'not-allowed' : 'pointer',
+                    fontSize: 12, fontFamily: 'inherit', letterSpacing: 2,
+                    transition: 'background 0.2s', flexShrink: 0,
+                  }}
+                >{loading ? '…' : 'AUTH'}</button>
+              </div>
+
+              {err && (
+                <div style={{ fontSize: 11, color: '#ff4444', letterSpacing: 1, marginBottom: 10, animation: 'loginBlink 0.3s 2' }}>
+                  ⚠ {err}
+                </div>
+              )}
+
+              <div style={{ borderTop: '1px solid #00ff4112', paddingTop: 14, display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#2a4a2a', letterSpacing: 0.5 }}>
+                <span>SYS:NOMINAL&nbsp;|&nbsp;DB:OK</span>
+                <span>UNAUTHORIZED ACCESS PROSECUTED</span>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+
+      </div>{/* /panels row */}
+
+      <style>{`
+        @keyframes loginBlink { 0%,100%{opacity:1} 50%{opacity:0} }
+        @keyframes loginTicker { from{transform:translateX(0)} to{transform:translateX(-50%)} }
+        @keyframes loginShake {
+          0%,100%{transform:translateX(0)}
+          20%{transform:translateX(-8px)} 40%{transform:translateX(8px)}
+          60%{transform:translateX(-5px)} 80%{transform:translateX(5px)}
+        }
+      `}</style>
+    </div>
+  )
+}
+
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const [authed, setAuthed] = useState(() => !!sessionStorage.getItem('admin_token'))
+
+  // Re-login when the backend rejects our token (e.g. after ADMIN_TOKEN rotation).
+  // signal401() fires 'auth-expired' from usePolling / readSSEStream on any HTTP 401.
+  useEffect(() => {
+    const handler = () => setAuthed(false)
+    window.addEventListener('auth-expired', handler)
+    return () => window.removeEventListener('auth-expired', handler)
+  }, [])
+
   const { data: health, reload: reloadHealth }  = usePolling('/health', 30_000)
   const { data: wl, reload: reloadWatchlist }   = usePolling('/watchlist', 60_000)
   const { data: signals, reload: reloadSignals } = usePolling('/signals?limit=30', 60_000)
   // Token usage — 30-day window; drives header chip + settings section
   const { data: usage, reload: reloadUsage }    = usePolling('/usage', 60_000)
+  // Market clock — drives the header "US Market Open/Closed · closes in Xm" pill
+  const { data: paperClock }                    = usePolling('/paper/clock', 60_000)
+  // Paper orders — used to show existing order status on signal cards
+  const { data: dashPaperOrders }               = usePolling('/paper/orders?limit=200', 60_000)
   // Backtest runs list — used to include LLM backtest tokens in the header chip
   const { data: btListData }                    = usePolling('/backtest', 60_000)
   const btTodayTokens = (() => {
@@ -7805,6 +9357,8 @@ export default function App() {
 
   const [activeView, setActiveView] = useState('dashboard')
   const [explorerState, setExplorerState] = useState(null)
+  // When a sidebar order row is clicked, navigate to Trading and pre-expand that order
+  const [tradingExpandOrder, setTradingExpandOrder] = useState(null)
   // Increment to force-remount ExplorerPage only when a new result arrives from Dashboard.
   // Tab switching leaves explorerKey unchanged so the running SSE stream is preserved.
   const [explorerKey, setExplorerKey] = useState(0)
@@ -7828,14 +9382,24 @@ export default function App() {
     setActiveView('explorer')
   }
 
+  // Auth gate — must come after all hooks so hook call order is stable.
+  if (!authed) return <LoginScreen onLogin={() => setAuthed(true)} />
+
   return (
     <div className="app">
-      <Header health={health} usage={usage} btTodayTokens={btTodayTokens} activeView={activeView} onViewChange={setActiveView} />
+      <Header health={health} usage={usage} btTodayTokens={btTodayTokens} activeView={activeView} onViewChange={setActiveView} clock={paperClock} />
       <main className="main">
         {/* All three views are always mounted — switching tabs never destroys SSE state */}
         <div style={{ display: activeView === 'dashboard' ? 'flex' : 'none',
                       flexDirection: 'row', gap: 16, alignItems: 'flex-start' }}>
-          <PaperOrdersPanel open={paperPanelOpen} onToggle={togglePaperPanel} />
+          <PaperOrdersPanel
+            open={paperPanelOpen}
+            onToggle={togglePaperPanel}
+            onOrderClick={(orderId) => {
+              setTradingExpandOrder(orderId)
+              setActiveView('paper')
+            }}
+          />
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 16 }}>
             {/* Dashboard info bar */}
             <div style={{
@@ -7847,14 +9411,47 @@ export default function App() {
             }}>
               <span>📊 <strong>Live prices</strong> refresh every 30 s via Alpaca</span>
               <span style={{ color: 'color-mix(in srgb, var(--dim) 40%, transparent)' }}>·</span>
-              <span>🤖 <strong>AI signal scan</strong> runs every {wl?.scan_interval_minutes ?? 15} min during market hours</span>
-              <span style={{ color: 'color-mix(in srgb, var(--dim) 40%, transparent)' }}>·</span>
-              <span style={{ color: wl?.scheduler?.market_open ? 'var(--green)' : 'var(--dim)' }}>
-                {wl?.scheduler?.market_open ? '🟢 Market open' : '⚫ Market closed'}
-              </span>
+              {(() => {
+                const scanMin = wl?.scheduler?.scan_interval_minutes ?? wl?.scan_interval_minutes ?? 15
+                // Derive next-run from last_run + current interval (avoids stale value
+                // during the current sleep cycle when the interval was just changed).
+                const lastRunIso = wl?.scheduler?.last_run
+                const nextRunDerived = lastRunIso
+                  ? new Date(new Date(lastRunIso).getTime() + scanMin * 60_000)
+                  : (wl?.scheduler?.next_run ? new Date(wl.scheduler.next_run) : null)
+                return (
+                  <>
+                    <span>🤖 <strong>AI signal scan</strong> runs every {scanMin} min during market hours</span>
+                    {(lastRunIso || nextRunDerived) && (
+                      <span style={{ width: '100%', height: 0, display: 'block', margin: 0, padding: 0 }} />
+                    )}
+                    {lastRunIso && (
+                      <span title={lastRunIso}>
+                        🕐 Last scan: {new Date(lastRunIso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    )}
+                    {lastRunIso && nextRunDerived && (
+                      <span style={{ color: 'color-mix(in srgb, var(--dim) 40%, transparent)' }}>·</span>
+                    )}
+                    {nextRunDerived && (
+                      <span title={nextRunDerived.toISOString()}>
+                        ⏭ Next scan: {nextRunDerived.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    )}
+                  </>
+                )
+              })()}
             </div>
-            <WatchlistCard wl={wl} onWatchlistChange={reloadWatchlist} />
-            <SignalsTable signals={signals} reload={reloadSignals} />
+            <WatchlistCard wl={wl} onWatchlistChange={reloadWatchlist} signals={signals} />
+            <SignalsTable
+              signals={signals}
+              reload={reloadSignals}
+              signalOrderMap={Object.fromEntries(
+                (dashPaperOrders?.orders ?? [])
+                  .filter(o => o.signal_id != null)
+                  .map(o => [o.signal_id, o])
+              )}
+            />
           </div>
         </div>
         <div style={{ display: activeView === 'explorer' ? '' : 'none' }}>
@@ -7868,6 +9465,12 @@ export default function App() {
         </div>
         {activeView === 'education' && <EducationPage />}
         {activeView === 'backtest' && <BacktestPage wl={wl} usage={usage} />}
+        {activeView === 'paper' && (
+          <PaperTradingPage
+            initialExpandedOrder={tradingExpandOrder}
+            onExpandedOrderConsumed={() => setTradingExpandOrder(null)}
+          />
+        )}
         {activeView === 'settings' && <SettingsPage usage={usage} onUsageRefresh={reloadUsage} onHealthRefresh={reloadHealth} />}
       </main>
       <footer className="footer">

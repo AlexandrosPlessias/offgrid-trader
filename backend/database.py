@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -174,6 +173,15 @@ CREATE TABLE IF NOT EXISTS backtest_compares (
     created_at         TEXT    NOT NULL
 );
 
+-- Saved backtesting parameter configurations (user-defined profiles).
+-- Name is UNIQUE so saving with the same name overwrites the previous entry.
+CREATE TABLE IF NOT EXISTS backtest_profiles (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL UNIQUE,
+    params_json TEXT    NOT NULL,   -- JSON object: tickers, confFloor, maxHold, …
+    created_at  TEXT    NOT NULL
+);
+
 -- Market-data cache: JSON blobs keyed by source + ticker + params.
 -- Separate from app_settings so it can be indexed and bulk-evicted independently.
 CREATE TABLE IF NOT EXISTS data_cache (
@@ -201,6 +209,11 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     filled_at          TEXT,
     closed_at          TEXT,
     realized_pnl       REAL,
+    -- Denormalised signal fields stored at placement time so they survive
+    -- even if the parent signal row is deleted or signal_id is null.
+    signal_confidence  REAL,
+    signal_source      TEXT,
+    signal_timestamp   TEXT,
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_paper_orders_ticker    ON paper_orders(ticker);
@@ -275,6 +288,27 @@ def init_db(db_path: str | None = None) -> None:
         for _col in ("week52_high", "week52_low"):
             if _col not in existing_sig_cols:
                 conn.execute(f"ALTER TABLE signals ADD COLUMN {_col} REAL")
+        # paper_orders: add denormalised signal fields if missing, then backfill.
+        existing_po_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(paper_orders)").fetchall()
+        }
+        for _col, _def in [
+            ("signal_confidence", "REAL"),
+            ("signal_source", "TEXT"),
+            ("signal_timestamp", "TEXT"),
+        ]:
+            if _col not in existing_po_cols:
+                conn.execute(f"ALTER TABLE paper_orders ADD COLUMN {_col} {_def}")
+        # Backfill rows where signal_id is set but the denormalised columns are null.
+        conn.execute("""
+            UPDATE paper_orders
+            SET signal_confidence = s.confidence,
+                signal_source     = s.source,
+                signal_timestamp  = s.timestamp
+            FROM signals s
+            WHERE paper_orders.signal_id = s.id
+              AND paper_orders.signal_confidence IS NULL
+            """)
         # backtest_floor_suggests: add result_json column if missing (expanded advisor schema).
         existing_bfs_cols = {
             row[1] for row in conn.execute("PRAGMA table_info(backtest_floor_suggests)").fetchall()
@@ -285,38 +319,6 @@ def init_db(db_path: str | None = None) -> None:
             "CREATE INDEX IF NOT EXISTS idx_bt_floor_suggests_run"
             " ON backtest_floor_suggests(run_id)"
         )
-        # Ensure a stable admin token exists for the key-reveal endpoint.
-        # Priority: ADMIN_TOKEN env var → DB-stored → auto-generate + store.
-        from .config import (
-            get_settings as _cfg,
-        )  # local to avoid circular import at module level
-
-        env_token = _cfg().admin_token  # empty string if ADMIN_TOKEN not set
-        existing_row = conn.execute(
-            "SELECT value FROM app_settings WHERE key = 'admin_token'"
-        ).fetchone()
-
-        if env_token:
-            # User has ADMIN_TOKEN in .env — upsert so /settings returns it correctly.
-            conn.execute(
-                "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('admin_token', ?)",
-                (env_token,),
-            )
-        elif not existing_row:
-            # No env var and no DB entry — auto-generate and log once.
-            import logging as _logging
-
-            generated = str(uuid.uuid4())
-            conn.execute(
-                "INSERT INTO app_settings (key, value) VALUES ('admin_token', ?)",
-                (generated,),
-            )
-            _logging.getLogger(__name__).warning(
-                "ADMIN_TOKEN not set in .env — auto-generated: %s  "
-                "(add ADMIN_TOKEN=%s to .env to make it permanent)",
-                generated,
-                generated,
-            )
         conn.commit()
 
 
@@ -709,6 +711,63 @@ def delete_analysis(entry_id: int, db_path: str | None = None) -> bool:
     """Delete an analysis_log entry by id. Returns True if a row was deleted."""
     with _connect(db_path) as conn:
         cur = conn.execute("DELETE FROM analysis_log WHERE id = ?", (int(entry_id),))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def get_backtest_profiles(db_path: str | None = None) -> list[dict[str, Any]]:
+    """Return all saved backtest parameter profiles, newest first."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, name, params_json, created_at FROM backtest_profiles ORDER BY id DESC"
+        ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "params": json.loads(r["params_json"]),
+            "createdAt": r["created_at"],
+        }
+        for r in rows
+    ]
+
+
+def save_backtest_profile(
+    name: str,
+    params: dict[str, Any],
+    db_path: str | None = None,
+) -> dict[str, Any]:
+    """Upsert a named backtest profile.  If *name* already exists the params
+    are updated in-place (created_at is preserved).  Returns the saved profile.
+    """
+    now = _now_iso()
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO backtest_profiles (name, params_json, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                params_json = excluded.params_json
+            """,
+            (name, json.dumps(params, default=str), now),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, name, params_json, created_at FROM backtest_profiles WHERE name = ?",
+            (name,),
+        ).fetchone()
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "params": json.loads(row["params_json"]),
+        "createdAt": row["created_at"],
+    }
+
+
+def delete_backtest_profile(profile_id: int, db_path: str | None = None) -> bool:
+    """Delete a backtest profile by id.  Returns True if a row was deleted."""
+    with _connect(db_path) as conn:
+        cur = conn.execute("DELETE FROM backtest_profiles WHERE id = ?", (int(profile_id),))
         conn.commit()
         return cur.rowcount > 0
 
@@ -1239,8 +1298,9 @@ def save_paper_order(order: dict, db_path: str | None = None) -> int:
             INSERT INTO paper_orders
                 (signal_id, ticker, side, alpaca_order_id, status,
                  notional, qty, entry_price, stop_price, take_profit_price,
-                 filled_avg_price, filled_at, closed_at, realized_pnl)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 filled_avg_price, filled_at, closed_at, realized_pnl,
+                 signal_confidence, signal_source, signal_timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 order.get("signal_id"),
@@ -1257,6 +1317,9 @@ def save_paper_order(order: dict, db_path: str | None = None) -> int:
                 order.get("filled_at"),
                 order.get("closed_at"),
                 order.get("realized_pnl"),
+                order.get("signal_confidence"),
+                order.get("signal_source"),
+                order.get("signal_timestamp"),
             ),
         )
         conn.commit()
@@ -1264,14 +1327,19 @@ def save_paper_order(order: dict, db_path: str | None = None) -> int:
 
 
 def get_paper_orders(limit: int = 100, db_path: str | None = None) -> list[dict]:
-    """Return recent paper orders (most recent first), joined with signal data."""
+    """Return recent paper orders (most recent first).
+
+    Signal fields (confidence, source, timestamp) are stored directly on the
+    order row at placement time.  The JOIN is kept as a fallback for rows
+    created before the denormalised columns were added.
+    """
     with _connect(db_path) as conn:
         rows = conn.execute(
             """
             SELECT po.*,
-                   s.confidence   AS signal_confidence,
-                   s.source       AS signal_source,
-                   s.timestamp    AS signal_timestamp
+                   COALESCE(po.signal_confidence, s.confidence) AS signal_confidence,
+                   COALESCE(po.signal_source,     s.source)     AS signal_source,
+                   COALESCE(po.signal_timestamp,  s.timestamp)  AS signal_timestamp
             FROM paper_orders po
             LEFT JOIN signals s ON s.id = po.signal_id
             ORDER BY po.created_at DESC
@@ -1315,6 +1383,25 @@ def get_paper_order_by_signal(signal_id: int, db_path: str | None = None) -> dic
     with _connect(db_path) as conn:
         row = conn.execute(
             "SELECT * FROM paper_orders WHERE signal_id = ?", (signal_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_open_order_by_ticker_side(
+    ticker: str, side: str, db_path: str | None = None
+) -> dict | None:
+    """Return any non-terminal order for ticker+side, or None.
+
+    Used to prevent duplicate open positions: if a pending/accepted/held order
+    already exists for NVDA buy, we should not place another one.
+    """
+    terminal = ("cancelled", "canceled", "expired", "filled", "rejected", "done")
+    placeholders = ",".join("?" * len(terminal))
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            f"SELECT * FROM paper_orders WHERE ticker = ? AND side = ?"  # noqa: S608
+            f" AND status NOT IN ({placeholders}) LIMIT 1",
+            (ticker, side, *terminal),
         ).fetchone()
     return dict(row) if row else None
 

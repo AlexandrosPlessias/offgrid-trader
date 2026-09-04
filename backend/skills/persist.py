@@ -23,7 +23,7 @@ class PersistSkill(Skill):
     def run(self, ctx: AgentContext) -> SkillResult:
         from backend.database import save_analysis, save_signal
 
-        saved_ids: list[int] = []
+        saved_ids: dict[str, int] = {}  # {ticker: signal_id}
         errors: list[str] = []
 
         # Persist analysis log (include full opportunity list so history can replay scores).
@@ -51,13 +51,13 @@ class PersistSkill(Skill):
         for opp in ctx.actionable or []:
             try:
                 signal_id = save_signal(opp, llm_provider=llm_provider, llm_model=llm_model)
-                saved_ids.append(signal_id)
+                saved_ids[opp["ticker"]] = signal_id
                 _log.debug("persist: saved signal %d for %s", signal_id, ctx.ticker)
             except Exception:
                 _log.exception("persist: save_signal failed for %s", ctx.ticker)
                 errors.append("save_signal failed — check server logs")
 
-        ctx.saved_signal_ids.extend(saved_ids)
+        ctx.saved_signal_ids.update(saved_ids)
         ctx.errors.extend(errors)
 
         return SkillResult(

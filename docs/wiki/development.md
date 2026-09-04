@@ -212,6 +212,98 @@ After `make up` or `make build` a URL table is printed automatically:
 
 ---
 
+## Deploying to Fly.io + Vercel
+
+Once you have created accounts and done the one-time CLI setup (see
+[cloud-hosting.md](cloud-hosting.md)), every push to `main` triggers
+automatic deployment via GitHub Actions.
+
+### One-time setup (run once per developer machine)
+
+**Fly.io backend:**
+
+```bash
+# 1. Authenticate
+flyctl auth login
+
+# 2. Create the app (globally unique name — change if taken)
+fly apps create offgrid-trader
+
+# 3. Create the persistent SQLite volume (1 GB, London region)
+fly volumes create offgrid_trader_data --region lhr --size 1
+
+# 4. Set all runtime secrets
+fly secrets set \
+  ADMIN_TOKEN=<strong-random-secret> \
+  LLM_PROVIDER=groq \
+  GROQ_API_KEY=gsk_... \
+  LLM_FALLBACK_PROVIDER=gemini \
+  GEMINI_API_KEY=AIza... \
+  LLM_FALLBACK_MODEL=gemini-3.5-flash-lite \
+  CORS_ORIGINS=https://<your-vercel-domain>.vercel.app
+
+# 5. First manual deploy to confirm it works
+flyctl deploy
+```
+
+**Vercel frontend:**
+
+```bash
+# 1. Link the frontend project (creates frontend/.vercel/project.json)
+cd frontend && npx vercel link
+
+# 2. Add the backend URL as a production env var
+npx vercel env add VITE_API_URL production
+# Enter: https://offgrid-trader.fly.dev
+
+# 3. First manual deploy
+npx vercel --prod
+```
+
+**GitHub Actions secrets** (run once after both CLI setups above):
+
+```bash
+# Requires: flyctl, vercel CLI, gh CLI, jq — all authenticated
+bash scripts/setup-gh-secrets.sh
+```
+
+This populates `FLY_API_TOKEN`, `VERCEL_TOKEN`, `VERCEL_ORG_ID`, and
+`VERCEL_PROJECT_ID` into your GitHub repo's secrets automatically. No web-UI clicking
+required.
+
+### Verifying secrets
+
+```bash
+gh secret list --repo <org>/<repo>
+fly secrets list
+```
+
+### Continuous deployment
+
+After the one-time setup, `.github/workflows/deploy.yml` takes over:
+- **`deploy-backend`** — runs `flyctl deploy --remote-only` (Fly builds the Docker image
+  on its own infrastructure; no local Docker needed)
+- **`deploy-frontend`** — runs `vercel pull/build/deploy` with `--prod` flag
+
+Both jobs are independent and run in parallel.
+
+### Admin token for public deployments
+
+`ADMIN_TOKEN` **must** be set via `fly secrets set` before the public deployment goes
+live. Without it, the backend runs in dev mode (no auth), which is not safe for a
+publicly-accessible URL.
+
+To rotate the admin token at any time:
+
+```bash
+fly secrets set ADMIN_TOKEN=<new-secret>
+```
+
+Fly.io automatically restarts the machine with the new secret. All existing sessions
+will require re-login.
+
+---
+
 ## PR / CI notes
 
 The CodeQL workflow runs on every PR to `main`. It checks the same rule families that `make lint` approximates locally. Running `make lint` before pushing catches the vast majority of CodeQL findings before they hit the PR.

@@ -50,7 +50,7 @@ class AgentContext:
     opportunities: list[dict[str, Any]] | None = None
     actionable: list[dict[str, Any]] | None = None
     rules_checked: dict[str, Any] | None = None  # diagnostic snapshot from detect_opportunities
-    saved_signal_ids: list[int] = field(default_factory=list)
+    saved_signal_ids: dict[str, int] = field(default_factory=dict)  # {ticker: signal_id}
     alerts_sent: list[dict[str, Any]] = field(default_factory=list)
     memory: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)

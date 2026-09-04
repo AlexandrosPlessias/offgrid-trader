@@ -1,7 +1,7 @@
 # Paper Trading — Alpaca
 
 MarketSage connects to **Alpaca's free paper-trading environment** so every
-actionable signal automatically places a real bracket order on a virtual $100 k
+actionable signal can automatically place a real bracket order on a virtual $100 k
 account. No real money is involved — it is a free simulation that uses the same
 REST API and market data as a live account.
 
@@ -16,7 +16,10 @@ REST API and market data as a live account.
 2. Copy your **Key ID** and **Secret Key**.
 3. Open **Settings → 📈 Paper Trading** in MarketSage, paste the credentials, and click **Save & Test Connection**. The account equity appears on success.
 4. Enable the **Paper trading enabled** toggle and set your **position size** (default $500).
-5. Wait for the next scheduled scan (or trigger one via the Dashboard **Run** button) — orders appear in the Paper Orders sidebar automatically.
+5. Wait for the next scheduled scan (or trigger one via the Dashboard **Run** button) — orders appear on the **Trading** page automatically.
+
+> **Tip:** Open the **Trading** tab in the top nav to see your full account overview,
+> charts, open positions, and all orders in one place.
 
 ---
 
@@ -28,8 +31,11 @@ Scheduler scan
         → PaperTradeSkill
               ├── for each actionable opportunity:
               │     check signal confidence ≥ min_confidence threshold
-              │     check no open/pending order already exists for this signal
+              │     check no open order already exists for this ticker+side
+              │     check notional ≥ 1 whole share at current price
+              │     compute qty = floor(notional / entry_price)  (minimum 1)
               │     POST /v2/orders (market bracket — stop-loss + take-profit)
+              │     round stop/take-profit to 2 decimal places (Alpaca requirement)
               │     save to paper_orders table
               └── return orders_placed list
 
@@ -41,61 +47,170 @@ After scan loop:
 
 ### Bracket order structure
 
-Each order is placed as a **market order with attached bracket legs**:
+Each order is a **market order with attached bracket legs** using **whole shares**
+(Alpaca does not allow fractional shares on bracket orders).
 
 | Field | Source |
 |---|---|
 | Symbol | ticker from signal |
-| Notional | `paper_trade_position_size` setting (e.g. $500) |
+| Qty | `floor(position_size / entry_price)` — whole shares, minimum 1 |
 | Side | `buy` (long) / `sell` (short) |
 | Type | `market` — fills immediately at open |
 | Time in force | `day` — expires at market close if unfilled |
-| Stop-loss price | signal's `stop` price |
-| Take-profit price | signal's `target` price |
+| Stop-loss price | signal's `stop` price, rounded to 2 dp |
+| Take-profit price | signal's `target` price, rounded to 2 dp |
 
-Alpaca handles fractional shares automatically so any notional amount is valid.
+> **Important:** Alpaca rejects `notional` (fractional) amounts for bracket orders
+> (`"fractional orders must be simple orders"`). All bracket orders use `qty`
+> (whole shares). Sub-penny stop/take-profit prices are also rejected — the app
+> rounds both to 2 decimal places automatically.
+
+#### High-price stock guard
+
+If `floor(position_size / price) = 0` (e.g. $500 budget for a $958 stock),
+the order is **skipped** rather than buying 1 share and overshooting the budget.
+The scheduler logs a warning; the manual "Place Paper Order" button returns a
+clear error message. Increase your position size in Settings if you want to trade
+high-priced stocks.
 
 ### Deduplication
 
-`PaperTradeSkill` skips a signal if an order already exists for the same `signal_id` in `paper_orders` with status `pending`, `accepted`, or `filled`. This prevents double-ordering when the same signal fires across consecutive scans.
+Orders are blocked if **either** of these conditions is true:
+
+1. An existing `paper_orders` row links the same `signal_id` (exact match).
+2. A non-terminal order (not cancelled/expired/filled) already exists for the same `ticker + side` combination — prevents accumulating multiple positions from repeated scans.
 
 ---
 
-## Live market data
+## Manual order placement
 
-The Dashboard **Watchlist** shows a live price table, separate from the paper order flow:
+In addition to automatic placement by the scheduler, you can place orders manually
+from two places:
 
-| Column | Source |
+### Signal cards (Dashboard)
+
+Every signal card has a **📈 Place Paper Order** button (centred, bottom of the
+card) when the signal has valid stop and target prices. After clicking:
+
+- **While placing:** button shows `⏳ Placing…`
+- **On success:** button is replaced by `✓ Order placed`
+- **If already exists:** `ℹ Order already exists` (dedup blocked it)
+- **If budget too small:** red error with the minimum required amount
+- **If order pre-exists in DB:** the button is replaced by a disabled status badge showing the current order status (e.g. `📋 PENDING NEW`)
+
+The signal card also shows a **🤖 LLM** or **📐 Rules** badge in the source chip
+row to indicate whether the signal was generated by the AI model or by rule-based
+detection only.
+
+### Explorer — Section 7 (Signals detected)
+
+The Analysis Explorer's step-by-step walkthrough includes a "Place" button on
+**every** signal row in Section 7, including signals below the confidence floor.
+Below-floor buttons are shown in a dimmed style with a tooltip indicating they are
+sub-floor.
+
+### API endpoint
+
+```http
+POST /paper/orders/place
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "ticker": "NVDA",
+  "side": "buy",
+  "entry": 226.05,
+  "stop": 219.26,
+  "target": 239.61,
+  "notional": 500,      // optional — defaults to Settings position size
+  "signal_id": 42       // optional — used for dedup
+}
+```
+
+Returns `{"placed": true, "alpaca_order_id": "...", "status": "accepted"}` or
+`{"placed": false, "reason": "order_exists"|"ticker_open"}`.
+
+---
+
+## Trading page
+
+The dedicated **Trading** tab (top navigation bar) is the primary paper-trading
+dashboard. It shows:
+
+### Account metrics
+
+Four tiles: **Portfolio Value · Day P&L · Cash · Buying Power**.
+
+> Buying Power = 4× equity on Alpaca margin accounts. With a $100 k account you
+> see $400 k buying power. Each $500 bracket order uses only a small fraction of it.
+
+### Portfolio equity curve
+
+1-month area chart pulled from `GET /paper/history`. Shows cumulative equity
+growth vs. starting value (dashed baseline). Green = above baseline, red = below.
+
+### Insight charts
+
+Shown as soon as at least one order exists:
+
+| Chart | Description |
 |---|---|
-| Price | `dailyBar.c` (latest daily close) |
-| Chg% | `(dailyBar.c − prevDailyBar.c) / prevDailyBar.c × 100` |
-| VWAP | `dailyBar.vw` |
-| Vol | `dailyBar.v` |
-| H / L | `dailyBar.h` / `dailyBar.l` |
-| Last | timestamp of the latest trade |
+| **Orders by Status** | Donut: pending, filled, cancelled, etc. |
+| **Max Gain / Max Loss per Order** | Grouped bar chart (green = max gain, red = max loss per order). Footer row shows **cumulative totals** and **net** across all open orders. |
+| **Signal Confidence per Order** | Bar chart colour-coded by confidence band (green ≥ 85%, yellow ≥ 75%, red < 75%). Dashed line marks the confidence floor. |
+| **Realised P&L** (closed orders) | Area chart of **cumulative** P&L over time with 7D / 30D / 90D / All filter. Summary row shows trade count and total P&L. |
+| **Realised P&L by Ticker** (closed) | Bar per ticker, green/red. |
+| **Win / Loss donut** (closed) | Win rate percentage. |
 
-Prices are fetched from **`data.alpaca.markets`** (Alpaca's market data host, separate from the trading host). The same API key is used for both.
+The last three charts (realised) only appear once orders have been filled and closed.
 
-**Market-hours gating:**
-- When the market is open: prices refresh every **30 seconds**.
-- When the market is closed: one initial fetch shows last-session prices; polling stops. The watchlist header shows "⚫ market closed · prices from last session".
+### Open Positions
 
-The AI signal scan in the scheduler also only runs during market hours — both are gated by the same `is_market_open()` check.
+Live from Alpaca `GET /v2/positions`: Ticker · Side · Qty · Avg Entry · Current
+Price · Market Value · Unrealised P&L · P&L %.
+
+### Orders table
+
+All local DB orders (up to 200, filter: **All / Open / Filled / Cancelled**).
+
+| Column | Description |
+|---|---|
+| ▸ / ▾ | Click any row to expand its full detail panel |
+| Direction | ▲ LONG / ▼ SHORT |
+| Status | PENDING / NEW (stacked), FILLED, CANCELLED … |
+| Position Size | Whole shares + actual cost (e.g. `2 shares / $452.10`). Tooltip shows target notional. |
+| Entry | Signal entry price |
+| Stop | Red stop price + **−$XX max loss** below |
+| Take Profit | Green target price + **+$XX max gain** below |
+| Filled @ | Fill price + **R:R X×** ratio |
+| Realised P&L | Green/red after close |
+| Conf % | Signal confidence |
+| Source | Each source on its own line (ai / macd_crossover / …) |
+| Placed | Date on line 1, time on line 2 |
+| Cancel | Button for open orders only |
+
+#### Expanded row
+
+Click `▸` to open a 3-section detail panel separated by vertical dividers:
+
+- **Trade Math** — Shares, Actual invested, Risk/share, Reward/share, Max loss, Max gain, R:R
+- **Order** — Alpaca ID, Signal ID, Placed, Filled, Closed timestamps
+- **Signal** — Confidence %, Mode (🤖 LLM / 📐 Rules), Sources (stacked), Signal timestamp
 
 ---
 
-## Paper Orders sidebar
+## Paper Orders sidebar (Dashboard)
 
-The collapsible left panel on the Dashboard shows:
+The collapsible left panel on the Dashboard remains for quick glances:
 
 | Section | Data |
 |---|---|
-| **Account** | Equity, Day P&L (Δ$ and Δ%), Cash, Buying Power, Long Market Value, Margin used, Day-trade count |
-| **Market clock** | Open/Closed pill with next open/close time |
-| **Open Positions** | Live from `GET /v2/positions` — ticker, side, market value, unrealised P&L |
-| **Recent Orders** | From local DB — status chip (colour-coded), notional, filled avg price, signal link |
+| **Auto-trading status** | Green badge (enabled) or red badge (disabled) — links to Settings |
+| **Account** | Equity, Day P&L, Cash, Buying Power |
+| **Recent Orders** | Up to 20 most recent — click any row to jump to the **Trading** page with that order pre-expanded |
 
-Orders can be cancelled directly from the sidebar — the cancel button calls `POST /paper/orders/{id}/cancel` which deletes the Alpaca order and updates the local status.
+Orders in the sidebar are **clickable** — clicking navigates to the Trading tab and
+automatically scrolls to and expands the matching order row.
 
 The panel state (open/collapsed) persists to `localStorage`.
 
@@ -105,26 +220,26 @@ The panel state (open/collapsed) persists to `localStorage`.
 
 | Setting | `.env` key | Default | Description |
 |---|---|---|---|
-| Paper API URL | `ALPACA_PAPER_URL` | `https://paper-api.alpaca.markets` | Override for non-standard Alpaca regions. Trailing `/v2` stripped automatically. |
-| API Key ID | `ALPACA_API_KEY_ID` | *(unset)* | Alpaca key ID (visible in Settings as a masked field). |
-| API Secret Key | `ALPACA_API_SECRET_KEY` | *(unset)* | Alpaca secret — never returned by the API; stored encrypted-at-rest in the DB. |
-| Paper trading enabled | DB only | `false` | Master toggle. When off, `PaperTradeSkill` skips order placement but the data panel remains active. |
-| Position size | DB only | `500` | Notional $ per bracket order. |
-| Min confidence | DB only | *(signal floor)* | Minimum confidence specifically for auto-trading. Defaults to the global `CONFIDENCE_FLOOR` if unset. |
+| Paper API URL | `ALPACA_PAPER_URL` | `https://paper-api.alpaca.markets/v2` | Must include `/v2`. Without it the account endpoint returns empty data. |
+| API Key ID | `ALPACA_API_KEY_ID` | *(unset)* | Alpaca key ID (set-only from the UI). |
+| API Secret Key | `ALPACA_API_SECRET_KEY` | *(unset)* | Alpaca secret — never returned by the API. |
+| Paper trading enabled | DB only | `false` | Master toggle. When off, `PaperTradeSkill` skips but the data panel remains active. |
+| Position size | DB only | `500` | Target $ per bracket order. Actual cost = `floor(size / price) × price`. |
+| Min confidence | DB only | *(signal floor)* | Minimum confidence for auto-trading. Defaults to global `CONFIDENCE_FLOOR` if unset. |
 
-`.env` values act as defaults; values saved via the Settings page are stored in SQLite and take precedence. Click **Load .env defaults** on the Settings page to revert to env values.
+`.env` values act as defaults; values saved via the Settings page are stored in
+SQLite and take precedence.
 
 ---
 
 ## API endpoints
-
-All `/paper/*` endpoints are documented in [api.md](api.md#paper-trading-alpaca). Quick reference:
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/paper/account` | Live Alpaca account summary |
 | `GET` | `/paper/orders` | Local DB paper orders (most recent first) |
 | `GET` | `/paper/positions` | Live open positions from Alpaca |
+| `POST` | `/paper/orders/place` | **New** — manual bracket order placement |
 | `POST` | `/paper/orders/{id}/cancel` | Cancel a pending order |
 | `POST` | `/paper/sync` | Manual order-status poll |
 | `GET` | `/paper/clock` | Alpaca market clock (is_open, next_open, next_close) |
@@ -139,8 +254,9 @@ All `/paper/*` endpoints are documented in [api.md](api.md#paper-trading-alpaca)
 
 | Item | Detail |
 |---|---|
-| Starting balance | Alpaca always resets paper accounts to $100 k. Changing it requires using the Alpaca web dashboard (or closing and reopening the paper account). |
-| Historical bars | Alpaca free tier does not provide historical OHLCV bars; `GET /v2/stocks/{ticker}/bars` returns `null`. Snapshots (used for the watchlist) work fine. |
-| 1H data window | yfinance 1H data goes back ~730 days. Backtesting windows older than that fall back to daily-bar rules. |
-| Fractional shares | Supported for US equities on Alpaca paper. Crypto and some ETFs may require whole shares. |
+| Starting balance | Alpaca always resets paper accounts to $100 k. |
+| Fractional shares | **Not supported** for bracket orders. All orders use whole shares. |
+| High-price stocks | If `floor($500 / price) < 1`, the order is skipped. Increase position size in Settings to trade stocks priced above your budget. |
+| Historical bars | Alpaca free tier does not provide historical OHLCV bars. Snapshots (used for the watchlist) work fine. |
 | Market hours | US equities only (9:30–16:00 ET, Mon–Fri). Extended-hours orders are not placed. |
+| Buying power | Alpaca paper accounts are margin accounts (4× equity). This is cosmetic — the app only ever uses a small fraction per order. |

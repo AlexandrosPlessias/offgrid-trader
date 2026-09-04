@@ -5,6 +5,8 @@
 - [API Reference](api)
 - [Settings Reference](settings)
 - [Cloud LLM Providers](cloud-llm)
+- [Cloud Hosting](cloud-hosting)
+- [Security](security)
 - [How Signals Work](how-signals-work)
 - [Indicators](indicators)
 - [Backtesting — Concepts](backtesting-explained)

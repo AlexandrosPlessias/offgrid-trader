@@ -44,10 +44,6 @@
 
 body {
   background: #0a0f1e;
-  background-image:
-    radial-gradient(ellipse 70% 60% at 12% 45%, rgba(168,85,247,0.18) 0%, transparent 60%),
-    radial-gradient(ellipse 55% 50% at 88% 15%, rgba(34,211,238,0.12) 0%, transparent 55%),
-    radial-gradient(ellipse 45% 45% at 60% 85%, rgba(129,140,248,0.14) 0%, transparent 50%);
   color: var(--text);
   font-family: var(--font-ui);
   font-size: 13px;
@@ -66,7 +62,7 @@ body {
 ::selection { background: var(--blue-dim); color: var(--text); }
 
 /* ── Layout ────────────────────────────────────────────────────────────────── */
-.app { display: flex; flex-direction: column; min-height: 100vh; }
+.app { display: flex; flex-direction: column; min-height: 100vh; background: var(--bg); }
 
 .main {
   flex: 1;

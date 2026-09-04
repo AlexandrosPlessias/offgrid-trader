@@ -82,7 +82,7 @@ class BacktestParams:
     requests_per_minute: int | None = None  # None = no throttle
     is_out_of_sample: bool = False  # True when window is a held-out test set
     # Virtual wallet — fixed-fractional position sizing.
-    # Each signal invests initial_balance × position_size_pct dollars.
+    # Each signal invests initial_balance x position_size_pct dollars.
     # Stored in metrics_json so it round-trips without a new DB column.
     position_size_pct: float = 0.10  # 10% per trade by default
     # Cashout rule — early profit-taking before the original target.
@@ -312,7 +312,7 @@ def evaluate_outcome(
 
     Cashout rule: if ``cashout_r`` is set and > 0, a "cashout" exit is triggered
     on the first bar where the unrealised R reaches ``cashout_r``.  The cashout
-    price is ``entry ± cashout_r × risk``.  The outcome is "cashout" (a
+    price is ``entry +/- cashout_r x risk``.  The outcome is "cashout" (a
     profitable exit, counted as a win in metrics but distinguished in the trade
     list so you can see how often you left R on the table).
 
@@ -516,7 +516,7 @@ def compute_dollar_metrics(
     """Compute dollar P&L and equity curve for a virtual wallet simulation.
 
     Uses fixed-fractional sizing: every trade invests
-    ``initial_balance × position_size_pct`` dollars, regardless of running equity.
+    ``initial_balance x position_size_pct`` dollars, regardless of running equity.
     That keeps the math a single forward-pass (no cash-flow state machine needed).
     """
     position_size = initial_balance * position_size_pct

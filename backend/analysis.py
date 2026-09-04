@@ -160,6 +160,15 @@ class LLMError(RuntimeError):
     """Raised when any configured LLM provider cannot be reached or errors out."""
 
 
+class QuotaError(LLMError):
+    """Raised when a provider returns HTTP 429 or signals quota exhaustion.
+
+    Subclass of :class:`LLMError` so existing broad ``except LLMError``
+    call-sites still catch it; but :func:`call_llm` uses this narrower type
+    to decide whether to try the fallback provider.
+    """
+
+
 class OllamaError(LLMError):
     """Raised when the local Ollama server cannot be reached or errors out.
 
@@ -312,8 +321,7 @@ def build_prompt(market_data: dict[str, Any], memory: dict[str, Any] | None = No
             _label = sentiment.get("label", "Neutral")
             _n_art = sentiment.get("article_count", 0)
             lines.append(
-                f"  Aggregate sentiment: {_label} "
-                f"(score={_score:+.3f}, n={_n_art} articles)"
+                f"  Aggregate sentiment: {_label} " f"(score={_score:+.3f}, n={_n_art} articles)"
             )
         for item in news:
             # item is a dict with headline/source/url/datetime
@@ -449,6 +457,9 @@ def call_ollama(
 
         latency = time.monotonic() - t0
 
+        if response.status_code == 429:
+            span.set_attribute("error", "HTTP 429 rate-limit")
+            raise QuotaError(f"Ollama rate-limit (HTTP 429): {response.text[:200]}")
         if response.status_code != 200:
             span.set_attribute("error", f"HTTP {response.status_code}")
             raise OllamaError(
@@ -639,6 +650,12 @@ def call_cloud_llm(
         except _openai.AuthenticationError as exc:
             span.set_attribute("error", "authentication failed")
             raise LLMError(f"{provider} authentication failed — check your API key.") from exc
+        except _openai.RateLimitError as exc:
+            # Must come before APIStatusError — RateLimitError is a subclass of it.
+            span.set_attribute("error", "HTTP 429 rate-limit / quota")
+            raise QuotaError(
+                f"{provider} quota/rate-limit (HTTP 429): {exc.message[:300]}"
+            ) from exc
         except _openai.APIStatusError as exc:
             span.set_attribute("error", f"HTTP {exc.status_code}")
             raise LLMError(
@@ -731,42 +748,46 @@ def call_llm(
     *,
     model: str | None = None,
     ticker: str | None = None,
-    use_fallback: bool = False,
+    use_fallback: bool = True,
 ) -> tuple[str, str, int, int]:
     """Route to the configured LLM provider.
 
     Returns ``(raw_content, model_used, prompt_tokens, completion_tokens)``.
-    Raises :class:`LLMError` on any provider failure.
+    Raises :class:`LLMError` on provider failure.
 
-    When ``use_fallback=True`` the call tries the primary provider first; on
-    any :class:`LLMError` (rate-limit, quota exhausted, network error) it
-    automatically retries with the fallback provider configured via the
-    ``llm_fallback_provider`` / ``llm_fallback_model`` DB keys.  If all
-    providers in the chain fail, the last :class:`LLMError` is re-raised.
-
-    The default (``use_fallback=False``) preserves the existing live behaviour
-    exactly — no DB reads, no changed code paths for normal scans.
+    When ``use_fallback=True`` (the default) the call tries the primary
+    provider first; on a :class:`QuotaError` (HTTP 429 / quota exhausted) it
+    automatically retries with the fallback provider resolved from:
+      1. DB keys ``llm_fallback_provider`` / ``llm_fallback_model``
+      2. Env vars ``LLM_FALLBACK_PROVIDER`` / ``LLM_FALLBACK_MODEL``
+    Non-quota :class:`LLMError` values (auth failure, network error, bad JSON)
+    are re-raised immediately — only quota errors trigger the chain.
+    If all providers in the chain fail, the last :class:`QuotaError` is re-raised.
     """
     primary_provider = _effective_provider()
 
-    if not use_fallback:
-        return _call_provider(primary_provider, user_prompt, system_prompt, model, ticker)
-
-    # Build the fallback chain from DB settings (same keys backlog item 3c specifies).
-    fallback_provider = _get_db_setting("llm_fallback_provider", "")
-    fallback_model = _get_db_setting("llm_fallback_model", "") or None
+    # Resolve fallback: DB first, then env-var (via LLMConfig fields).
+    fallback_provider = (
+        _get_db_setting("llm_fallback_provider", "") or get_settings().llm.fallback_provider
+    )
+    fallback_model = (
+        _get_db_setting("llm_fallback_model", "") or get_settings().llm.fallback_model
+    ) or None
 
     chain: list[tuple[str, str | None]] = [(primary_provider, model)]
-    if fallback_provider and fallback_provider != primary_provider:
+    if use_fallback and fallback_provider and fallback_provider != primary_provider:
         chain.append((fallback_provider, fallback_model))
 
     last_exc: LLMError = LLMError("No providers configured.")
     for prov, mdl in chain:
         try:
             return _call_provider(prov, user_prompt, system_prompt, mdl, ticker)
-        except LLMError as exc:
-            _log.warning("call_llm: provider %r failed (%s), trying next in chain.", prov, exc)
+        except QuotaError as exc:
+            # Only quota errors flow to the next provider; all other LLMErrors propagate.
+            _log.warning("call_llm: provider %r quota hit (%s), trying next in chain.", prov, exc)
             last_exc = exc
+        except LLMError:
+            raise  # auth failures, network errors, bad JSON — fail fast
     raise last_exc
 
 

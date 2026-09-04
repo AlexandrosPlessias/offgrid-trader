@@ -34,10 +34,12 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
 
 from . import __version__
 from .config import get_settings
@@ -192,6 +194,13 @@ class LLMSettingRequest(BaseModel):
         None,
         description="Reasoning effort for models that support it: none | low | medium | high",
     )
+    fallback_provider: str | None = Field(
+        None,
+        description="Fallback provider used automatically on HTTP 429 / quota errors",
+    )
+    fallback_model: str | None = Field(
+        None, description="Fallback model override (empty = fallback provider default)"
+    )
 
 
 class SchedulerSettingRequest(BaseModel):
@@ -333,6 +342,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --------------------------------------------------------------------------- #
+# Admin token middleware — gates all routes when ADMIN_TOKEN is configured.
+# /health and /auth/verify are always open (health probe + login endpoint).
+# When ADMIN_TOKEN is not set the middleware is a no-op (local / dev mode).
+# --------------------------------------------------------------------------- #
+_UNPROTECTED_PATHS = {"/health", "/auth/verify"}
+
+
+class _AdminTokenMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: StarletteRequest, call_next):  # type: ignore[override]
+        if request.method == "OPTIONS" or request.url.path in _UNPROTECTED_PATHS:
+            return await call_next(request)
+        expected = get_settings().admin_token or get_setting("admin_token", "")
+        if not expected:
+            return await call_next(request)  # dev mode: no token configured → open
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header.removeprefix("Bearer ").strip()
+        if token != expected:
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        return await call_next(request)
+
+
+app.add_middleware(_AdminTokenMiddleware)
+
 
 # --------------------------------------------------------------------------- #
 # Background helper
@@ -372,6 +405,24 @@ def health() -> dict[str, Any]:
         result["ollama_host"] = settings.ollama.host
         result["ollama_model"] = active_model  # backward compat alias
     return result
+
+
+@app.post("/auth/verify")
+def auth_verify(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """Validate the admin token.  Always open (no auth required — this is the login endpoint).
+
+    Returns ``{"ok": true, "dev_mode": true}`` when no token is configured
+    (accepts any input — safe for local / dev deployments only).
+    Returns ``{"ok": true, "dev_mode": false}`` on a correct token.
+    Returns HTTP 401 on a wrong token.
+    """
+    token: str = body.get("token", "")
+    expected = get_settings().admin_token or get_setting("admin_token", "")
+    if not expected:
+        return {"ok": True, "dev_mode": True}
+    if token == expected:
+        return {"ok": True, "dev_mode": False}
+    raise HTTPException(status_code=401, detail="Invalid token.")
 
 
 def _alerts_enabled() -> bool:
@@ -517,21 +568,6 @@ def set_alpaca_settings(request: AlpacaSettingsRequest) -> dict[str, Any]:
     return {"saved": True}
 
 
-@app.get("/settings/alpaca/secret")
-def get_alpaca_secret(x_admin_token: str | None = Header(None)) -> dict[str, Any]:
-    """Reveal the stored Alpaca API secret (admin-token gated).
-
-    Requires the ``X-Admin-Token`` header to equal the installation's
-    admin token — same protection model as ``GET /settings/llm/key``.
-    """
-    cfg = get_settings()
-    expected = cfg.admin_token or get_setting("admin_token", "")
-    if not x_admin_token or x_admin_token != expected:
-        raise HTTPException(status_code=401, detail="Invalid or missing X-Admin-Token")
-    secret = get_setting("alpaca_secret_key", "") or cfg.alpaca.secret_key
-    return {"secret": secret}
-
-
 # ── Paper trading data endpoints ───────────────────────────────────────────
 
 
@@ -592,7 +628,7 @@ def paper_positions() -> dict[str, Any]:
     """Return live open positions from Alpaca."""
     from .alpaca import AlpacaError, get_client  # local import
 
-    if get_setting("paper_trading_enabled", "false") != "true":
+    if get_setting("paper_trading_enabled", "true") != "true":
         return {"enabled": False, "positions": []}
     try:
         client = get_client()
@@ -600,6 +636,92 @@ def paper_positions() -> dict[str, Any]:
         return {"enabled": True, "positions": positions}
     except AlpacaError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+class ManualOrderRequest(BaseModel):
+    ticker: str
+    side: str  # "buy" | "sell"
+    entry: float  # current price — used to compute share qty
+    stop: float
+    target: float
+    notional: float = 500.0
+    signal_id: int | None = None
+    signal_confidence: float | None = None
+    signal_source: str | None = None
+    signal_timestamp: str | None = None
+
+
+@app.post("/paper/orders/place")
+def place_paper_order_manual(req: ManualOrderRequest) -> dict[str, Any]:
+    """Place a single paper bracket order manually (from Explorer or signal card).
+
+    De-duplicates by signal_id when provided: returns the existing order if one
+    already exists for that signal rather than placing a second one.
+    """
+    from .alpaca import AlpacaError, get_client
+    from .database import (
+        get_open_order_by_ticker_side,
+        get_paper_order_by_signal,
+        save_paper_order,
+    )
+
+    if get_setting("paper_trading_enabled", "true") != "true":
+        raise HTTPException(
+            status_code=400,
+            detail="Paper trading is disabled — enable it in Settings → Paper Trading.",
+        )
+
+    # De-dup guard — by signal_id (exact) or by open ticker+side (prevents duplicates)
+    if req.signal_id and get_paper_order_by_signal(req.signal_id):
+        return {
+            "placed": False,
+            "reason": "order_exists",
+            "detail": f"Order already exists for signal {req.signal_id}",
+        }
+    if get_open_order_by_ticker_side(req.ticker, req.side):
+        return {
+            "placed": False,
+            "reason": "ticker_open",
+            "detail": f"An open {req.side} order for {req.ticker} already exists",
+        }
+
+    notional = float(get_setting("paper_trade_position_size", "") or req.notional)
+
+    try:
+        client = get_client()
+        result = client.place_bracket_order(
+            ticker=req.ticker,
+            side=req.side,
+            notional=notional,
+            entry_price=req.entry,
+            stop_price=req.stop,
+            take_profit_price=req.target,
+        )
+    except AlpacaError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    alpaca_order_id = result.get("id")
+    save_paper_order(
+        {
+            "signal_id": req.signal_id,
+            "ticker": req.ticker,
+            "side": req.side,
+            "alpaca_order_id": alpaca_order_id,
+            "status": result.get("status", "pending"),
+            "notional": notional,
+            "entry_price": req.entry,
+            "stop_price": req.stop,
+            "take_profit_price": req.target,
+            "signal_confidence": req.signal_confidence,
+            "signal_source": req.signal_source,
+            "signal_timestamp": req.signal_timestamp,
+        }
+    )
+    return {
+        "placed": True,
+        "alpaca_order_id": alpaca_order_id,
+        "status": result.get("status"),
+    }
 
 
 @app.post("/paper/orders/{order_id}/cancel")
@@ -697,7 +819,7 @@ def market_snapshots(
                 "trades": daily.get("n"),
                 "prev_close": prev_close,
                 "day_chg": round(day_chg, 4) if day_chg is not None else None,
-                "day_chg_pct": round(day_chg_pct, 4) if day_chg_pct is not None else None,
+                "day_chg_pct": (round(day_chg_pct, 4) if day_chg_pct is not None else None),
                 "bid": quote.get("bp"),
                 "ask": quote.get("ap"),
                 "last_trade_at": trade.get("t"),
@@ -727,6 +849,11 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
         "llm_base_url": db_llm_base_url or cfg.llm.base_url_for(provider),
         "llm_api_key_set": bool(db_llm_api_key or cfg.llm.api_key_for(provider)),
         "llm_reasoning_effort": db_reasoning_effort or "none",
+        # Fallback provider — resolved from DB, then env var.
+        "llm_fallback_provider": (
+            get_setting("llm_fallback_provider", "") or cfg.llm.fallback_provider
+        ),
+        "llm_fallback_model": (get_setting("llm_fallback_model", "") or cfg.llm.fallback_model),
         # Env-only defaults (ignore DB overrides) — used by the Settings page to
         # show what ".env defaults" actually resolve to for the *selected* provider.
         "llm_model_env_default": cfg.llm.default_model_for(provider),
@@ -741,10 +868,6 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
         "alerts_enabled": _alerts_enabled(),
         "scan_interval_minutes": scheduler.status()["scan_interval_minutes"],
         "scheduler_running": scheduler.status()["running"],
-        # Admin token — sent back to the UI so the Settings page can include
-        # it as X-Admin-Token when the user clicks "Show" on the API key field.
-        # Env var (ADMIN_TOKEN) takes priority; falls back to DB-generated UUID.
-        "admin_token": cfg.admin_token or get_setting("admin_token", ""),
         # Signal-scan LLM switch — default True (enabled) if never explicitly set.
         "signal_scan_llm_enabled": get_setting("signal_scan_llm_enabled", "true") != "false",
         # Alpaca paper trading
@@ -758,7 +881,7 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
         # Used by the Settings UI to offer "Load Environment Default Values".
         "alpaca_key_id_env_set": bool(cfg.alpaca.key_id),
         "alpaca_secret_env_set": bool(cfg.alpaca.secret_key),
-        "paper_trading_enabled": get_setting("paper_trading_enabled", "false") == "true",
+        "paper_trading_enabled": get_setting("paper_trading_enabled", "true") == "true",
         "paper_trade_position_size": float(get_setting("paper_trade_position_size", "") or 500),
         "paper_trade_min_confidence": (
             float(get_setting("paper_trade_min_confidence", ""))
@@ -831,33 +954,23 @@ def set_llm_settings(request: LLMSettingRequest) -> dict[str, Any]:
                 ),
             )
         set_setting("llm_reasoning_effort", request.reasoning_effort)
+    if request.fallback_provider is not None:
+        valid_fallback = {"", "ollama", "groq", "gemini", "mistral", "custom"}
+        if request.fallback_provider not in valid_fallback:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid fallback_provider '{request.fallback_provider}'. "
+                    f"Valid: {sorted(valid_fallback - {''})}"
+                ),
+            )
+        set_setting("llm_fallback_provider", request.fallback_provider)
+    if request.fallback_model is not None:
+        set_setting("llm_fallback_model", request.fallback_model)
     return {
         "ok": True,
         "provider": get_setting("llm_provider", "") or get_settings().llm.provider,
     }
-
-
-@app.get("/settings/llm/key")
-def reveal_llm_key(x_admin_token: str | None = Header(None)) -> dict[str, str]:
-    """Return the active API key in plaintext (DB value, or env fallback).
-
-    Requires the ``X-Admin-Token`` header to equal the installation's admin
-    token (auto-generated at first startup, stored in ``app_settings``, and
-    included in ``GET /settings`` so the UI can send it back here).
-
-    This stops single-shot automated key harvesting: an attacker must first
-    discover the token from ``GET /settings``, then make a second targeted
-    request — rather than recovering the key with one unauthenticated GET.
-    """
-    # Resolve admin token: ADMIN_TOKEN env var takes priority over DB-stored value.
-    cfg = get_settings()
-    expected = cfg.admin_token or get_setting("admin_token", "")
-    if not expected or x_admin_token != expected:
-        raise HTTPException(status_code=401, detail="Missing or invalid X-Admin-Token header.")
-    provider = get_setting("llm_provider", "") or cfg.llm.provider
-    db_key = get_setting("llm_api_key", "")
-    env_key = cfg.llm.api_key_for(provider)
-    return {"key": db_key or env_key}
 
 
 @app.get("/settings/models")
@@ -1797,9 +1910,7 @@ async def backtest_experiment_advisor(run_id: int) -> dict[str, Any]:
             "experiment_advisor run=%d: LLM returned unknown id %s; auto-selected %s",
             run_id,
             str(sel_id).replace("\r", "").replace("\n", ""),
-            str(selected_candidate["candidate_id"])
-            .replace("\r", "")
-            .replace("\n", ""),
+            str(selected_candidate["candidate_id"]).replace("\r", "").replace("\n", ""),
         )
 
     result["selected_candidate"] = selected_candidate
@@ -1832,6 +1943,39 @@ async def backtest_experiment_advisor(run_id: int) -> dict[str, Any]:
         pass  # non-fatal
 
     return result
+
+
+@app.get("/backtest/profiles")
+def list_backtest_profiles() -> dict[str, Any]:
+    """Return all saved backtest parameter profiles, newest first."""
+    from .database import get_backtest_profiles
+
+    return {"profiles": get_backtest_profiles()}
+
+
+@app.post("/backtest/profiles")
+def save_backtest_profile_endpoint(
+    body: dict[str, Any] = Body(...),
+) -> dict[str, Any]:
+    """Upsert a named backtest profile.  Body: ``{name, params}``."""
+    from .database import save_backtest_profile
+
+    name: str = (body.get("name") or "").strip()
+    params: dict[str, Any] = body.get("params") or {}
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required.")
+    return save_backtest_profile(name, params)
+
+
+@app.delete("/backtest/profiles/{profile_id}")
+def delete_backtest_profile_endpoint(profile_id: int) -> dict[str, Any]:
+    """Delete a saved backtest profile by id."""
+    from .database import delete_backtest_profile
+
+    deleted = delete_backtest_profile(profile_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Profile {profile_id} not found.")
+    return {"deleted": True, "id": profile_id}
 
 
 @app.get("/backtest/{run_id}")

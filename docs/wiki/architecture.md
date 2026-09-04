@@ -265,6 +265,79 @@ All instruments are visible in Aspire's **Metrics** tab at http://localhost:1888
 
 ---
 
+## Cloud deployment (Fly.io + Vercel)
+
+MarketSage can be deployed publicly with the backend on **Fly.io** and the frontend on
+**Vercel**. GitHub Actions handles continuous deployment on every push to `main`.
+
+```
+Browser
+  │
+  ▼
+Vercel CDN (static React build)
+  │  VITE_API_URL=https://offgrid-trader.fly.dev
+  │  direct HTTPS calls (no /api proxy)
+  ▼
+Fly.io (FastAPI backend)
+  │  fly volume: offgrid_trader_data
+  ▼
+SQLite (persistent, /app/data/offgrid_trader.db)
+```
+
+> **Ollama is local-only.** Fly.io machines cannot run a GPU model server. When
+> deploying to Fly, set `LLM_PROVIDER` to a cloud provider (Groq, Gemini, etc.) via
+> `fly secrets set`.
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| [`fly.toml`](../../fly.toml) | Fly.io app config — build, volume, health check, VM size |
+| [`vercel.json`](../../vercel.json) | Vercel project config — points at `frontend/`, Vite framework |
+| [`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) | CD pipeline — `deploy-backend` + `deploy-frontend` jobs |
+| [`scripts/setup-gh-secrets.sh`](../../scripts/setup-gh-secrets.sh) | One-shot script to populate all four GitHub Actions secrets |
+
+### One-time setup
+
+See [cloud-hosting.md](cloud-hosting.md) for a step-by-step guide to
+opening Fly.io and Vercel accounts and running the one-time CLI setup.
+
+---
+
+## Security
+
+### Login screen and admin token
+
+When `ADMIN_TOKEN` is set (required for public deployments), the frontend shows a
+**login screen** on first load. The user enters the admin password; the frontend calls
+`POST /auth/verify`. On success the token is stored in `sessionStorage` (cleared when
+the tab is closed) and sent as `Authorization: Bearer <token>` on every subsequent API
+call.
+
+### AdminTokenMiddleware
+
+A Starlette `BaseHTTPMiddleware` validates the `Authorization: Bearer` header on every
+request. Two paths are permanently public (no token required):
+
+| Path | Why it's open |
+|---|---|
+| `GET /health` | Fly.io health-check probe cannot send auth headers |
+| `POST /auth/verify` | The login endpoint itself — must be callable before the user has a token |
+
+When `ADMIN_TOKEN` is **not configured** (local / dev mode), the middleware is a no-op:
+all requests pass through. The login screen detects dev mode via `POST /auth/verify`
+and signs in automatically without requiring a password.
+
+### API key masking
+
+`GET /settings` never returns any plaintext secret. API keys, the Alpaca secret, and
+`admin_token` are **write-only from the browser**. The response includes only boolean
+flags (`llm_api_key_set: true/false`) so the UI can display ✓/✗ status.
+
+See [security.md](security.md) for the full auth design.
+
+---
+
 ## Configuration
 
 All configuration is via `.env` (copied from `.env.example`). Key variables:

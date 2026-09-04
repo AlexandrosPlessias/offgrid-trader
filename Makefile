@@ -10,7 +10,7 @@
 COMPOSE       := docker compose -f infra/docker-compose.yml
 INFRA_COMPOSE := docker compose -f infra/docker-compose.infra.yml
 
-.PHONY: up down build logs infra shell-backend smoke lint
+.PHONY: up down build logs infra shell-backend smoke lint deploy shutdown
 
 # ── Helper: print useful URLs after the stack starts ─────────────────────────
 define print_urls
@@ -102,3 +102,14 @@ smoke:
 ## Deps auto-installed from tests/lint/requirements.dev.txt into .venv
 lint:
 	@bash tests/lint/dev_check.sh
+
+## Deploy backend (Fly.io) + frontend (Vercel) to production.
+## Prerequisites: flyctl and vercel CLIs authenticated; run once-off setup first:
+##   bash scripts/setup-gh-secrets.sh
+deploy:
+	@bash scripts/cloud-deploy/deploy.sh
+
+## Take the app offline: stop all Fly.io machines + remove Vercel production deployment.
+## Restore with: make deploy
+shutdown:
+	@bash scripts/cloud-deploy/shutdown.sh

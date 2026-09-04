@@ -343,10 +343,10 @@ def _apply_sentiment_filter(
     directional information.
 
     Thresholds:
-      score >  0.35 → long +3,  short −3  (strong bullish)
-      score >  0.15 → long +1,  short −1  (mild bullish)
-      score < −0.35 → long −3,  short +3  (strong bearish)
-      score < −0.15 → long −1,  short +1  (mild bearish)
+      score >  0.35 -> long +3,  short -3  (strong bullish)
+      score >  0.15 -> long +1,  short -1  (mild bullish)
+      score < -0.35 -> long -3,  short +3  (strong bearish)
+      score < -0.15 -> long -1,  short +1  (mild bearish)
     """
     if not news_sentiment:
         return merged

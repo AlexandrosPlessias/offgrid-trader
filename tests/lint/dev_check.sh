@@ -79,7 +79,7 @@ run() {
 #   I (isort)     → import ordering
 run "Ruff" "$VENV/bin/ruff" check backend/ tests/ \
     --select=E,W,F,B,S,I,C90,UP,RUF \
-    --ignore=E203,S101,S311 \
+    --ignore=E203,S101,S311,BLE001,DTZ011,SIM117 \
     --line-length=100 \
     --output-format=concise
 

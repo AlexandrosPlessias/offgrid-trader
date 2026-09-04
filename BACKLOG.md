@@ -314,3 +314,12 @@ Slim the alert layer down to the two channels worth supporting, then validate th
 - **Mobile notifications** — push via Pushover or ntfy.sh (self-hosted) as a lightweight alternative to Telegram
 - **Confidence calibration** — track how often each confidence band (65–75 / 75–85 / 85+) leads to correct calls; auto-adjust `CONFIDENCE_FLOOR` over time
 - **Dark-pool / options flow** — integrate unusual options activity data (e.g. Unusual Whales API) as an additional signal source
+
+
+---
+
+## Next up
+
+- **Watchlist expansion** — support a larger, manageable set of tickers; add bulk-import and grouping (sector/theme)
+- **Opportunity discovery** — scan beyond the existing watchlist for promising tickers; include filters/ranking and sensible API/LLM rate-limit controls so discovery runs don't exhaust quotas
+- **Telegram integration** — deliver actionable notifications for new high-confidence signals, scan results, and paper-trading updates (fill/stop/target hit)
