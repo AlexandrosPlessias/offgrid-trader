@@ -149,11 +149,15 @@ New SSE event types: `type:"retry"` (skill retried with back-off), `type:"memory
 
 ---
 
-## 3c. Multi-model fallback + cloud hosting (Vercel / Fly.io)
+## ✅ 3c. Multi-model fallback + cloud hosting (Vercel / Fly.io)
 
-*Branch: `feat/backlog-3c-fallback-hosting`*
+*Shipped on branch `feat/backlog-3c-fallback-hosting`*
 
 Two closely related capabilities that build on item 3a and are best shipped together: automatic provider fallback when a quota is hit, and deploying the full stack publicly so it runs without a local machine.
+
+**Delivered:**
+- **Part 1** — fallback chain in `backend/analysis.py` (`llm_fallback_provider` / `llm_fallback_model` DB keys, `LLM_FALLBACK_PROVIDER` / `LLM_FALLBACK_MODEL` env fallbacks), exposed via `GET /settings` and `POST /settings/llm`.
+- **Part 2** — backend on Fly.io (`fly.toml`, persistent volume at `/app/data`) and frontend on Vercel (`vercel.json`), with continuous deployment via `.github/workflows/deploy.yml` and one-time secret setup via `scripts/setup-gh-secrets.sh`. Documented in `docs/wiki/cloud-hosting.md`.
 
 ---
 
@@ -239,7 +243,7 @@ Day-by-day signal replay, forward outcome evaluation, and risk-normalized perfor
 - **AI Usage section** (Settings): renamed from "Token Usage"; period selector (Today / 3d / 7d / 30d / 90d); daily-calls bar chart; TPM headroom bar; cost estimate card; by-source breakdown (signals/explorer · backtesting runs · AI review); quota limits table per provider (Groq live headers, Gemini/Mistral documented free-tier limits).
 - **Education**: two new wiki pages (`backtesting-explained.md`, `backtesting.md`) + Learn-tab section.
 
-### Phase 2 — Virtual wallet simulation *(next item after Phase 1)*
+### ✅ Phase 2 — Virtual wallet simulation *(shipped)*
 
 - Start each run with a configurable virtual balance (e.g. `$10,000`)
 - Each actionable signal opens a paper position: buy `N` shares at `entry`, set stop and target
@@ -261,6 +265,11 @@ Surface *new* tickers to watch automatically from market trends, instead of rely
 - **Config**: enable/disable, max candidates, refresh interval, minimum score.
 
 Distinct from the existing manual `POST /watchlist` add flow — this is *discovery*, not curation.
+
+### Watchlist expansion (bundled with this item)
+
+- Support a larger, manageable set of tickers; add bulk-import and grouping (sector/theme)
+- Discovery runs must respect API/LLM rate limits so they don't exhaust provider quotas
 
 ---
 
@@ -285,6 +294,7 @@ Slim the alert layer down to the two channels worth supporting, then validate th
 - Complete BotFather setup; document the two-step process (create bot → get chat ID)
 - Verify delivery to a personal chat and a group chat (group chat IDs are negative numbers)
 - Confirm the message format is readable on mobile
+- Deliver actionable notifications for new high-confidence signals, scan results, and paper-trading updates (fill / stop / target hit)
 
 ### Step 4 — Test endpoint + history
 
@@ -314,12 +324,3 @@ Slim the alert layer down to the two channels worth supporting, then validate th
 - **Mobile notifications** — push via Pushover or ntfy.sh (self-hosted) as a lightweight alternative to Telegram
 - **Confidence calibration** — track how often each confidence band (65–75 / 75–85 / 85+) leads to correct calls; auto-adjust `CONFIDENCE_FLOOR` over time
 - **Dark-pool / options flow** — integrate unusual options activity data (e.g. Unusual Whales API) as an additional signal source
-
-
----
-
-## Next up
-
-- **Watchlist expansion** — support a larger, manageable set of tickers; add bulk-import and grouping (sector/theme)
-- **Opportunity discovery** — scan beyond the existing watchlist for promising tickers; include filters/ranking and sensible API/LLM rate-limit controls so discovery runs don't exhaust quotas
-- **Telegram integration** — deliver actionable notifications for new high-confidence signals, scan results, and paper-trading updates (fill/stop/target hit)
