@@ -33,6 +33,11 @@ Branch: `feat/backlog-5-trending-discovery` (off `main`)
 - recharts `^2.12.0` available; no new frontend dependencies needed.
 - No existing screener/movers/discovery code anywhere (confirmed).
 
+## Branch
+
+Branch `feat/backlog-5-trending-discovery` already exists (off `main`, commit `874905f`).
+Verify with `git status` before writing any code — do not create a new branch.
+
 ## Phases
 
 ### Phase 1 — Discovery data sources
@@ -53,7 +58,7 @@ Branch: `feat/backlog-5-trending-discovery` (off `main`)
 - Cull **before** scoring to `discovery_max_candidates` (default 25) to bound yfinance calls
 - Throttle indicator fetches (reuse the `_RpmThrottle` pattern from `backtest.py`)
 
-### Phase 3 — Persistence + config (parallel with 2)
+### Phase 3 — Persistence + config (parallel with 2; `DiscoveryConfig` must land before `score_candidate()` is called at runtime)
 
 - `backend/database.py` `_SCHEMA`: add
   - `discovery_runs(id, created_at, sources, candidate_count, status, error)`
@@ -82,13 +87,15 @@ Branch: `feat/backlog-5-trending-discovery` (off `main`)
 
 - `frontend/src/App.jsx`:
   - Add `Trending` nav tab + view container following the existing pattern
-  - Trending view: refresh button (SSE progress), ranked candidate table (ticker, price, %chg, volume, score, reasons, source pill), one-click "Add to watchlist", score bar chart via recharts, settings row (enable, sources, max candidates, min score, interval, auto-scan + top-N)
+  - Trending view: refresh button (SSE progress), ranked candidate table (ticker, price, %chg, volume, score, reasons, source pill), one-click "Add to watchlist", score bar chart via recharts, inline settings row (enable, sources, max candidates, min score, interval, auto-scan + top-N)
+  - **Settings panel** (settings view): add a "Discovery" section card with the same fields (`discovery_enabled`, `discovery_sources`, `discovery_max_candidates`, `discovery_min_score`, `discovery_interval_minutes`, `discovery_autoscan_enabled`, `discovery_autoscan_top_n`). Reads via `GET /settings/discovery`; saves via `POST /settings/discovery`. Consistent with the existing Alerts / Scheduler / LLM / Alpaca section cards. No additional API changes needed.
   - Watchlist UI: bulk-import textarea (comma/newline) → `POST /watchlist/bulk`; group create/assign/delete
 
 ### Phase 7 — Tests + docs (depends on all)
 
 - `tests/smoke/smoke_test.py`: new numbered section — mock `yf.screen` + Alpaca `_get`; assert normalization, cull, scoring bounds 0–100, dedupe, empty/network-failure graceful handling, min-score filter, auto-scan top-N selection
 - `docs/wiki`: new `trending-discovery.md` + `_Sidebar.md` entry; update `api.md`, `settings.md`, `architecture.md`
+- `README.md`: add "Trending Ticker Discovery" bullet to the Features section; update quick-start if needed
 - `BACKLOG.md`: mark item 5 complete on finish
 
 ## Files
@@ -120,4 +127,5 @@ Branch: `feat/backlog-5-trending-discovery` (off `main`)
 
 ## Further consideration
 
-1. If Alpaca's screener turns out to be paid-tier only, should the Alpaca code path stay behind a capability check, or be dropped in favour of yfinance-only? Recommendation: keep it behind the check, since the fallback is required regardless.
+~~1. If Alpaca's screener turns out to be paid-tier only, should the Alpaca code path stay behind a capability check, or be dropped in favour of yfinance-only?~~
+**Resolved**: Alpaca screener methods are written but guarded by a runtime 403/`AlpacaError` catch; the yfinance fallback is always exercised in tests; no separate feature flag needed.

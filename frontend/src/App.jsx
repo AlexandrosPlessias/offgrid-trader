@@ -696,6 +696,12 @@ function Header({ health, usage, btTodayTokens = 0, activeView, onViewChange, cl
           >
             Learn
           </button>
+          <button
+            className={`nav-tab ${activeView === 'trending' ? 'active' : ''}`}
+            onClick={() => onViewChange('trending')}
+          >
+            Trending
+          </button>
         </nav>
 
         {/* Live status chips — API · Market · Model · Tokens */}
@@ -4567,6 +4573,7 @@ const SETTINGS_SECTIONS = [
   { id: 'settings-ai-provider', icon: '🧠', label: 'AI Provider' },
   { id: 'settings-usage',       icon: '⚡', label: 'AI Usage' },
   { id: 'settings-perf',        icon: '🚀', label: 'Performance' },
+  { id: 'settings-discovery',   icon: '🔥', label: 'Discovery' },
   { id: 'settings-cache',       icon: '💾', label: 'Data Cache' },
   { id: 'settings-data',        icon: '🗑️', label: 'Data' },
 ]
@@ -4577,6 +4584,148 @@ function SettingSection({ id, title, icon, children }) {
       <div className="settings-section-title">{icon} {title}</div>
       {children}
     </div>
+  )
+}
+
+function DiscoverySettingsSection() {
+  const [cfg,         setCfg]         = useState(null)
+  const [saveStatus,  setSaveStatus]  = useState(null)
+  const [saveErr,     setSaveErr]     = useState('')
+
+  // local editable copies
+  const [enabled,          setEnabled]          = useState(false)
+  const [sources,          setSources]          = useState('alpaca,yfinance')
+  const [maxCandidates,    setMaxCandidates]    = useState(25)
+  const [minScore,         setMinScore]         = useState(60)
+  const [intervalMinutes,  setIntervalMinutes]  = useState(60)
+  const [autoscanEnabled,  setAutoscanEnabled]  = useState(false)
+  const [autoscanTopN,     setAutoscanTopN]     = useState(3)
+
+  useEffect(() => {
+    fetch(`${API}/settings/discovery`, { headers: getAuthHeaders() })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => {
+        setCfg(d)
+        setEnabled(d.enabled ?? false)
+        setSources(d.sources ?? 'alpaca,yfinance')
+        setMaxCandidates(d.max_candidates ?? 25)
+        setMinScore(d.min_score ?? 60)
+        setIntervalMinutes(d.interval_minutes ?? 60)
+        setAutoscanEnabled(d.autoscan_enabled ?? false)
+        setAutoscanTopN(d.autoscan_top_n ?? 3)
+      })
+      .catch(() => {})
+  }, [])
+
+  const save = async () => {
+    setSaveStatus('saving'); setSaveErr('')
+    try {
+      const r = await fetch(`${API}/settings/discovery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({
+          enabled,
+          sources,
+          max_candidates: maxCandidates,
+          min_score: minScore,
+          interval_minutes: intervalMinutes,
+          autoscan_enabled: autoscanEnabled,
+          autoscan_top_n: autoscanTopN,
+        }),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      const d = await r.json()
+      setCfg(d)
+      setSaveStatus('ok')
+      setTimeout(() => setSaveStatus(null), 3000)
+    } catch (e) {
+      setSaveErr(e.message || 'Save failed')
+      setSaveStatus('error')
+      setTimeout(() => setSaveStatus(null), 4000)
+    }
+  }
+
+  if (!cfg) return null
+
+  return (
+    <SettingSection id="settings-discovery" title="Trending Discovery" icon="🔥">
+      <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
+        Automatically discover trending tickers from Alpaca screener and/or yfinance.
+        Candidates are scored 0–100 using momentum, volume, trend alignment, and RSI/MACD.
+      </p>
+
+      <div className="settings-row">
+        <label className="settings-label">Enable discovery</label>
+        <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} />
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Sources</label>
+        <input
+          className="settings-input"
+          value={sources}
+          onChange={e => setSources(e.target.value)}
+          placeholder="alpaca,yfinance"
+          style={{ width: 220 }}
+        />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>comma-separated</span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Max candidates</label>
+        <input
+          className="settings-input"
+          type="number" min={5} max={100}
+          value={maxCandidates}
+          onChange={e => setMaxCandidates(Number(e.target.value))}
+          style={{ width: 80 }}
+        />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>per run (5–100)</span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Min score</label>
+        <input
+          className="settings-input"
+          type="number" min={0} max={100}
+          value={minScore}
+          onChange={e => setMinScore(Number(e.target.value))}
+          style={{ width: 80 }}
+        />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>0–100</span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Interval</label>
+        <input
+          className="settings-input"
+          type="number" min={15} max={1440}
+          value={intervalMinutes}
+          onChange={e => setIntervalMinutes(Number(e.target.value))}
+          style={{ width: 80 }}
+        />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>minutes between runs (15–1440)</span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Auto-scan top-N</label>
+        <input type="checkbox" checked={autoscanEnabled} onChange={e => setAutoscanEnabled(e.target.checked)} />
+        {autoscanEnabled && (
+          <input
+            className="settings-input"
+            type="number" min={1} max={20}
+            value={autoscanTopN}
+            onChange={e => setAutoscanTopN(Number(e.target.value))}
+            style={{ width: 60, marginLeft: 10 }}
+          />
+        )}
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          {autoscanEnabled ? `Run full agent pipeline on top ${autoscanTopN} candidates` : 'Disabled'}
+        </span>
+      </div>
+
+      <SaveRow status={saveStatus} errMsg={saveErr} onSave={save} />
+    </SettingSection>
   )
 }
 
@@ -5621,6 +5770,9 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
         </table>
       </SettingSection>
 
+      {/* ── Discovery ────────────────────────────────────────────────────── */}
+      <DiscoverySettingsSection />
+
       <SettingSection id="settings-cache" title="Data Cache" icon="💾">
         <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
           Every market data fetch is stored permanently in the local database, keyed by
@@ -5716,6 +5868,216 @@ function SettingsPage({ usage, onUsageRefresh, onHealthRefresh }) {
       </SettingSection>
 
       </div>
+    </div>
+  )
+}
+
+// ─── TrendingPage ─────────────────────────────────────────────────────────────
+
+function TrendingPage({ onViewChange }) {
+  const [candidates, setCandidates]   = useState([])
+  const [runMeta,    setRunMeta]      = useState(null)
+  const [loading,    setLoading]      = useState(false)
+  const [refreshing, setRefreshing]   = useState(false)
+  const [progress,   setProgress]     = useState([])
+  const [error,      setError]        = useState(null)
+  const [addStatus,  setAddStatus]    = useState({}) // ticker → 'adding'|'done'|'error'
+
+  const load = useCallback(async () => {
+    setLoading(true); setError(null)
+    try {
+      const r = await fetch(`${API}/discovery/trending`, { headers: getAuthHeaders() })
+      if (!r.ok) throw new Error(await r.text())
+      const d = await r.json()
+      setRunMeta(d.run)
+      setCandidates(d.candidates || [])
+    } catch (e) {
+      setError(e.message || 'Failed to load trending data')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const handleRefresh = async () => {
+    setRefreshing(true); setProgress([]); setError(null)
+    try {
+      const r = await fetch(`${API}/discovery/refresh`, { method: 'POST', headers: getAuthHeaders() })
+      if (!r.ok) throw new Error(await r.text())
+      const reader = r.body.getReader()
+      const dec = new TextDecoder()
+      let buf = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += dec.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop()
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          try {
+            const ev = JSON.parse(line.slice(6))
+            if (ev.type === 'step')   setProgress(p => [...p, ev.message])
+            if (ev.type === 'result') { await load(); setProgress(p => [...p, `Done — ${ev.candidate_count} candidates`]) }
+            if (ev.type === 'error')  setError(ev.message)
+          } catch { /* ignore parse errors */ }
+        }
+      }
+    } catch (e) {
+      setError(e.message || 'Refresh failed')
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
+  const handleAdd = async (ticker) => {
+    setAddStatus(s => ({ ...s, [ticker]: 'adding' }))
+    try {
+      const r = await fetch(`${API}/watchlist`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ ticker }),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      setAddStatus(s => ({ ...s, [ticker]: 'done' }))
+      setCandidates(prev => prev.map(c => c.ticker === ticker ? { ...c, already_in_watchlist: true } : c))
+    } catch {
+      setAddStatus(s => ({ ...s, [ticker]: 'error' }))
+    }
+  }
+
+  const fmtPct  = (v) => v == null ? '—' : `${v >= 0 ? '+' : ''}${parseFloat(v).toFixed(2)}%`
+  const fmtVol  = (v) => v == null ? '—' : (v >= 1_000_000 ? `${(v/1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v/1_000).toFixed(0)}K` : String(v))
+  const fmtPrice = (v) => v == null ? '—' : `$${parseFloat(v).toFixed(2)}`
+
+  return (
+    <div className="page-content" style={{ padding: '24px 32px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>🔥 Trending Tickers</h2>
+        <button
+          className="btn-primary btn-sm"
+          onClick={handleRefresh}
+          disabled={refreshing}
+          style={{ marginLeft: 'auto' }}
+        >
+          {refreshing ? 'Refreshing…' : '↻ Refresh'}
+        </button>
+        <button
+          className="btn-secondary btn-sm"
+          onClick={() => onViewChange('settings')}
+          title="Discovery settings"
+          style={{ fontSize: 12 }}
+        >
+          ⚙ Settings
+        </button>
+      </div>
+
+      {/* Progress log */}
+      {progress.length > 0 && (
+        <div className="card" style={{ marginBottom: 16, padding: '10px 16px', fontSize: 12, color: 'var(--text-dim)' }}>
+          {progress.map((msg, i) => <div key={i}>› {msg}</div>)}
+        </div>
+      )}
+
+      {error && <p style={{ color: 'var(--red)', marginBottom: 16 }}>✗ {error}</p>}
+
+      {runMeta && (
+        <p style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 12 }}>
+          Last run: {new Date(runMeta.created_at).toLocaleString()} · {runMeta.candidate_count} candidates · sources: {runMeta.sources}
+        </p>
+      )}
+
+      {!loading && candidates.length === 0 && !error && (
+        <div className="card" style={{ textAlign: 'center', padding: 40, color: 'var(--text-dim)' }}>
+          <p>No discovery data yet.</p>
+          <p>Click <strong>↻ Refresh</strong> to run a discovery scan.</p>
+        </div>
+      )}
+
+      {candidates.length > 0 && (
+        <div className="card" style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                <th style={{ textAlign: 'left',  padding: '8px 10px' }}>Ticker</th>
+                <th style={{ textAlign: 'right', padding: '8px 10px' }}>Price</th>
+                <th style={{ textAlign: 'right', padding: '8px 10px' }}>Change</th>
+                <th style={{ textAlign: 'right', padding: '8px 10px' }}>Volume</th>
+                <th style={{ textAlign: 'right', padding: '8px 10px' }}>Score</th>
+                <th style={{ textAlign: 'left',  padding: '8px 10px' }}>Reasons</th>
+                <th style={{ textAlign: 'center',padding: '8px 10px' }}>Source</th>
+                <th style={{ textAlign: 'center',padding: '8px 10px' }}>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {candidates.map((c, i) => {
+                const pctColor = (c.percent_change || 0) >= 0 ? 'var(--green)' : 'var(--red)'
+                const scoreColor = c.score >= 75 ? 'var(--green)' : c.score >= 50 ? 'var(--yellow, #f59e0b)' : 'var(--text-dim)'
+                const adding = addStatus[c.ticker] === 'adding'
+                const added  = c.already_in_watchlist || addStatus[c.ticker] === 'done'
+                return (
+                  <tr key={c.ticker} style={{ borderBottom: '1px solid var(--border-subtle, rgba(255,255,255,.06))' }}>
+                    <td style={{ padding: '8px 10px', fontWeight: 700 }}>{c.ticker}</td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right' }}>{fmtPrice(c.price)}</td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right', color: pctColor, fontWeight: 600 }}>{fmtPct(c.percent_change)}</td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text-dim)' }}>{fmtVol(c.volume)}</td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                      <span style={{ color: scoreColor, fontWeight: 700 }}>{c.score?.toFixed(0) ?? '—'}</span>
+                      <div style={{ marginTop: 3, width: 60, height: 4, background: 'var(--border)', borderRadius: 2, marginLeft: 'auto' }}>
+                        <div style={{ width: `${Math.min(c.score || 0, 100)}%`, height: '100%', background: scoreColor, borderRadius: 2, transition: 'width .3s' }} />
+                      </div>
+                    </td>
+                    <td style={{ padding: '8px 10px', fontSize: 11, color: 'var(--text-dim)', maxWidth: 260 }}>
+                      {(c.reasons || []).join(' · ') || '—'}
+                    </td>
+                    <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                      <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, background: 'var(--bg-subtle, rgba(255,255,255,.08))', color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
+                        {c.source || '—'}
+                      </span>
+                    </td>
+                    <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                      <button
+                        className="btn-secondary btn-sm"
+                        onClick={() => handleAdd(c.ticker)}
+                        disabled={added || adding}
+                        style={{ fontSize: 11, padding: '2px 8px', opacity: added ? 0.5 : 1 }}
+                      >
+                        {added ? '✓ Added' : adding ? '…' : '+ Watch'}
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Score breakdown chart */}
+      {candidates.length > 0 && (() => {
+        const data = candidates.slice(0, 15).map(c => ({ name: c.ticker, score: Math.round(c.score || 0) }))
+        return (
+          <div className="card" style={{ marginTop: 20, padding: '16px 16px 8px' }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--text-dim)' }}>Score distribution (top 15)</div>
+            <ResponsiveContainer width="100%" height={160}>
+              <BarChart data={data} margin={{ top: 0, right: 8, left: -20, bottom: 0 }}>
+                <XAxis dataKey="name" tick={{ fontSize: 10, fill: 'var(--text-dim)' }} />
+                <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: 'var(--text-dim)' }} />
+                <Tooltip
+                  contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12 }}
+                  formatter={(v) => [`${v}/100`, 'Score']}
+                />
+                <Bar dataKey="score" radius={[3,3,0,0]}>
+                  {data.map((d, i) => (
+                    <Cell key={i} fill={d.score >= 75 ? 'var(--green)' : d.score >= 50 ? '#f59e0b' : 'var(--text-dim)'} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )
+      })()}
     </div>
   )
 }
@@ -9464,6 +9826,7 @@ export default function App() {
           />
         </div>
         {activeView === 'education' && <EducationPage />}
+        {activeView === 'trending' && <TrendingPage onViewChange={setActiveView} />}
         {activeView === 'backtest' && <BacktestPage wl={wl} usage={usage} />}
         {activeView === 'paper' && (
           <PaperTradingPage

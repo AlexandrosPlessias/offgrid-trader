@@ -219,6 +219,43 @@ CREATE TABLE IF NOT EXISTS paper_orders (
 CREATE INDEX IF NOT EXISTS idx_paper_orders_ticker    ON paper_orders(ticker);
 CREATE INDEX IF NOT EXISTS idx_paper_orders_status    ON paper_orders(status);
 CREATE INDEX IF NOT EXISTS idx_paper_orders_signal_id ON paper_orders(signal_id);
+
+-- Discovery tables — populated by backend.discovery; never cleared by clear_all_data.
+CREATE TABLE IF NOT EXISTS discovery_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at      TEXT    NOT NULL,
+    sources         TEXT    NOT NULL,
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    status          TEXT    NOT NULL DEFAULT 'running',   -- running|done|error
+    error           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovery_runs_created ON discovery_runs(created_at);
+
+CREATE TABLE IF NOT EXISTS discovery_candidates (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id         INTEGER NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
+    ticker         TEXT    NOT NULL,
+    score          REAL    NOT NULL DEFAULT 0,
+    price          REAL,
+    percent_change REAL,
+    volume         INTEGER,
+    source         TEXT,
+    reasons        TEXT,   -- JSON array
+    components     TEXT,   -- JSON object
+    created_at     TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovery_candidates_run   ON discovery_candidates(run_id);
+CREATE INDEX IF NOT EXISTS idx_discovery_candidates_score ON discovery_candidates(score DESC);
+
+-- Watchlist groups: user-defined sector/theme buckets.
+CREATE TABLE IF NOT EXISTS watchlist_groups (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL UNIQUE,
+    tickers    TEXT    NOT NULL DEFAULT '[]',   -- JSON array
+    created_at TEXT    NOT NULL
+);
 """
 
 
@@ -1414,6 +1451,153 @@ def get_paper_order_by_alpaca_id(alpaca_order_id: str, db_path: str | None = Non
             (alpaca_order_id,),
         ).fetchone()
     return dict(row) if row else None
+
+
+# --------------------------------------------------------------------------- #
+# Discovery helpers
+# --------------------------------------------------------------------------- #
+def save_discovery_run(sources: str, db_path: str | None = None) -> int:
+    """Create a new discovery_runs row (status='running') and return its id."""
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO discovery_runs (created_at, sources, candidate_count, status)"
+            " VALUES (?, ?, 0, 'running')",
+            (_now_iso(), sources),
+        )
+        conn.commit()
+        if cur.lastrowid is None:
+            raise RuntimeError("insert into discovery_runs returned no lastrowid")
+        return cur.lastrowid
+
+
+def update_discovery_run(
+    run_id: int,
+    status: str,
+    candidate_count: int = 0,
+    error: str | None = None,
+    db_path: str | None = None,
+) -> None:
+    """Update status / counts on an existing discovery_runs row."""
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE discovery_runs SET status=?, candidate_count=?, error=? WHERE id=?",
+            (status, candidate_count, error, run_id),
+        )
+        conn.commit()
+
+
+def save_discovery_candidates(
+    run_id: int,
+    candidates: list[dict],
+    db_path: str | None = None,
+) -> None:
+    """Bulk-insert scored candidates for *run_id*."""
+    now = _now_iso()
+    rows = [
+        (
+            run_id,
+            c.get("symbol") or c.get("ticker", ""),
+            float(c.get("score", 0)),
+            c.get("price"),
+            c.get("percent_change"),
+            c.get("volume"),
+            c.get("source"),
+            json.dumps(c.get("reasons") or []),
+            json.dumps(c.get("components") or {}),
+            now,
+        )
+        for c in candidates
+    ]
+    with _connect(db_path) as conn:
+        conn.executemany(
+            """INSERT INTO discovery_candidates
+               (run_id, ticker, score, price, percent_change, volume,
+                source, reasons, components, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        conn.commit()
+
+
+def get_latest_discovery(db_path: str | None = None) -> dict | None:
+    """Return the most-recent completed discovery run with its candidates.
+
+    Returns ``None`` when no completed run exists yet.
+    """
+    with _connect(db_path) as conn:
+        run_row = conn.execute(
+            "SELECT * FROM discovery_runs WHERE status='done'" " ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if not run_row:
+            return None
+        run = dict(run_row)
+        cand_rows = conn.execute(
+            "SELECT * FROM discovery_candidates WHERE run_id=? ORDER BY score DESC",
+            (run["id"],),
+        ).fetchall()
+    candidates = []
+    for r in cand_rows:
+        c = dict(r)
+        for field in ("reasons", "components"):
+            try:
+                c[field] = json.loads(c[field] or "[]")
+            except Exception:
+                c[field] = []
+        candidates.append(c)
+    run["candidates"] = candidates
+    return run
+
+
+# --------------------------------------------------------------------------- #
+# Watchlist group helpers
+# --------------------------------------------------------------------------- #
+def get_watchlist_groups(db_path: str | None = None) -> list[dict]:
+    """Return all watchlist groups, tickers decoded from JSON."""
+    with _connect(db_path) as conn:
+        rows = conn.execute("SELECT * FROM watchlist_groups ORDER BY name").fetchall()
+    groups = []
+    for r in rows:
+        g = dict(r)
+        try:
+            g["tickers"] = json.loads(g.get("tickers") or "[]")
+        except Exception:
+            g["tickers"] = []
+        groups.append(g)
+    return groups
+
+
+def save_watchlist_group(
+    name: str,
+    tickers: list[str],
+    db_path: str | None = None,
+) -> int:
+    """Upsert a watchlist group by name; return the row id."""
+    tickers_json = json.dumps([t.upper() for t in tickers])
+    with _connect(db_path) as conn:
+        existing = conn.execute("SELECT id FROM watchlist_groups WHERE name=?", (name,)).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE watchlist_groups SET tickers=? WHERE id=?",
+                (tickers_json, existing["id"]),
+            )
+            conn.commit()
+            return existing["id"]
+        cur = conn.execute(
+            "INSERT INTO watchlist_groups (name, tickers, created_at) VALUES (?, ?, ?)",
+            (name, tickers_json, _now_iso()),
+        )
+        conn.commit()
+        if cur.lastrowid is None:
+            raise RuntimeError("insert into watchlist_groups returned no lastrowid")
+        return cur.lastrowid
+
+
+def delete_watchlist_group(group_id: int, db_path: str | None = None) -> bool:
+    """Delete a watchlist group by id. Returns True if a row was deleted."""
+    with _connect(db_path) as conn:
+        n = conn.execute("DELETE FROM watchlist_groups WHERE id=?", (group_id,)).rowcount
+        conn.commit()
+    return n > 0
 
 
 if __name__ == "__main__":

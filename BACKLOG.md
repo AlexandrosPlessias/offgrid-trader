@@ -255,21 +255,21 @@ Day-by-day signal replay, forward outcome evaluation, and risk-normalized perfor
 
 ---
 
-## 5. Trending ticker discovery (auto-detect, not manual add)
+## ✅ 5. Trending ticker discovery (auto-detect, not manual add)
+*Shipped on branch `feat/backlog-5-trending-discovery`*
 
 Surface *new* tickers to watch automatically from market trends, instead of relying only on manual watchlist additions.
 
-- **Discovery sources**: top movers / most-active / unusual-volume (yfinance or the existing Finnhub integration), plus a momentum/trend screen (price above a rising EMA20/50, multi-timeframe RSI/MACD alignment) that reuses the current indicator stack.
-- **Ranking**: score candidates by a trend/momentum score; show them in a "Trending" panel with the reason and a one-click **Add to watchlist**.
-- **Optional auto-scan**: run the analysis pipeline on the top-N discovered tickers (respecting the orchestrator's concurrency cap) so signals appear without manual adds.
-- **Config**: enable/disable, max candidates, refresh interval, minimum score.
-
-Distinct from the existing manual `POST /watchlist` add flow — this is *discovery*, not curation.
-
-### Watchlist expansion (bundled with this item)
-
-- Support a larger, manageable set of tickers; add bulk-import and grouping (sector/theme)
-- Discovery runs must respect API/LLM rate limits so they don't exhaust provider quotas
+- **Discovery sources**: Alpaca screener (`/v1beta1/screener/stocks/most-actives` + `/movers`) primary; yfinance predefined screeners (`day_gainers`, `most_actives`, `day_losers`) as fallback when Alpaca is unavailable or credentials are absent. Alpaca 403 (free-tier limit) caught at runtime — fallback is always exercised in tests.
+- **Scoring**: deterministic 0-100 score — momentum (0-30), volume (0-25), trend alignment/EMA (0-25), multi-timeframe RSI/MACD (0-20). Reuses `compute_indicators()` (per-day cached); no LLM quota consumed.
+- **Trending tab**: ranked candidate table, score bar chart (Recharts), one-click "Add to watchlist", refresh SSE stream with progress log.
+- **Settings**: Discovery section in Settings panel + inline shortcut in Trending tab. All settings DB-backed (no restart needed): enable, sources, max_candidates, min_score, interval_minutes, autoscan_enabled, autoscan_top_n.
+- **Optional auto-scan**: top-N above min_score run through full agent pipeline via `scan_ticker_async`; tickers **never auto-added** to watchlist (curation stays manual).
+- **Scheduler integration**: discovery cycle fires after each watchlist scan, guarded by cooldown timer; `last_discovery` / `next_discovery` added to scheduler status.
+- **Watchlist expansion**: `POST /watchlist/bulk` for bulk-import; `GET|POST|DELETE /watchlist/groups` for sector/theme grouping.
+- **Persistence**: `discovery_runs`, `discovery_candidates`, `watchlist_groups` tables.
+- **API**: `GET /discovery/trending`, `POST /discovery/refresh` (SSE), `GET|POST /settings/discovery`.
+- **Docs**: `docs/wiki/trending-discovery.md`, `_Sidebar.md`, `README.md` features bullet.
 
 ---
 
