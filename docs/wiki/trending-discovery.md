@@ -37,7 +37,7 @@ falls back to yfinance transparently.
 
 | Component | Max | Logic |
 |---|---|---|
-| **Momentum** | 30 | `|percent_change|` linearly mapped to 10 %; capped |
+| **Momentum** | 30 | `\|percent_change\|` linearly mapped to 10 %; capped |
 | **Volume** | 25 | Snapshot volume linearly mapped up to 25 M shares |
 | **Trend** | 25 | Price > EMA20 (+10), EMA20 > EMA50 (+10), 1D rec = buy (+5) |
 | **RSI/MACD** | 20 | RSI 40-70 and MACD > signal across 1H/4H/1D (+0.5 per TF signal) |
