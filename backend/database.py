@@ -1548,6 +1548,40 @@ def get_latest_discovery(db_path: str | None = None) -> dict | None:
     return run
 
 
+def get_discovery_history(limit: int = 20, db_path: str | None = None) -> list[dict]:
+    """Return the most-recent *limit* discovery runs (newest first), without candidates.
+
+    Each row: id, created_at, sources, candidate_count, status, error.
+    """
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, created_at, sources, candidate_count, status, error"
+            " FROM discovery_runs ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_discovery_run_candidates(run_id: int, db_path: str | None = None) -> list[dict]:
+    """Return all candidates for *run_id*, ordered by score descending."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT ticker, score, price, percent_change, volume, source, reasons, components"
+            " FROM discovery_candidates WHERE run_id=? ORDER BY score DESC",
+            (run_id,),
+        ).fetchall()
+    out = []
+    for r in rows:
+        c = dict(r)
+        for field in ("reasons", "components"):
+            try:
+                c[field] = json.loads(c[field] or "[]")
+            except Exception:
+                c[field] = [] if field == "reasons" else {}
+        out.append(c)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Watchlist group helpers
 # --------------------------------------------------------------------------- #

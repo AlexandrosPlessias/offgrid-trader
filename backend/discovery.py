@@ -57,26 +57,28 @@ _indicator_throttle = _Throttle(rpm=10)
 # --------------------------------------------------------------------------- #
 # Candidate fetching
 # --------------------------------------------------------------------------- #
-def _fetch_from_alpaca(top: int) -> list[dict[str, Any]]:
-    """Return raw candidates from the Alpaca screener API.
+def _fetch_from_alpaca(top: int) -> tuple[list[dict[str, Any]], str | None]:
+    """Return ``(results, warn_message)`` from the Alpaca screener API.
 
-    Returns an empty list (and logs a warning) on any AlpacaError so the
-    caller can fall back to yfinance seamlessly.
+    ``warn_message`` is non-None when Alpaca is skipped or fails so callers
+    can surface the reason to the user (e.g. via the SSE progress stream).
     """
     from .alpaca import AlpacaError, get_client
+    from .config import get_settings as _cfg
     from .database import get_setting
 
-    # Skip Alpaca entirely if no credentials are configured.
-    if not (get_setting("alpaca_key_id", "") or ""):
+    # Check DB setting first, then fall back to the env-var default in AlpacaConfig.
+    key_id = get_setting("alpaca_key_id", "") or _cfg().alpaca.key_id
+    if not key_id:
         _log.debug("discovery: Alpaca key not configured — skipping")
-        return []
+        return [], "Alpaca API key not configured — using yfinance only"
 
     results: list[dict[str, Any]] = []
     client = get_client()
 
     # Most-actives by volume
     try:
-        actives = client.get_most_actives(top=min(top, 50))
+        actives = client.get_most_actives(top=min(top, 100))
         for item in actives:
             sym = (item.get("symbol") or "").upper()
             if sym:
@@ -90,8 +92,9 @@ def _fetch_from_alpaca(top: int) -> list[dict[str, Any]]:
                     }
                 )
     except AlpacaError as exc:
-        _log.warning("discovery: Alpaca most-actives failed (%s) — falling back to yfinance", exc)
-        return []  # early return; skip movers too so yfinance fills both
+        warn = f"Alpaca screener unavailable ({exc})"
+        _log.warning("discovery: %s — falling back to yfinance", warn)
+        return [], warn  # early return; skip movers too so yfinance fills both
 
     # Top gainers/losers
     try:
@@ -123,7 +126,7 @@ def _fetch_from_alpaca(top: int) -> list[dict[str, Any]]:
     except AlpacaError as exc:
         _log.warning("discovery: Alpaca movers failed (%s) — using actives only", exc)
 
-    return results
+    return results, None
 
 
 def _fetch_from_yfinance(screeners: list[str] | None = None) -> list[dict[str, Any]]:
@@ -168,42 +171,126 @@ def _dedupe(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _enrich_missing_prices(candidates: list[dict[str, Any]]) -> None:
+    """Batch-fill price / percent_change for candidates that have neither.
+
+    Alpaca ``most_actives`` returns only symbol + volume; this step fetches
+    the last two daily closes via ``yf.download`` in a single request so the
+    Trending table can show price and day-change for every row.
+    """
+    missing_syms = [c["symbol"] for c in candidates if not c.get("price") and c.get("symbol")]
+    if not missing_syms:
+        return
+    unique = list(dict.fromkeys(missing_syms))  # preserve order, dedupe
+    _log.info("discovery: enriching prices for %d tickers via yfinance", len(unique))
+    try:
+        import pandas as pd
+        import yfinance as yf
+
+        hist = yf.download(
+            tickers=unique,
+            period="5d",
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+        )
+        closes = hist.get("Close", hist["Close"] if "Close" in hist.columns else None)
+        if closes is None:
+            return
+        # Single-ticker download returns a Series; wrap for uniform handling.
+        if isinstance(closes, pd.Series):
+            closes = closes.to_frame(name=unique[0])
+
+        sym_lookup: dict[str, tuple[float, float | None]] = {}
+        for sym in unique:
+            if sym not in closes.columns:
+                continue
+            col = closes[sym].dropna()
+            if col.empty:
+                continue
+            last = float(col.iloc[-1])
+            prev = float(col.iloc[-2]) if len(col) >= 2 else None
+            sym_lookup[sym] = (last, prev)
+
+        for c in candidates:
+            sym = c.get("symbol", "")
+            if sym in sym_lookup and not c.get("price"):
+                last, prev = sym_lookup[sym]
+                c["price"] = last
+                if prev:
+                    c["percent_change"] = round((last - prev) / prev * 100, 2)
+    except Exception as exc:
+        _log.warning("discovery: price enrichment failed: %s", exc)
+
+
 def fetch_candidates(
     sources: str = "alpaca,yfinance",
     limit: int = 50,
+    progress_callback: Any = None,
+    force: bool = False,
 ) -> list[dict[str, Any]]:
     """Fetch and normalise raw candidate tickers from the configured sources.
 
     Results are cached ~60 min keyed by ``discovery:candidates:{YYYY-MM-DD-HH}``.
+    Pass ``force=True`` to skip the cache and always fetch fresh data (used by
+    the explicit ``POST /discovery/refresh`` endpoint).
+
     Returns a list of ``{symbol, price, percent_change, volume, source}`` dicts.
+
+    ``progress_callback``, if given, is called as ``callback(step, message)``
+    when a source fails or falls back so the caller can stream the reason.
     """
     from .data import _cache_get, _cache_set
 
     now = datetime.now(timezone.utc)
     cache_key = f"discovery:candidates:{now.strftime('%Y-%m-%d-%H')}"
-    cached = _cache_get(cache_key, ttl_minutes=60)
-    if cached is not None:
-        _log.info("discovery: candidates ◀ cache hit (%d items)", len(cached))
-        return cached
+    if not force:
+        cached = _cache_get(cache_key, ttl_minutes=60)
+        if cached is not None:
+            _log.info("discovery: candidates ◀ cache hit (%d items)", len(cached))
+            if progress_callback:
+                progress_callback("fetch", f"Candidates loaded from cache ({len(cached)} items)")
+            return cached
 
     source_list = [s.strip().lower() for s in sources.split(",") if s.strip()]
     raw: list[dict[str, Any]] = []
 
     used_yf_fallback = False
     if "alpaca" in source_list:
-        alpaca_results = _fetch_from_alpaca(top=limit)
+        alpaca_results, alpaca_warn = _fetch_from_alpaca(top=limit)
+        if alpaca_warn:
+            _log.info("discovery: Alpaca warn: %s", alpaca_warn)
+            if progress_callback:
+                progress_callback("warn", f"⚠ {alpaca_warn}")
         if alpaca_results:
             raw.extend(alpaca_results)
+            if progress_callback:
+                progress_callback(
+                    "fetch",
+                    f"Alpaca: {len(alpaca_results)} raw candidates fetched"
+                    f" (scoring pool — top {limit // 2} will be scored)",
+                )
         else:
             # Alpaca unavailable — always fall back to yfinance
             _log.info("discovery: Alpaca returned nothing — using yfinance fallback")
-            raw.extend(_fetch_from_yfinance())
+            if progress_callback:
+                progress_callback("fetch", "Fetching from yfinance (Alpaca fallback)…")
+            yf_fallback = _fetch_from_yfinance()
+            raw.extend(yf_fallback)
+            if progress_callback:
+                progress_callback("fetch", f"yfinance fallback: {len(yf_fallback)} candidates")
             used_yf_fallback = True
 
     if "yfinance" in source_list and not used_yf_fallback:
-        raw.extend(_fetch_from_yfinance())
+        if progress_callback:
+            progress_callback("fetch", "Fetching from yfinance screeners…")
+        yf_results = _fetch_from_yfinance()
+        raw.extend(yf_results)
+        if progress_callback:
+            progress_callback("fetch", f"yfinance: {len(yf_results)} candidates fetched")
 
     candidates = _dedupe(raw)[:limit]
+    _enrich_missing_prices(candidates)
     _cache_set(cache_key, candidates)
     _log.info("discovery: fetched %d candidates (sources=%s)", len(candidates), sources)
     return candidates
@@ -326,11 +413,14 @@ def run_discovery(
     max_candidates: int = 25,
     min_score: int = 60,
     progress_callback: Any = None,
+    force: bool = False,
 ) -> list[dict[str, Any]]:
     """Fetch → cull → score → filter → sort candidates.
 
     ``progress_callback``, if given, is called as ``callback(step, message)``
     for each major stage so SSE endpoints can stream progress events.
+    ``force=True`` bypasses the 60-min candidate cache so an explicit user
+    refresh always fetches live data.
 
     Returns candidates sorted by score descending.  The min_score filter is
     applied; if no candidates clear the floor the full sorted list is returned
@@ -339,7 +429,9 @@ def run_discovery(
     if progress_callback:
         progress_callback("fetch", f"Fetching candidates from: {sources}")
 
-    raw = fetch_candidates(sources=sources, limit=max_candidates * 2)
+    raw = fetch_candidates(
+        sources=sources, limit=max_candidates * 2, progress_callback=progress_callback, force=force
+    )
 
     if not raw:
         _log.warning("discovery: no candidates fetched from sources=%s", sources)
@@ -349,15 +441,18 @@ def run_discovery(
 
     # Cull before scoring to bound indicator fetches
     culled = raw[:max_candidates]
+    total = len(culled)
 
     if progress_callback:
-        progress_callback("score", f"Scoring {len(culled)} candidates…")
+        progress_callback("score", f"Scoring {total} candidates…")
 
     scored: list[dict[str, Any]] = []
-    for candidate in culled:
+    for idx, candidate in enumerate(culled, 1):
         ticker = candidate.get("symbol", "")
         if not ticker:
             continue
+        if progress_callback:
+            progress_callback("score", f"[{idx}/{total}] Computing {ticker}…")
         try:
             scoring = score_candidate(ticker, candidate)
         except Exception as exc:
@@ -366,6 +461,12 @@ def run_discovery(
 
         entry = {**candidate, "ticker": ticker, **scoring}
         scored.append(entry)
+        if progress_callback:
+            progress_callback(
+                "score",
+                f"[{idx}/{total}] {ticker} → {scoring['score']:.0f} pts"
+                + (f"  ({', '.join(scoring['reasons'][:2])})" if scoring.get("reasons") else ""),
+            )
         _log.debug(
             "discovery: %s score=%.1f reasons=%s",
             ticker,

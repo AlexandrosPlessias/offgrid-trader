@@ -56,6 +56,8 @@ from .database import (
 from .database import (
     delete_watchlist_group,
     get_analysis_history,
+    get_discovery_history,
+    get_discovery_run_candidates,
     get_effective_watchlist,
     get_latest_discovery,
     get_paper_orders,
@@ -1529,6 +1531,28 @@ def trending_discovery(
     }
 
 
+@app.get("/discovery/history")
+def discovery_history(
+    limit: int = Query(20, ge=1, le=100),
+) -> dict[str, Any]:
+    """Return the most-recent *limit* discovery run summaries (newest first).
+
+    Does not include per-run candidates — call ``GET /discovery/trending``
+    for the latest run's full candidate list.
+    """
+    runs = get_discovery_history(limit=limit)
+    return {"runs": runs}
+
+
+@app.get("/discovery/history/{run_id}/candidates")
+def discovery_run_candidates(run_id: int) -> dict[str, Any]:
+    """Return all scored candidates for a specific discovery run, ordered by score desc."""
+    candidates = get_discovery_run_candidates(run_id)
+    if not candidates:
+        raise HTTPException(status_code=404, detail="Run not found or has no candidates")
+    return {"run_id": run_id, "candidates": candidates}
+
+
 @app.post("/discovery/refresh")
 async def discovery_refresh() -> StreamingResponse:
     """Run a discovery cycle and stream progress as Server-Sent Events.
@@ -1546,27 +1570,40 @@ async def discovery_refresh() -> StreamingResponse:
         max_cands = cfg["max_candidates"]
         min_score = cfg["min_score"]
 
+        # Queue-based live streaming: the worker thread pushes events via
+        # call_soon_threadsafe so the async generator can yield them immediately
+        # rather than buffering until run_discovery returns.
+        loop = asyncio.get_running_loop()
+        q: asyncio.Queue[dict | None] = asyncio.Queue()
+
+        def _cb(step: str, message: str) -> None:
+            loop.call_soon_threadsafe(
+                q.put_nowait, {"type": "step", "step": step, "message": message}
+            )
+
+        async def _run() -> list[dict]:
+            try:
+                return await asyncio.to_thread(
+                    run_discovery, sources, max_cands, min_score, _cb, True
+                )
+            finally:
+                loop.call_soon_threadsafe(q.put_nowait, None)  # sentinel
+
         run_id: int | None = None
         try:
             run_id = await asyncio.to_thread(save_discovery_run, sources)
             yield _sse_frame({"type": "step", "step": "start", "message": "Discovery started"})
 
-            progress_events: list[dict] = []
+            run_task = asyncio.ensure_future(_run())
 
-            def _cb(step: str, message: str) -> None:
-                progress_events.append({"type": "step", "step": step, "message": message})
-
-            candidates = await asyncio.to_thread(
-                run_discovery,
-                sources,
-                max_cands,
-                min_score,
-                _cb,
-            )
-
-            # Flush any buffered progress events
-            for ev in progress_events:
+            # Drain the queue until the sentinel (None) arrives
+            while True:
+                ev = await q.get()
+                if ev is None:
+                    break
                 yield _sse_frame(ev)
+
+            candidates = await run_task
 
             # Persist results
             await asyncio.to_thread(save_discovery_candidates, run_id, candidates)
