@@ -318,6 +318,36 @@ Slim the alert layer down to the two channels worth supporting, then validate th
 
 ---
 
+## 7. Sweet-Spot Refactor
+
+Split the largest files at clear responsibility boundaries to reach a shallow, moderate hierarchy. No new abstraction layers — the goal is readability, not over-engineering. Fewer files is better than more.
+
+### Obvious starting points
+
+| File | Current size | Problem |
+|---|---|---|
+| `frontend/src/App.jsx` | ~10 000 lines | All pages, all components, all state in one file |
+| `backend/main.py` | ~2 500 lines | Every HTTP endpoint in one module |
+| `tests/smoke/smoke_test.py` | ~1 800 lines | All 16 test sections in one flat script |
+
+The review must cover the **whole project** — not just these three — but changes outside obvious hot-spots need a stronger justification.
+
+### Rules
+
+1. **Propose first, implement second.** Before writing any code, produce a target directory/file tree and wait for approval.
+2. **Split only on clear responsibility boundaries.** A page component, a group of related endpoints, a test section — these are valid boundaries. "Too long" alone is not.
+3. **No new abstraction layers.** No new base classes, no new shared utilities invented just to enable a split.
+4. **Fewer files is better than more.** If a split produces a file under ~80 lines, reconsider whether the split is worth it.
+5. **All existing tests must pass unchanged after every split.**
+
+### Suggested split candidates (for discussion, not final)
+
+- `frontend/src/App.jsx` → `src/pages/` (one file per page) + `src/components/` (shared UI) + `src/App.jsx` (routing/shell only)
+- `backend/main.py` → `backend/routes/` (one module per feature group: analysis, discovery, paper, backtest, settings …) + `backend/main.py` (app creation + lifespan only)
+- `tests/smoke/smoke_test.py` → `tests/smoke/` directory with one file per section group
+
+---
+
 ## Other ideas
 
 - **Multi-model support** — allow swapping models per ticker or per scan type; benchmark `qwen2.5:14b` vs `llama3.1:8b` vs `mistral:7b` on accuracy/latency

@@ -14,6 +14,7 @@ on:
         description: 'Type the app name to confirm: offgrid-trader'
         required: true
         type: string
+        default: 'offgrid-trader'
 
 env:
   FLY_APP: offgrid-trader

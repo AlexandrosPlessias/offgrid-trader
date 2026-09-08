@@ -1549,7 +1549,7 @@ try:
         f"discovery:candidates:{__import__('datetime').datetime.utcnow().strftime('%Y-%m-%d-%H')}"
     )
     with _mock16.patch("yfinance.screen", return_value=_YF_SCREEN_RESPONSE) as _msc16:
-        with _mock16.patch("backend.discovery._fetch_from_alpaca", return_value=[]):
+        with _mock16.patch("backend.discovery._fetch_from_alpaca", return_value=([], None)):
             _c1 = fetch_candidates(sources="alpaca,yfinance", limit=50)
             _c2 = fetch_candidates(sources="alpaca,yfinance", limit=50)  # from cache
     check(
@@ -1779,6 +1779,26 @@ try:
         "16j. get_latest_discovery candidates decoded from JSON",
         isinstance(_latest["candidates"][0]["reasons"], list),
         detail=str(_latest["candidates"][0]),
+    )
+
+    # 16j-2. get_discovery_run_candidates returns per-run candidates
+    from backend.database import get_discovery_run_candidates
+
+    _run_cands = get_discovery_run_candidates(_run_id, _TMP_DB)
+    check(
+        "16j. get_discovery_run_candidates returns candidates for run",
+        len(_run_cands) == 1 and _run_cands[0]["ticker"] == "AAPL",
+        detail=str(_run_cands),
+    )
+    check(
+        "16j. get_discovery_run_candidates decodes reasons from JSON",
+        isinstance(_run_cands[0]["reasons"], list),
+        detail=str(_run_cands[0]),
+    )
+    check(
+        "16j. get_discovery_run_candidates decodes components from JSON",
+        isinstance(_run_cands[0]["components"], dict),
+        detail=str(_run_cands[0]),
     )
 
     # 16k. Watchlist groups round-trip
