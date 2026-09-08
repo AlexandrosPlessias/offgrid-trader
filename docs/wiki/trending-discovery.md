@@ -95,13 +95,26 @@ Query params: `limit` (1–100, default 25)
 
 ### `POST /discovery/refresh`
 
-Run a new discovery cycle. Returns a Server-Sent Events stream:
+Run a new discovery cycle. Always bypasses the 60-min candidate cache. Returns a Server-Sent Events stream:
 
 ```
-data: {"type":"step","step":"fetch","message":"Fetching candidates from: alpaca,yfinance"}
-data: {"type":"step","step":"score","message":"Scoring 25 candidates…"}
+data: {"type":"step","step":"fetch","message":"Alpaca: 100 raw candidates fetched (scoring pool — top 50 will be scored)"}
+data: {"type":"step","step":"warn","message":"⚠ Alpaca screener unavailable (403) — falling back to yfinance"}
+data: {"type":"step","step":"fetch","message":"yfinance: 38 candidates fetched"}
+data: {"type":"step","step":"score","message":"[1/25] Computing NVDA…"}
+data: {"type":"step","step":"score","message":"[1/25] NVDA → 87 pts  (Strong move +4.5% today)"}
 data: {"type":"result","run_id":2,"candidate_count":10,"candidates":[...]}
 ```
+
+`warn` steps are emitted for non-fatal issues (Alpaca 403, key not configured). They do not abort the run.
+
+### `GET /discovery/history`
+
+Query params: `limit` (1–100, default 20). Returns run summaries without candidates.
+
+### `GET /discovery/history/{run_id}/candidates`
+
+Returns all scored candidates for a specific run, ordered by score descending. Useful for inspecting past runs in the UI history drill-down.
 
 ### `GET /settings/discovery` / `POST /settings/discovery`
 
@@ -114,6 +127,25 @@ Add multiple tickers at once: `{"tickers": ["NVDA", "AMD", "TSLA"]}`.
 ### `GET /watchlist/groups` / `POST /watchlist/groups` / `DELETE /watchlist/groups/{id}`
 
 Manage named watchlist groups (e.g. "Semiconductors", "AI").
+
+---
+
+## UI features
+
+### Discovery tab (nav: Dashboard → Trading → **Discovery** → Explorer → Learn)
+
+| Feature | Description |
+|---|---|
+| **Run summary card** | Shows timestamp, candidate count, source breakdown (`N from Alpaca · M from yfinance`), top score, avg score, and top-5 ticker chips |
+| **Live step log** | Real-time SSE progress — fetch counts, per-ticker `[N/total] TICKER → score` scoring, `⚠️` amber warnings |
+| **Candidate table** | Ticker, Price, Change, Volume, Score (bar), Reasons, Source badge, + Watch |
+| **Score breakdown** | Click the Score cell to expand per-component bars (Momentum / Volume / Trend / RSI/MACD) with earned/max, progress bar, and the matching reason as a caption |
+| **Run history** | Collapsible section at page bottom; click any ✅ row to expand candidates with 🔵 Alpaca / 🟡 yfinance source badges, + Watch, and ticker → Explorer deep-link |
+| **Settings deep-link** | ⚙ Settings button navigates to Settings and scrolls to the Discovery section |
+
+### Price enrichment
+
+Alpaca `most_actives` returns only symbol + volume. After fetching, a single batch `yf.download` call fills in `price` and `percent_change` for all rows missing them before scoring and caching.
 
 ---
 

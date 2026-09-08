@@ -174,6 +174,26 @@ Credentials can be set via `.env` **or** pasted directly in the Settings page. T
 
 ---
 
+## 🔥 Trending Discovery
+
+> **Settings → 🔥 Trending Discovery** — configure the automatic ticker screener. See [trending-discovery.md](trending-discovery) for a full feature description.
+
+| Setting | Default | Description |
+|---|---|---|
+| `discovery_enabled` | `false` | Run discovery on a schedule after each watchlist scan |
+| `discovery_sources` | `alpaca,yfinance` | Comma-separated candidate sources. `alpaca` requires API credentials; if unavailable the system falls back to `yfinance` automatically |
+| `discovery_max_candidates` | `25` | Maximum candidates to score per run. Fetch pool is 2× this value |
+| `discovery_min_score` | `60` | Candidates scoring below this threshold are hidden in the UI (still stored) |
+| `discovery_interval_minutes` | `60` | Minimum minutes between scheduled runs (cooldown) |
+| `discovery_autoscan_enabled` | `false` | Pass top-N discovery candidates through the full agent pipeline and store results as regular signals |
+| `discovery_autoscan_top_n` | `3` | Number of top-scoring candidates to auto-scan when autoscan is enabled |
+
+All settings take effect without a restart and are persisted in `app_settings`.
+
+**Quick access** — the **⚙ Settings** button on the Discovery (Trending) tab deep-links directly to this section.
+
+---
+
 ## AI Usage
 
 ![Settings — AI Usage section](../screenshots/09-settings-ai-usage.png)
