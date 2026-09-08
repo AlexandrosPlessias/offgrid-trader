@@ -268,6 +268,56 @@ class AlpacaClient:
         """Cancel a pending order. Returns True on success."""
         return self._delete(f"/v2/orders/{alpaca_order_id}")
 
+    def get_most_actives(self, top: int = 20) -> list[dict[str, Any]]:
+        """Return the most-active stocks by volume from the Alpaca screener.
+
+        Hits the market-data host (data.alpaca.markets) using the v1beta1
+        screener endpoint.  Returns normalised items: {symbol, volume, trade_count}.
+
+        Raises :class:`AlpacaError` on any HTTP failure, including HTTP 403
+        when the free tier does not include screener access.  Callers should
+        catch ``AlpacaError`` and fall back to yfinance.
+        """
+        url = f"{_DATA_URL}/v1beta1/screener/stocks/most-actives"
+        try:
+            r = httpx.get(
+                url,
+                headers=self._headers(),
+                params={"by": "volume", "top": max(1, min(top, 100))},
+                timeout=_TIMEOUT,
+            )
+            if not r.is_success:
+                raise AlpacaError(f"most-actives → {r.status_code}: {r.text[:200]}")
+            return r.json().get("most_actives", [])
+        except httpx.RequestError as exc:
+            raise AlpacaError(f"most-actives network error: {exc}") from exc
+
+    def get_movers(self, top: int = 20) -> dict[str, list[dict[str, Any]]]:
+        """Return top gainers and losers from the Alpaca screener.
+
+        Returns ``{"gainers": [...], "losers": [...]}`` where each item
+        contains {symbol, price, change, percent_change}.
+
+        Raises :class:`AlpacaError` on any HTTP failure, including HTTP 403.
+        """
+        url = f"{_DATA_URL}/v1beta1/screener/stocks/movers"
+        try:
+            r = httpx.get(
+                url,
+                headers=self._headers(),
+                params={"top": max(1, min(top, 50))},
+                timeout=_TIMEOUT,
+            )
+            if not r.is_success:
+                raise AlpacaError(f"movers → {r.status_code}: {r.text[:200]}")
+            data = r.json()
+            return {
+                "gainers": data.get("gainers", []),
+                "losers": data.get("losers", []),
+            }
+        except httpx.RequestError as exc:
+            raise AlpacaError(f"movers network error: {exc}") from exc
+
     def get_snapshots(self, tickers: list[str]) -> dict[str, Any]:
         """Return live market snapshots for up to 50 tickers in one call.
 

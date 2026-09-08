@@ -843,3 +843,82 @@ Test credentials without saving them. Returns account data on success or an erro
   "paper_url": "https://paper-api.alpaca.markets"
 }
 ```
+
+---
+
+## Discovery
+
+See [trending-discovery.md](trending-discovery) for full context. Quick reference:
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/discovery/trending` | Latest completed run with ranked candidates |
+| `POST` | `/discovery/refresh` | Run a fresh discovery cycle (SSE stream) |
+| `GET` | `/discovery/history` | Recent run summaries (no candidates) |
+| `GET` | `/discovery/history/{run_id}/candidates` | All scored candidates for a specific run |
+| `GET` | `/settings/discovery` | Read discovery configuration |
+| `POST` | `/settings/discovery` | Update discovery configuration |
+
+### `GET /discovery/trending`
+
+Query params: `limit` (1–100, default 25)
+
+```json
+{
+  "run": { "id": 3, "created_at": "2026-09-08T14:00:00Z", "sources": "alpaca,yfinance", "candidate_count": 18, "status": "done" },
+  "candidates": [
+    {
+      "ticker": "NVDA", "price": 131.2, "percent_change": 4.5, "volume": 45000000,
+      "source": "alpaca_actives", "score": 87.5,
+      "reasons": ["Strong move +4.5% today (up)", "Price above EMA20 (uptrend)"],
+      "components": { "momentum": 13.5, "volume": 25.0, "trend": 25.0, "rsi_macd": 14.0 },
+      "already_in_watchlist": false
+    }
+  ],
+  "watchlist": ["AAPL", "MSFT"]
+}
+```
+
+### `POST /discovery/refresh`
+
+Streams a Server-Sent Events response. Each event is a JSON object on a `data:` line:
+
+| `type` | `step` values | Meaning |
+|---|---|---|
+| `step` | `fetch` | Candidate fetch progress (Alpaca / yfinance count) |
+| `step` | `warn` | Non-fatal warning (e.g. Alpaca 403, key not configured) |
+| `step` | `score` | Per-ticker scoring progress — `[N/total] TICKER → score pts` |
+| `step` | `done` | Run complete |
+| `result` | — | Final payload with `run_id`, `candidate_count`, full `candidates` array |
+| `error` | — | Unrecoverable error; `message` field has detail |
+
+```bash
+curl -N -X POST http://localhost:8010/discovery/refresh \
+  -H "Content-Type: application/json" \
+  -d '{"sources":"alpaca,yfinance","max_candidates":25,"min_score":60}'
+```
+
+Request body fields (all optional — fall back to DB settings):
+
+| Field | Default | Description |
+|---|---|---|
+| `sources` | `"alpaca,yfinance"` | Comma-separated source list |
+| `max_candidates` | `25` | Candidates to score |
+| `min_score` | `60` | Minimum score to include in result |
+
+### `GET /discovery/history`
+
+Query params: `limit` (1–100, default 20). Returns run summaries without candidates.
+
+```json
+{ "runs": [{ "id": 3, "created_at": "...", "sources": "alpaca,yfinance", "candidate_count": 18, "status": "done", "error": null }] }
+```
+
+### `GET /discovery/history/{run_id}/candidates`
+
+Returns all scored candidates for one run, ordered by score descending.
+
+```json
+{ "run_id": 3, "candidates": [{ "ticker": "NVDA", "score": 87.5, "source": "alpaca_actives", "price": 131.2, ... }] }
+```
+

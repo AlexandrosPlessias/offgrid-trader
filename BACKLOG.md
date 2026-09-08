@@ -149,11 +149,15 @@ New SSE event types: `type:"retry"` (skill retried with back-off), `type:"memory
 
 ---
 
-## 3c. Multi-model fallback + cloud hosting (Vercel / Fly.io)
+## ✅ 3c. Multi-model fallback + cloud hosting (Vercel / Fly.io)
 
-*Branch: `feat/backlog-3c-fallback-hosting`*
+*Shipped on branch `feat/backlog-3c-fallback-hosting`*
 
 Two closely related capabilities that build on item 3a and are best shipped together: automatic provider fallback when a quota is hit, and deploying the full stack publicly so it runs without a local machine.
+
+**Delivered:**
+- **Part 1** — fallback chain in `backend/analysis.py` (`llm_fallback_provider` / `llm_fallback_model` DB keys, `LLM_FALLBACK_PROVIDER` / `LLM_FALLBACK_MODEL` env fallbacks), exposed via `GET /settings` and `POST /settings/llm`.
+- **Part 2** — backend on Fly.io (`fly.toml`, persistent volume at `/app/data`) and frontend on Vercel (`vercel.json`), with continuous deployment via `.github/workflows/deploy.yml` and one-time secret setup via `scripts/setup-gh-secrets.sh`. Documented in `docs/wiki/cloud-hosting.md`.
 
 ---
 
@@ -239,7 +243,7 @@ Day-by-day signal replay, forward outcome evaluation, and risk-normalized perfor
 - **AI Usage section** (Settings): renamed from "Token Usage"; period selector (Today / 3d / 7d / 30d / 90d); daily-calls bar chart; TPM headroom bar; cost estimate card; by-source breakdown (signals/explorer · backtesting runs · AI review); quota limits table per provider (Groq live headers, Gemini/Mistral documented free-tier limits).
 - **Education**: two new wiki pages (`backtesting-explained.md`, `backtesting.md`) + Learn-tab section.
 
-### Phase 2 — Virtual wallet simulation *(next item after Phase 1)*
+### ✅ Phase 2 — Virtual wallet simulation *(shipped)*
 
 - Start each run with a configurable virtual balance (e.g. `$10,000`)
 - Each actionable signal opens a paper position: buy `N` shares at `entry`, set stop and target
@@ -251,16 +255,21 @@ Day-by-day signal replay, forward outcome evaluation, and risk-normalized perfor
 
 ---
 
-## 5. Trending ticker discovery (auto-detect, not manual add)
+## ✅ 5. Trending ticker discovery (auto-detect, not manual add)
+*Shipped on branch `feat/backlog-5-trending-discovery`*
 
 Surface *new* tickers to watch automatically from market trends, instead of relying only on manual watchlist additions.
 
-- **Discovery sources**: top movers / most-active / unusual-volume (yfinance or the existing Finnhub integration), plus a momentum/trend screen (price above a rising EMA20/50, multi-timeframe RSI/MACD alignment) that reuses the current indicator stack.
-- **Ranking**: score candidates by a trend/momentum score; show them in a "Trending" panel with the reason and a one-click **Add to watchlist**.
-- **Optional auto-scan**: run the analysis pipeline on the top-N discovered tickers (respecting the orchestrator's concurrency cap) so signals appear without manual adds.
-- **Config**: enable/disable, max candidates, refresh interval, minimum score.
-
-Distinct from the existing manual `POST /watchlist` add flow — this is *discovery*, not curation.
+- **Discovery sources**: Alpaca screener (`/v1beta1/screener/stocks/most-actives` + `/movers`) primary; yfinance predefined screeners (`day_gainers`, `most_actives`, `day_losers`) as fallback when Alpaca is unavailable or credentials are absent. Alpaca 403 (free-tier limit) caught at runtime — fallback is always exercised in tests.
+- **Scoring**: deterministic 0-100 score — momentum (0-30), volume (0-25), trend alignment/EMA (0-25), multi-timeframe RSI/MACD (0-20). Reuses `compute_indicators()` (per-day cached); no LLM quota consumed.
+- **Trending tab**: ranked candidate table, score bar chart (Recharts), one-click "Add to watchlist", refresh SSE stream with progress log.
+- **Settings**: Discovery section in Settings panel + inline shortcut in Trending tab. All settings DB-backed (no restart needed): enable, sources, max_candidates, min_score, interval_minutes, autoscan_enabled, autoscan_top_n.
+- **Optional auto-scan**: top-N above min_score run through full agent pipeline via `scan_ticker_async`; tickers **never auto-added** to watchlist (curation stays manual).
+- **Scheduler integration**: discovery cycle fires after each watchlist scan, guarded by cooldown timer; `last_discovery` / `next_discovery` added to scheduler status.
+- **Watchlist expansion**: `POST /watchlist/bulk` for bulk-import; `GET|POST|DELETE /watchlist/groups` for sector/theme grouping.
+- **Persistence**: `discovery_runs`, `discovery_candidates`, `watchlist_groups` tables.
+- **API**: `GET /discovery/trending`, `POST /discovery/refresh` (SSE), `GET|POST /settings/discovery`.
+- **Docs**: `docs/wiki/trending-discovery.md`, `_Sidebar.md`, `README.md` features bullet.
 
 ---
 
@@ -285,6 +294,7 @@ Slim the alert layer down to the two channels worth supporting, then validate th
 - Complete BotFather setup; document the two-step process (create bot → get chat ID)
 - Verify delivery to a personal chat and a group chat (group chat IDs are negative numbers)
 - Confirm the message format is readable on mobile
+- Deliver actionable notifications for new high-confidence signals, scan results, and paper-trading updates (fill / stop / target hit)
 
 ### Step 4 — Test endpoint + history
 
@@ -308,18 +318,39 @@ Slim the alert layer down to the two channels worth supporting, then validate th
 
 ---
 
+## 7. Sweet-Spot Refactor
+
+Split the largest files at clear responsibility boundaries to reach a shallow, moderate hierarchy. No new abstraction layers — the goal is readability, not over-engineering. Fewer files is better than more.
+
+### Obvious starting points
+
+| File | Current size | Problem |
+|---|---|---|
+| `frontend/src/App.jsx` | ~10 000 lines | All pages, all components, all state in one file |
+| `backend/main.py` | ~2 500 lines | Every HTTP endpoint in one module |
+| `tests/smoke/smoke_test.py` | ~1 800 lines | All 16 test sections in one flat script |
+
+The review must cover the **whole project** — not just these three — but changes outside obvious hot-spots need a stronger justification.
+
+### Rules
+
+1. **Propose first, implement second.** Before writing any code, produce a target directory/file tree and wait for approval.
+2. **Split only on clear responsibility boundaries.** A page component, a group of related endpoints, a test section — these are valid boundaries. "Too long" alone is not.
+3. **No new abstraction layers.** No new base classes, no new shared utilities invented just to enable a split.
+4. **Fewer files is better than more.** If a split produces a file under ~80 lines, reconsider whether the split is worth it.
+5. **All existing tests must pass unchanged after every split.**
+
+### Suggested split candidates (for discussion, not final)
+
+- `frontend/src/App.jsx` → `src/pages/` (one file per page) + `src/components/` (shared UI) + `src/App.jsx` (routing/shell only)
+- `backend/main.py` → `backend/routes/` (one module per feature group: analysis, discovery, paper, backtest, settings …) + `backend/main.py` (app creation + lifespan only)
+- `tests/smoke/smoke_test.py` → `tests/smoke/` directory with one file per section group
+
+---
+
 ## Other ideas
 
 - **Multi-model support** — allow swapping models per ticker or per scan type; benchmark `qwen2.5:14b` vs `llama3.1:8b` vs `mistral:7b` on accuracy/latency
 - **Mobile notifications** — push via Pushover or ntfy.sh (self-hosted) as a lightweight alternative to Telegram
 - **Confidence calibration** — track how often each confidence band (65–75 / 75–85 / 85+) leads to correct calls; auto-adjust `CONFIDENCE_FLOOR` over time
 - **Dark-pool / options flow** — integrate unusual options activity data (e.g. Unusual Whales API) as an additional signal source
-
-
----
-
-## Next up
-
-- **Watchlist expansion** — support a larger, manageable set of tickers; add bulk-import and grouping (sector/theme)
-- **Opportunity discovery** — scan beyond the existing watchlist for promising tickers; include filters/ranking and sensible API/LLM rate-limit controls so discovery runs don't exhaust quotas
-- **Telegram integration** — deliver actionable notifications for new high-confidence signals, scan results, and paper-trading updates (fill/stop/target hit)

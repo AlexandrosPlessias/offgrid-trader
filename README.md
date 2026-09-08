@@ -3,7 +3,10 @@
 **Local-first AI stock monitor.** FastAPI + SQLite + Recharts.
 Fetches live market data, runs an LLM for technical analysis, detects
 trading opportunities with transparent rules, stores signals, sends alerts
-via Gmail SMTP and/or Telegram, and backtests signals against historical data.
+via Gmail SMTP and/or Telegram, backtests signals against historical data,
+and **discovers trending tickers automatically** via Alpaca screener and
+yfinance — scored 0-100 by momentum, volume, trend alignment, and
+multi-timeframe RSI/MACD (no LLM quota consumed for discovery).
 
 Runs **fully locally** with Ollama (`qwen2.5:14b`) — no cloud APIs required.
 Optionally switch to **Groq, Gemini, or Mistral** free-tier cloud inference

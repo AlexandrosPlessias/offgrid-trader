@@ -26,6 +26,9 @@ from .database import (
     get_effective_watchlist,
     get_setting,
     init_db,
+    save_discovery_candidates,
+    save_discovery_run,
+    update_discovery_run,
     update_paper_order_status,
 )
 from .memory import MemoryLayer
@@ -154,6 +157,85 @@ async def sync_paper_orders() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Discovery cycle helper
+# --------------------------------------------------------------------------- #
+async def _maybe_run_discovery(sched: MonitorScheduler) -> None:
+    """Run a discovery cycle if enabled and the interval has elapsed.
+
+    Called from _loop() after each watchlist scan.  Never raises — errors are
+    caught and logged by the caller.
+    """
+    discovery_enabled = get_setting("discovery_enabled", "false") == "true"
+    if not discovery_enabled:
+        return
+
+    interval_str = get_setting("discovery_interval_minutes", "")
+    from .config import get_settings as _cfg
+
+    interval_min = (
+        int(interval_str)
+        if interval_str and interval_str.isdigit()
+        else _cfg().discovery.interval_minutes
+    )
+    now = datetime.now(_cfg().market_hours.tzinfo)
+
+    # Check if enough time has elapsed since the last discovery run.
+    if sched.last_discovery:
+        try:
+            last_dt = datetime.fromisoformat(sched.last_discovery)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=_cfg().market_hours.tzinfo)
+            elapsed_min = (now - last_dt).total_seconds() / 60
+            if elapsed_min < interval_min:
+                return
+        except Exception as _ts_exc:
+            _log.debug("discovery: bad last_discovery timestamp, resetting: %s", _ts_exc)
+
+    _log.info("discovery: starting scheduled run (interval=%dm)", interval_min)
+
+    sources = get_setting("discovery_sources", "") or _cfg().discovery.sources
+    max_cands = int(get_setting("discovery_max_candidates", "") or _cfg().discovery.max_candidates)
+    min_score = int(get_setting("discovery_min_score", "") or _cfg().discovery.min_score)
+
+    run_id = await asyncio.to_thread(save_discovery_run, sources)
+    try:
+        from .discovery import run_discovery
+
+        candidates = await asyncio.to_thread(run_discovery, sources, max_cands, min_score, None)
+        await asyncio.to_thread(save_discovery_candidates, run_id, candidates)
+        await asyncio.to_thread(update_discovery_run, run_id, "done", len(candidates))
+        sched.last_discovery = now.isoformat()
+        from datetime import timedelta
+
+        sched.next_discovery = (now + timedelta(minutes=interval_min)).isoformat()
+        _log.info("discovery: run %d complete — %d candidate(s)", run_id, len(candidates))
+
+        # Auto-scan top-N through the full agent pipeline (no watchlist mutation).
+        autoscan = get_setting("discovery_autoscan_enabled", "false") == "true"
+        if autoscan and candidates:
+            top_n = int(
+                get_setting("discovery_autoscan_top_n", "") or _cfg().discovery.autoscan_top_n
+            )
+            top_tickers = [c.get("ticker", "") for c in candidates[:top_n] if c.get("ticker")]
+            _log.info(
+                "discovery: auto-scanning %d ticker(s): %s",
+                len(top_tickers),
+                top_tickers,
+            )
+            for ticker in top_tickers:
+                try:
+                    await scan_ticker_async(ticker, send_alerts=True)
+                    _log.info("discovery: auto-scan %s done", ticker)
+                except Exception as exc:
+                    _log.warning("discovery: auto-scan %s failed: %s", ticker, exc)
+
+    except Exception as exc:
+        await asyncio.to_thread(update_discovery_run, run_id, "error", 0, str(exc))
+        _log.error("discovery: run %d error: %s", run_id, exc)
+        raise
+
+
+# --------------------------------------------------------------------------- #
 # The loop
 # --------------------------------------------------------------------------- #
 class MonitorScheduler:
@@ -164,6 +246,8 @@ class MonitorScheduler:
         self._stop = asyncio.Event()
         self.last_run: str | None = None
         self.next_run: str | None = None
+        self.last_discovery: str | None = None
+        self.next_discovery: str | None = None
         self.running = False
 
     async def _loop(self) -> None:
@@ -189,6 +273,11 @@ class MonitorScheduler:
                         await sync_paper_orders()
                     except Exception as exc:  # pragma: no cover - defensive
                         _log.warning("paper sync error: %s", exc)
+                    # Discovery cycle — runs after watchlist scan when market is open.
+                    try:
+                        await _maybe_run_discovery(self)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        _log.warning("discovery cycle error: %s", exc)
                 else:
                     _log.info("market closed — sleeping")
 
@@ -247,6 +336,8 @@ class MonitorScheduler:
             "next_run": self.next_run,
             "scan_interval_minutes": effective_interval,
             "watchlist": get_effective_watchlist(),
+            "last_discovery": self.last_discovery,
+            "next_discovery": self.next_discovery,
         }
 
 

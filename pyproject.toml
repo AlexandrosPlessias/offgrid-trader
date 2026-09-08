@@ -6,3 +6,6 @@ max-complexity = 30
 [tool.ruff.lint.per-file-ignores]
 # FastAPI uses Body() as a dependency marker in default args — not a real call-in-default.
 "backend/main.py" = ["B008"]
+# noqa: S110 / S608 comments are needed for flake8-bandit (not ruff) — keep them.
+"backend/*.py" = ["RUF100"]
+"tests/*.py" = ["RUF100"]

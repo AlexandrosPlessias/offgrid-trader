@@ -78,9 +78,8 @@ body {
 /* ── Header ────────────────────────────────────────────────────────────────── */
 .header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 20px;
+  flex-direction: column;
+  align-items: stretch;
   background: rgba(10,15,30,0.70);
   backdrop-filter: var(--blur-md);
   -webkit-backdrop-filter: var(--blur-md);
@@ -89,8 +88,27 @@ body {
   position: sticky;
   top: 0;
   z-index: 10;
+}
+
+/* ── Row 1: logo · nav · tools ──────────────────────────────────────────────── */
+.header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
   min-height: 48px;
   gap: 16px;
+}
+
+/* ── Row 2: status bar ──────────────────────────────────────────────────────── */
+.header-statusbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 3px 20px 5px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+  background: rgba(0,0,0,0.15);
 }
 
 .header-left { display: flex; align-items: center; gap: 20px; flex: 1; min-width: 0; }
@@ -3071,3 +3089,43 @@ details.edu-section[open] .edu-chevron {
   border-color: rgba(248, 113, 113, 0.4) !important;
   background: rgba(248, 113, 113, 0.08) !important;
 }
+
+/* ── Discovery live step monitor ────────────────────────────────────────────── */
+.discovery-log {
+  padding: 8px 0;
+  font-size: 12px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  max-height: 190px;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+.discovery-log-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 14px;
+  color: var(--dim);
+  border-left: 2px solid transparent;
+  transition: background 0.15s, border-color 0.15s;
+}
+.discovery-log-row--active {
+  color: var(--text);
+  background: rgba(245,158,11,0.06);
+  border-left-color: var(--accent, #f59e0b);
+}
+.discovery-log-icon { width: 18px; text-align: center; flex-shrink: 0; font-size: 11px; }
+.discovery-log-msg  { flex: 1; }
+.discovery-log-ts   { font-size: 10px; opacity: 0.5; flex-shrink: 0; white-space: nowrap; }
+
+/* Spinning indicator for the active step */
+.discovery-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid rgba(245,158,11,0.25);
+  border-top-color: var(--accent, #f59e0b);
+  border-radius: 50%;
+  animation: discovery-spin 0.75s linear infinite;
+  vertical-align: middle;
+}
+@keyframes discovery-spin { to { transform: rotate(360deg); } }

@@ -280,6 +280,35 @@ class OtelConfig:
 
 
 @dataclass(frozen=True)
+class DiscoveryConfig:
+    """Trending-ticker discovery settings.
+
+    Env-var values serve as boot-time defaults; the Settings page can store
+    overrides in the DB (keys: discovery_enabled, discovery_sources, etc.)
+    which take precedence at call time via ``backend.database.get_setting``.
+    """
+
+    enabled: bool = field(
+        default_factory=lambda: _env_str("DISCOVERY_ENABLED", "false").lower() == "true"
+    )
+    # Comma-separated list of sources to use: "alpaca,yfinance"
+    sources: str = field(default_factory=lambda: _env_str("DISCOVERY_SOURCES", "alpaca,yfinance"))
+    # Max candidates to score per run (bounds yfinance indicator calls)
+    max_candidates: int = field(default_factory=lambda: _env_int("DISCOVERY_MAX_CANDIDATES", 25))
+    # Minimum score (0-100) a candidate must reach to appear in the result
+    min_score: int = field(default_factory=lambda: _env_int("DISCOVERY_MIN_SCORE", 60))
+    # Minutes between automatic discovery runs when the scheduler is active
+    interval_minutes: int = field(
+        default_factory=lambda: _env_int("DISCOVERY_INTERVAL_MINUTES", 60)
+    )
+    # When true, auto-scan the top-N candidates through the full agent pipeline
+    autoscan_enabled: bool = field(
+        default_factory=lambda: _env_str("DISCOVERY_AUTOSCAN_ENABLED", "false").lower() == "true"
+    )
+    autoscan_top_n: int = field(default_factory=lambda: _env_int("DISCOVERY_AUTOSCAN_TOP_N", 3))
+
+
+@dataclass(frozen=True)
 class AlpacaConfig:
     """Alpaca paper-trading broker settings.
 
@@ -380,6 +409,7 @@ class Settings:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     otel: OtelConfig = field(default_factory=OtelConfig)
     alpaca: AlpacaConfig = field(default_factory=AlpacaConfig)
+    discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
 
 
 # Singleton-style accessor -------------------------------------------------- #

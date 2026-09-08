@@ -12,6 +12,7 @@
 - [Backtesting — Concepts](backtesting-explained)
 - [Backtesting — Reference](backtesting)
 - [Paper Trading](paper-trading)
+- [Trending Discovery](trending-discovery)
 - [Glossary](glossary)
 - [Observability](observability)
 - [Development](development)
