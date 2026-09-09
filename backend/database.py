@@ -669,21 +669,27 @@ def get_usage_stats(days: int = 30, db_path: str | None = None) -> dict[str, Any
 # --------------------------------------------------------------------------- #
 def get_recent_signals(
     limit: int = 50,
+    offset: int = 0,
     ticker: str | None = None,
     db_path: str | None = None,
-) -> list[dict[str, Any]]:
-    """Return the most recent signals, optionally filtered by ticker."""
+) -> tuple[list[dict[str, Any]], int]:
+    """Return the most recent signals (optionally filtered by ticker) plus total count.
 
-    query = "SELECT * FROM signals"
-    params: list[Any] = []
-    if ticker:
-        query += " WHERE ticker = ?"
-        params.append(ticker.upper())
-    query += " ORDER BY id DESC LIMIT ?"
-    params.append(int(limit))
+    Returns ``(rows, total)`` where *total* is the un-paged count matching the
+    same WHERE clause so the caller can compute page count.
+    """
+
+    where = " WHERE ticker = ?" if ticker else ""
+    params_filter: list[Any] = [ticker.upper()] if ticker else []
 
     with _connect(db_path) as conn:
-        rows = conn.execute(query, params).fetchall()
+        total: int = conn.execute(
+            f"SELECT COUNT(*) FROM signals{where}", params_filter
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT * FROM signals{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            params_filter + [int(limit), int(offset)],
+        ).fetchall()
 
     results: list[dict[str, Any]] = []
     for row in rows:
@@ -694,7 +700,7 @@ def get_recent_signals(
             except (json.JSONDecodeError, TypeError):
                 pass
         results.append(record)
-    return results
+    return results, total
 
 
 def get_recent_analyses(
