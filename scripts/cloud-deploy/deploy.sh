@@ -26,8 +26,18 @@ fail()  { echo -e "${RED}✗ $*${NC}"; exit 1; }
 
 # ── Pre-flight checks ─────────────────────────────────────────────────────────
 command -v flyctl >/dev/null 2>&1 || fail "flyctl not found. Install: curl -L https://fly.io/install.sh | sh"
-command -v npx    >/dev/null 2>&1 || fail "npx not found. Install Node.js first."
-npx vercel --version >/dev/null 2>&1 || fail "vercel package unavailable via npx. Run: npm install -g vercel"
+command -v node   >/dev/null 2>&1 || fail "node not found. Install Node.js first."
+
+# Resolve a direct (non-npx) vercel binary so the Vercel MCP plugin cannot
+# intercept the call and cause a freeze.  Prefer a globally-installed binary;
+# install one if absent.
+if command -v vercel >/dev/null 2>&1; then
+  VERCEL="vercel"
+else
+  info "vercel not found globally — installing (one-time)..."
+  npm install -g vercel --silent
+  VERCEL="vercel"
+fi
 
 [[ -f fly.toml ]] || fail "fly.toml not found — run this script from the repo root."
 [[ -f frontend/.vercel/project.json ]] || fail "frontend/.vercel/project.json not found. Run: cd frontend && npx vercel link"
@@ -53,19 +63,34 @@ done
 # ── 2. Frontend → Vercel ──────────────────────────────────────────────────────
 echo
 info "Deploying frontend → Vercel"
+
+# Vercel CLI v39+ no longer reads the stored session token automatically when
+# running non-interactively.  Read it from the auth file that `vercel login`
+# wrote, or fall back to the VERCEL_TOKEN env var if one is already set.
+if [[ -z "${VERCEL_TOKEN:-}" ]]; then
+  AUTH_FILE="${HOME}/.local/share/com.vercel.cli/auth.json"
+  if [[ -f "$AUTH_FILE" ]]; then
+    VERCEL_TOKEN=$(python3 -c "import json,sys; print(json.load(open('${AUTH_FILE}'))['token'])")
+    export VERCEL_TOKEN
+    info "Using Vercel token from ${AUTH_FILE}"
+  else
+    fail "No VERCEL_TOKEN env var set and no saved Vercel auth found at ${AUTH_FILE}. Run: npx vercel login"
+  fi
+fi
+
 cd frontend
-# Vercel CLI prints a hash deployment URL during build; the clean production alias
-# (offgrid-trader.vercel.app) is updated automatically once the deploy succeeds.
-npx vercel deploy --prod
-# Read the production alias from the project — avoids parsing the hash URL from stdout.
-PROD_DOMAIN=$(npx vercel alias ls 2>/dev/null \
-    | grep -v "^source" \
-    | awk '{print $2}' \
-    | grep -v "vercel\.app.*vercel\.app" \
-    | grep "\.vercel\.app$" \
-    | head -1)
+# Two-step local deploy:
+#   1. Pull production env vars (VITE_API_URL etc.) so the build on Vercel's
+#      side picks up the right values — fast, never hangs.
+#   2. Deploy source to Vercel — Vercel builds on their infrastructure,
+#      which avoids running `vercel build` locally (that step runs npm install
+#      inside Vercel's wrapper and frequently freezes on developer machines).
+# The GHA workflow uses the pull→build→deploy-prebuilt pattern because GitHub
+# Actions runners are clean and fast; locally the simpler pull→deploy is fine.
+npx vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+DEPLOY_URL=$(npx vercel deploy --prod --token="$VERCEL_TOKEN" 2>&1 | grep -o 'https://[^ ]*\.vercel\.app' | tail -1)
 cd ..
-FRONTEND_URL="https://${PROD_DOMAIN:-offgrid-trader.vercel.app}"
+FRONTEND_URL="${DEPLOY_URL:-https://offgrid-trader.vercel.app}"
 ok "Frontend deployed → ${FRONTEND_URL}"
 
 echo
