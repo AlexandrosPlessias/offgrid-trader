@@ -65,17 +65,51 @@ echo
 info "Deploying frontend → Vercel"
 
 # Vercel CLI v39+ no longer reads the stored session token automatically when
-# running non-interactively.  Read it from the auth file that `vercel login`
-# wrote, or fall back to the VERCEL_TOKEN env var if one is already set.
+# running non-interactively.  Preference order:
+#   1. VERCEL_TOKEN env var (a long-lived API token from vercel.com/account/tokens)
+#   2. CLI session token written by `vercel login` (short-lived; may expire)
+# If the stored session token is expired the script fails with clear instructions
+# rather than a cryptic "token not valid" error from the Vercel CLI.
 if [[ -z "${VERCEL_TOKEN:-}" ]]; then
   AUTH_FILE="${HOME}/.local/share/com.vercel.cli/auth.json"
   if [[ -f "$AUTH_FILE" ]]; then
     VERCEL_TOKEN=$(python3 -c "import json,sys; print(json.load(open('${AUTH_FILE}'))['token'])")
+    # Validate expiry stored in auth.json.
+    # Vercel CLI writes expiresAt as epoch-seconds (9–10 digits).
+    # Older/broken installs sometimes wrote epoch-milliseconds (13 digits).
+    # Detect by magnitude: values < 1e12 are seconds, otherwise milliseconds.
+    # A zero or missing expiresAt is treated as already-expired.
+    EXPIRED=$(python3 -c "
+import json, time
+d = json.load(open('${AUTH_FILE}'))
+raw = d.get('expiresAt', 0)
+exp = raw if raw < 1e12 else raw / 1000   # auto-detect seconds vs ms
+print('yes' if exp < time.time() else 'no')
+")
+    if [[ "$EXPIRED" == "yes" ]]; then
+      echo
+      echo -e "${RED}✗ Vercel session token has expired.${NC}"
+      echo "  Fix (choose one):"
+      echo "  a) Re-authenticate:  vercel login"
+      echo "     Then re-run:      make deploy"
+      echo "  b) Create a permanent API token at https://vercel.com/account/tokens"
+      echo "     Then export it:   export VERCEL_TOKEN=<your-token>"
+      echo "     Then re-run:      make deploy"
+      exit 1
+    fi
     export VERCEL_TOKEN
-    info "Using Vercel token from ${AUTH_FILE}"
+    info "Using Vercel session token from ${AUTH_FILE}"
   else
-    fail "No VERCEL_TOKEN env var set and no saved Vercel auth found at ${AUTH_FILE}. Run: npx vercel login"
+    fail "No VERCEL_TOKEN env var and no saved Vercel auth at ${AUTH_FILE}. Run: vercel login"
   fi
+fi
+
+# Validate the token works before attempting the full deploy.
+if ! "$VERCEL" whoami --token="$VERCEL_TOKEN" &>/dev/null; then
+  echo -e "${RED}✗ Vercel token rejected by the API.${NC}"
+  echo "  Run 'vercel login' to refresh your session, or set VERCEL_TOKEN to a"
+  echo "  long-lived API token from https://vercel.com/account/tokens"
+  exit 1
 fi
 
 cd frontend
@@ -87,8 +121,8 @@ cd frontend
 #      inside Vercel's wrapper and frequently freezes on developer machines).
 # The GHA workflow uses the pull→build→deploy-prebuilt pattern because GitHub
 # Actions runners are clean and fast; locally the simpler pull→deploy is fine.
-npx vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
-DEPLOY_URL=$(npx vercel deploy --prod --token="$VERCEL_TOKEN" 2>&1 | grep -o 'https://[^ ]*\.vercel\.app' | tail -1)
+"$VERCEL" pull --yes --environment=production --token="$VERCEL_TOKEN"
+DEPLOY_URL=$("$VERCEL" deploy --prod --token="$VERCEL_TOKEN" 2>&1 | grep -o 'https://[^ ]*\.vercel\.app' | tail -1)
 cd ..
 FRONTEND_URL="${DEPLOY_URL:-https://offgrid-trader.vercel.app}"
 ok "Frontend deployed → ${FRONTEND_URL}"

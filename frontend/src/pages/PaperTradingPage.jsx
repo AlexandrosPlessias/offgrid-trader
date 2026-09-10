@@ -822,11 +822,20 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                             ) : closeConfirm === ticker ? (
                               <div style={{ fontSize: 10, lineHeight: 1.4 }}>
                                 <div style={{ color: 'var(--text)', marginBottom: 4, fontWeight: 600 }}>
-                                  {isLong ? 'Sell' : 'Buy back'} all {qty} {isLong ? 'shares' : 'short shares'} of {ticker} at market? This cannot be undone.
+                                  {isLong ? 'Sell' : 'Buy back'}{' '}
+                                  {qtyAvail < qty
+                                    ? <>{qtyAvail} of {qty} {isLong ? 'shares' : 'short shares'}</>
+                                    : <>all {qty} {isLong ? 'shares' : 'short shares'}</>
+                                  }{' '}of {ticker} at market? This cannot be undone.
+                                  {qtyAvail < qty && (
+                                    <div style={{ color: 'var(--dim)', fontWeight: 400, marginTop: 2 }}>
+                                      {qty - qtyAvail} share{qty - qtyAvail !== 1 ? 's' : ''} are locked in a pending bracket order.
+                                    </div>
+                                  )}
                                 </div>
                                 <div style={{ display: 'flex', gap: 4 }}>
                                   <button
-                                    onClick={() => closePosition(ticker, qty)}
+                                    onClick={() => closePosition(ticker, qtyAvail)}
                                     disabled={closingPos[ticker]}
                                     style={{ fontSize: 10, padding: '2px 7px', borderRadius: 4, cursor: 'pointer',
                                       background: 'color-mix(in srgb, var(--red) 18%, transparent)',

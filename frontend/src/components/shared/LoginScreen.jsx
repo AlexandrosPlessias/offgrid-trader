@@ -19,6 +19,7 @@ export default function LoginScreen({ onLogin }) {
   const [devMode, setDevMode] = useState(null)
   const [logLines, setLogLines] = useState([])
   const [shake, setShake]       = useState(false)
+  const [waking, setWaking]     = useState(false)  // true while cold-start retry is in-flight
   const inputRef = useRef(null)
 
   // Boot log animation
@@ -40,13 +41,26 @@ export default function LoginScreen({ onLogin }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault()
-    setLoading(true); setErr('')
+    setLoading(true); setErr(''); setWaking(false)
+
+    const doFetch = () => fetch(`${API}/auth/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: input }),
+    })
+
     try {
-      const r = await fetch(`${API}/auth/verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: input }),
-      })
+      let r
+      try {
+        r = await doFetch()
+      } catch {
+        // Network error — Fly.io machine may be cold-starting.
+        // Wait 4 s and retry once before giving up.
+        setWaking(true)
+        await new Promise(res => setTimeout(res, 4000))
+        setWaking(false)
+        r = await doFetch()   // throws again → outer catch shows OFFLINE
+      }
       if (r.ok) {
         sessionStorage.setItem('admin_token', input)
         onLogin()
@@ -59,7 +73,7 @@ export default function LoginScreen({ onLogin }) {
     } catch {
       setErr('OFFLINE — backend unreachable')
     } finally {
-      setLoading(false)
+      setLoading(false); setWaking(false)
     }
   }
 
@@ -194,7 +208,12 @@ export default function LoginScreen({ onLogin }) {
                 >{loading ? '…' : 'AUTH'}</button>
               </div>
 
-              {err && (
+              {waking && (
+                <div style={{ fontSize: 11, color: '#f59e0b', letterSpacing: 1, marginBottom: 10 }}>
+                  ⏳ Waking up backend… retrying
+                </div>
+              )}
+              {err && !waking && (
                 <div style={{ fontSize: 11, color: '#ff4444', letterSpacing: 1, marginBottom: 10, animation: 'loginBlink 0.3s 2' }}>
                   ⚠ {err}
                 </div>

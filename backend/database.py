@@ -1492,6 +1492,24 @@ def update_discovery_run(
         conn.commit()
 
 
+def reset_stale_discovery_runs(older_than_minutes: int = 30, db_path: str | None = None) -> int:
+    """Flip any 'running' discovery_runs rows older than *older_than_minutes* to 'error'.
+
+    Called at startup to clean up rows orphaned by a previous server restart or
+    an asyncio cancellation that bypassed the except block.  Returns the number
+    of rows reset.
+    """
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE discovery_runs SET status='error', error='Interrupted (server restart)'"
+            " WHERE status='running'"
+            "   AND created_at < datetime('now', ?)",
+            (f"-{older_than_minutes} minutes",),
+        )
+        conn.commit()
+        return cur.rowcount
+
+
 def save_discovery_candidates(
     run_id: int,
     candidates: list[dict],

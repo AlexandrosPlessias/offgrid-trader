@@ -229,5 +229,22 @@ async def discovery_refresh() -> StreamingResponse:
                 except Exception:  # noqa: S110
                     pass
             yield _sse_frame({"type": "error", "message": str(exc)})
+        finally:
+            # Catch asyncio.CancelledError (client disconnect / ASGI teardown)
+            # which bypasses the except block but still runs finally.  Only
+            # acts when the run_id exists and the row is still 'running'.
+            if run_id is not None:
+                try:
+                    from backend.database import _connect as _db_conn  # local import
+                    with _db_conn() as _c:
+                        row = _c.execute(
+                            "SELECT status FROM discovery_runs WHERE id=?", (run_id,)
+                        ).fetchone()
+                    if row and row["status"] == "running":
+                        await asyncio.to_thread(
+                            update_discovery_run, run_id, "error", 0, "Cancelled"
+                        )
+                except Exception:  # noqa: S110
+                    pass
 
     return StreamingResponse(_stream(), media_type="text/event-stream")

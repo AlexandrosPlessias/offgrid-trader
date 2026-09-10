@@ -304,33 +304,40 @@ def close_paper_position(ticker: str) -> dict[str, Any]:
                 ) from exc
             raise
 
-        # qty is negative for short positions (Alpaca convention).
-        # qty_available can be "0" when shares are locked in pending bracket order
-        # legs — always prefer the raw qty field and take its absolute value.
-        qty_raw = position.get("qty") or position.get("qty_available")
-        if not qty_raw:
+        # Determine available vs total qty.
+        # qty     = total position size (negative for shorts, e.g. "-19")
+        # qty_available = shares not locked in pending bracket legs (e.g. "16")
+        # We MUST send qty_available to Alpaca — sending the full qty when some
+        # shares are locked causes 403 "insufficient qty available for order".
+        qty_total_raw = position.get("qty") or "0"
+        qty_avail_raw = position.get("qty_available")
+
+        qty_total = abs(float(qty_total_raw))
+        qty_avail = abs(float(qty_avail_raw)) if qty_avail_raw is not None else qty_total
+
+        # Use available qty; if truly zero (all shares locked), nothing to close
+        close_qty = qty_avail if qty_avail > 0 else qty_total
+        if close_qty <= 0:
             raise HTTPException(
                 status_code=400,
-                detail=f"Position for {ticker} has zero or unknown quantity",
-            )
-        qty_float = abs(float(qty_raw))
-        if qty_float <= 0:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Position for {ticker} has zero or unknown quantity",
+                detail=f"Position for {ticker} has zero shares available to close.",
             )
 
         # Determine close direction:
         #   long  position → sell to close
         #   short position → buy to cover
-        pos_side    = position.get("side", "long")
-        close_side  = "sell" if pos_side == "long" else "buy"
+        pos_side   = position.get("side", "long")
+        close_side = "sell" if pos_side == "long" else "buy"
+
+        # Entry price and current unrealized P&L (used later to record realized P&L).
+        entry_price   = float(position.get("avg_entry_price") or 0)
+        unrealized_pl = float(position.get("unrealized_pl") or 0)
 
         # Preserve fractional shares — pass qty exactly as Alpaca reported it.
         # Alpaca paper trading supports fractional market sells with qty as a
         # decimal string (e.g. "1.5").  Converting to int would silently drop
         # fractional shares and can produce qty=0 when < 1 share is held.
-        qty_str = str(qty_float)
+        qty_str = str(close_qty)
         # Normalise "2.0" → "2" so Alpaca treats it as a whole-share order;
         # leave "1.5" as-is for fractional positions.
         if qty_str.endswith(".0"):
@@ -359,14 +366,40 @@ def close_paper_position(ticker: str) -> dict[str, Any]:
                 "time_in_force": tif,
             },
         )
+
+        # Save the close order to paper_orders so sync_paper_orders can later
+        # fill in the actual filled_avg_price and compute realized P&L.
+        # We store entry_price here because the position object will be gone
+        # once the order fills and we can no longer look it up.
+        # Estimated P&L = unrealized_pl × (close_qty / total_qty) at current price;
+        # sync_paper_orders will overwrite this with the actual fill price later.
+        from backend.database import save_paper_order  # local import
+        partial_ratio = (close_qty / qty_total) if qty_total > 0 else 1.0
+        est_pnl = round(unrealized_pl * partial_ratio, 4)
+        save_paper_order(
+            {
+                "ticker":         ticker,
+                "side":           close_side,
+                "alpaca_order_id": order.get("id"),
+                "status":         order.get("status", "pending"),
+                "qty":            close_qty,
+                "notional":       None,
+                "entry_price":    entry_price if entry_price > 0 else None,
+                "realized_pnl":   est_pnl if order.get("status") == "filled" else None,
+            }
+        )
+
         market_note = None if is_open else "Market is closed — order queued for next open (GTC)."
+        is_partial  = qty_total > close_qty
         return {
-            "closed": True,
-            "ticker": ticker,
-            "qty": qty_str,
+            "closed":   True,
+            "ticker":   ticker,
+            "qty":      qty_str,
+            "qty_total": str(int(qty_total)) if qty_total == int(qty_total) else str(qty_total),
+            "partial":  is_partial,
             "order_id": order.get("id"),
-            "status": order.get("status"),
-            "order": order,
+            "status":   order.get("status"),
+            "order":    order,
             **({"note": market_note} if market_note else {}),
         }
     except AlpacaError as exc:

@@ -22,7 +22,7 @@ from starlette.requests import Request as StarletteRequest
 
 from . import __version__
 from .config import get_settings
-from .database import get_setting, init_db
+from .database import get_setting, init_db, reset_stale_discovery_runs
 from .scheduler import scheduler
 from .routes import all_routers
 
@@ -105,6 +105,7 @@ async def lifespan(app: FastAPI):
     scans on fresh installs and after container restarts.
     """
     init_db()
+    reset_stale_discovery_runs()  # clean up 'running' rows orphaned by prior restarts
     # Start the scheduler if the DB setting says "true" (user has toggled it
     # at runtime), or if no DB override exists yet and SCHEDULER_AUTO_START=true
     # is set in .env (fresh install default).
@@ -133,6 +134,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    max_age=60,  # browser caches CORS preflight for only 60 s (default 600)
+                 # keeps bad cached responses from persisting after machine restarts
 )
 
 # --------------------------------------------------------------------------- #
