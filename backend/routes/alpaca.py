@@ -489,3 +489,45 @@ def market_snapshots(
         return {"snapshots": result}
     except AlpacaError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/paper/assets")
+def assets_tradability(
+    symbols: str = Query(..., description="Comma-separated tickers"),
+) -> dict[str, Any]:
+    """Return tradability info for a batch of tickers from Alpaca's asset catalogue.
+
+    Each entry in the returned dict contains:
+      tradable       – bool: the asset can be traded on Alpaca
+      status         – str:  'active' or 'inactive'
+      shortable      – bool: on the shortable securities list
+      fractionable   – bool: fractional shares accepted
+      easy_to_borrow – bool: shares readily available to borrow
+      exchange       – str:  e.g. 'NASDAQ', 'NYSE', 'OTC'
+
+    Tickers not found on Alpaca are omitted; callers treat a missing ticker
+    as 'unknown' rather than 'not tradable'.
+    """
+    from backend.alpaca import AlpacaError, get_client  # local import
+
+    tickers = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not tickers:
+        raise HTTPException(status_code=400, detail="symbols required")
+
+    client = get_client()
+    result: dict[str, Any] = {}
+    for ticker in tickers:
+        try:
+            asset = client._get(f"/v2/assets/{ticker}")
+            result[ticker] = {
+                "tradable":       bool(asset.get("tradable", False)),
+                "status":         asset.get("status", "unknown"),
+                "shortable":      bool(asset.get("shortable", False)),
+                "fractionable":   bool(asset.get("fractionable", False)),
+                "easy_to_borrow": bool(asset.get("easy_to_borrow", False)),
+                "exchange":       asset.get("exchange", ""),
+            }
+        except AlpacaError:
+            pass  # ticker not on Alpaca — caller treats missing as 'unknown'
+
+    return {"assets": result}

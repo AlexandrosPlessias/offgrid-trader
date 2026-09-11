@@ -10,6 +10,8 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
   const [progress,   setProgress]     = useState([])  // {step, message, ts}[]
   const [error,      setError]        = useState(null)
   const [addStatus,       setAddStatus]       = useState({}) // ticker → 'adding'|'done'|'error'
+  const [tradeStatus,     setTradeStatus]     = useState({}) // ticker → 'trading'|'done'|'error'|string(err)
+  const [assetInfo,       setAssetInfo]       = useState({}) // ticker → {tradable, status, shortable, fractionable, exchange} | null
   const [expandedTicker,  setExpandedTicker]  = useState(null) // ticker whose score breakdown is open
   const [history,         setHistory]         = useState([])
   const [historyOpen,     setHistoryOpen]     = useState(false)
@@ -21,6 +23,37 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
   // Auto-scroll the step log to the latest entry
   useEffect(() => { progressEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [progress])
 
+  // Fetch Alpaca tradability info for a list of tickers (fire-and-forget, non-blocking).
+  // Pre-marks each ticker as 'loading' so the Trade button shows "… Checking" while
+  // the request is in-flight.  Resolves to the asset object (tradable / not) or null
+  // when the ticker is not found on Alpaca (unknown → allow trade attempt).
+  const fetchAssetInfo = useCallback(async (tickers) => {
+    if (!tickers?.length) return
+    // Mark every not-yet-known ticker as 'loading' so buttons disable immediately
+    setAssetInfo(prev => {
+      const patch = {}
+      for (const t of tickers) { if (prev[t] === undefined) patch[t] = 'loading' }
+      return { ...prev, ...patch }
+    })
+    try {
+      const r = await fetch(`${API}/paper/assets?symbols=${tickers.join(',')}`, { headers: getAuthHeaders() })
+      const assets = r.ok ? ((await r.json()).assets || {}) : {}
+      // Resolve each ticker: use API data if present, null if not found (unknown)
+      setAssetInfo(prev => {
+        const patch = {}
+        for (const t of tickers) patch[t] = assets[t] ?? null
+        return { ...prev, ...patch }
+      })
+    } catch {
+      // On network error clear 'loading' to null so buttons become usable
+      setAssetInfo(prev => {
+        const patch = {}
+        for (const t of tickers) { if (prev[t] === 'loading') patch[t] = null }
+        return { ...prev, ...patch }
+      })
+    }
+  }, [])
+
   const load = useCallback(async () => {
     setLoading(true); setError(null)
     try {
@@ -28,13 +61,15 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
       if (!r.ok) throw new Error(await r.text())
       const d = await r.json()
       setRunMeta(d.run)
-      setCandidates(d.candidates || [])
+      const cands = d.candidates || []
+      setCandidates(cands)
+      fetchAssetInfo(cands.map(c => c.ticker))
     } catch (e) {
       setError(e.message || 'Failed to load trending data')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [fetchAssetInfo])
 
   const loadHistory = useCallback(async () => {
     try {
@@ -112,6 +147,57 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
       setCandidates(prev => prev.map(c => c.ticker === ticker ? { ...c, already_in_watchlist: true } : c))
     } catch {
       setAddStatus(s => ({ ...s, [ticker]: 'error' }))
+    }
+  }
+
+  const handleUnwatch = async (ticker) => {
+    setAddStatus(s => ({ ...s, [ticker]: 'removing' }))
+    try {
+      const r = await fetch(`${API}/watchlist/${encodeURIComponent(ticker)}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      // Clear local state: remove 'done' override + flip already_in_watchlist flag
+      setAddStatus(s => { const n = { ...s }; delete n[ticker]; return n })
+      setCandidates(prev => prev.map(c => c.ticker === ticker ? { ...c, already_in_watchlist: false } : c))
+    } catch {
+      // Revert to watched state so the UI stays consistent
+      setAddStatus(s => ({ ...s, [ticker]: 'done' }))
+    }
+  }
+
+  // Place a paper bracket order from a discovery candidate.
+  // Stop = entry − 5%, target = entry + 10% (2:1 risk-reward default).
+  const handleTrade = async (c) => {
+    setTradeStatus(s => ({ ...s, [c.ticker]: 'trading' }))
+    const entry  = parseFloat(c.price) || 0
+    const stop   = parseFloat((entry * 0.95).toFixed(4))
+    const target = parseFloat((entry * 1.10).toFixed(4))
+    try {
+      const r = await fetch(`${API}/paper/orders/place`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({
+          ticker:             c.ticker,
+          side:               'buy',
+          entry,
+          stop,
+          target,
+          notional:           500,
+          signal_confidence:  c.score ?? null,
+          signal_source:      c.source ?? 'discovery',
+        }),
+      })
+      const data = await r.json().catch(() => ({}))
+      if (!r.ok) {
+        const msg = data?.detail || data?.message || `HTTP ${r.status}`
+        setTradeStatus(s => ({ ...s, [c.ticker]: `error:${msg}` }))
+      } else {
+        setTradeStatus(s => ({ ...s, [c.ticker]: 'done' }))
+      }
+    } catch (e) {
+      setTradeStatus(s => ({ ...s, [c.ticker]: `error:${e.message}` }))
     }
   }
 
@@ -238,7 +324,7 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
               <col style={{ width: '11%' }} />{/* Score   */}
               <col />{/* Reasons — takes remaining space */}
               <col style={{ width: '10%' }} />{/* Source  */}
-              <col style={{ width: '9%'  }} />{/* Action  */}
+              <col style={{ width: '7%'  }} />{/* Action  */}
             </colgroup>
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border)' }}>
@@ -256,9 +342,30 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
               {candidates.map((c) => {
                 const pctColor   = (c.percent_change || 0) >= 0 ? 'var(--green)' : 'var(--red)'
                 const scoreColor = c.score >= 75 ? 'var(--green)' : c.score >= 50 ? '#f59e0b' : 'var(--text-dim)'
-                const adding  = addStatus[c.ticker] === 'adding'
-                const added   = c.already_in_watchlist || addStatus[c.ticker] === 'done'
-                const cell    = { padding: '8px 10px', verticalAlign: 'middle' }
+                const adding   = addStatus[c.ticker] === 'adding'
+                const removing = addStatus[c.ticker] === 'removing'
+                const added    = c.already_in_watchlist || addStatus[c.ticker] === 'done'
+                const cell     = { padding: '8px 10px', verticalAlign: 'middle' }
+
+                // Alpaca tradability:
+                //   undefined  — ticker not yet queued (shouldn't happen after load)
+                //   'loading'  — fetch in-flight; button shows "… Checking" and is disabled
+                //   null       — not found on Alpaca; allow trade attempt (outcome unknown)
+                //   object     — confirmed data; apply tradable / status / exchange rules
+                const asset       = assetInfo[c.ticker]
+                const isChecking  = asset === 'loading'
+                // Only evaluate tradability when we have a real object (not null / sentinel)
+                const notTradable     = asset && asset !== 'loading' && (!asset.tradable || asset.status !== 'active')
+                const isOTC           = asset && asset !== 'loading' ? asset.exchange === 'OTC' : false
+                // Tradable on paper but has borrow/short restrictions — warn before clicking
+                const hasRestrictions = asset && asset !== 'loading' && asset.tradable &&
+                                        !asset.shortable && !asset.easy_to_borrow
+                // Compose a human tooltip explaining why trading is blocked or warned
+                const tradeBlock  = notTradable
+                  ? (!asset.tradable ? 'Not tradable on Alpaca' : `Asset status: ${asset.status}`)
+                  : isOTC ? 'OTC stock — may be hard to execute'
+                  : hasRestrictions ? 'Trading restrictions on Alpaca (not shortable / no shares to borrow) — long buy may still work'
+                  : null
                 const isOpen  = expandedTicker === c.ticker
                 const toggleBreakdown = () => setExpandedTicker(t => t === c.ticker ? null : c.ticker)
                 const comp    = c.components || {}
@@ -317,14 +424,94 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                         </span>
                       </td>
                       <td style={{ ...cell, textAlign: 'center' }}>
-                        <button
-                          className="btn-secondary btn-sm"
-                          onClick={() => handleAdd(c.ticker)}
-                          disabled={added || adding}
-                          style={{ fontSize: 11, padding: '2px 8px', opacity: added ? 0.5 : 1, whiteSpace: 'nowrap' }}
-                        >
-                          {added ? '✓ Added' : adding ? '…' : '+ Watch'}
-                        </button>
+                        {(() => {
+                          const ts = tradeStatus[c.ticker]
+                          const trading  = ts === 'trading'
+                          const traded   = ts === 'done'
+                          const tradeErr = ts?.startsWith('error:') ? ts.slice(6) : null
+                          // blocked = confirmed non-tradable; isChecking = in-flight
+                          const blocked  = Boolean(notTradable)
+
+                          // Button label priority: result states > in-flight > checking > default
+                          const tradeLabel =
+                            traded      ? '✓ Traded' :
+                            trading     ? '⟳' :
+                            tradeErr    ? '✗ Failed' :
+                            blocked     ? '🚫 Blocked' :
+                            isChecking  ? '… Checking' :
+                            '📈 Trade'
+
+                          // Icon-only buttons — full label lives in the tooltip
+                          const watchIcon =
+                            removing ? '⏳' :
+                            adding   ? '⏳' :
+                            added    ? '✓'  : '👁'
+                          const watchTitle =
+                            removing ? `Removing ${c.ticker} from watchlist…` :
+                            adding   ? 'Adding to watchlist…' :
+                            added    ? `${c.ticker} is in your watchlist — click to remove` :
+                            `Add ${c.ticker} to watchlist`
+
+                          const tradeIcon =
+                            traded          ? '✅' :
+                            trading         ? '⏳' :
+                            tradeErr        ? '❌' :
+                            blocked         ? '🚫' :
+                            isChecking      ? '🔍' :
+                            (isOTC || hasRestrictions) ? '⚠' :
+                            '📈'
+
+                          const tradeTitle =
+                            isChecking      ? 'Checking if this ticker can be traded on Alpaca…' :
+                            tradeErr        ? `Error: ${tradeErr}` :
+                            blocked         ? tradeBlock :
+                            hasRestrictions ? `⚠ ${tradeBlock} — click to try anyway` :
+                            isOTC           ? 'OTC stock — may be hard to execute. Click to place anyway.' :
+                            traded          ? `${c.ticker} order placed` :
+                            trading         ? 'Placing order…' :
+                            `Place paper buy order for ${c.ticker} (stop −5% / target +10%, notional $500)`
+
+                          const iconBtn = {
+                            fontSize: 15, lineHeight: 1,
+                            padding: '3px 6px', minWidth: 30, minHeight: 26,
+                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                            cursor: 'pointer',
+                          }
+
+                          return (
+                            <div style={{ display: 'flex', gap: 6, justifyContent: 'center', alignItems: 'center' }}>
+                              {/* Watch / Unwatch toggle button */}
+                              <button
+                                className="btn-secondary btn-sm"
+                                onClick={() => added ? handleUnwatch(c.ticker) : handleAdd(c.ticker)}
+                                disabled={adding || removing}
+                                title={watchTitle}
+                                style={{ ...iconBtn, opacity: removing ? 0.45 : 1 }}
+                              >
+                                {watchIcon}
+                              </button>
+
+                              {/* Trade icon button — colour shifts per state */}
+                              <button
+                                className="btn-primary btn-sm"
+                                onClick={() => handleTrade(c)}
+                                disabled={trading || traded || blocked || isChecking}
+                                title={tradeTitle}
+                                style={{
+                                  ...iconBtn,
+                                  opacity: (traded || blocked || isChecking) ? 0.45 : 1,
+                                  background:
+                                    tradeErr                    ? 'var(--red, #ef4444)'       :
+                                    traded                      ? 'var(--green, #22c55e)'      :
+                                    (isOTC || hasRestrictions)  ? 'rgba(245,158,11,.35)'       :
+                                    undefined,
+                                }}
+                              >
+                                {tradeIcon}
+                              </button>
+                            </div>
+                          )
+                        })()}
                       </td>
                     </tr>
 
