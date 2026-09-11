@@ -253,7 +253,12 @@ def fetch_candidates(
             return cached
 
     source_list = [s.strip().lower() for s in sources.split(",") if s.strip()]
-    raw: list[dict[str, Any]] = []
+
+    # Collect each source into its own bucket so proportional slots can be
+    # allocated below — appending to a single list would starve later sources
+    # because _dedupe(raw)[:limit] would only take from whichever filled first.
+    alpaca_bucket: list[dict[str, Any]] = []
+    yf_bucket:     list[dict[str, Any]] = []
 
     used_yf_fallback = False
     if "alpaca" in source_list:
@@ -263,20 +268,19 @@ def fetch_candidates(
             if progress_callback:
                 progress_callback("warn", f"⚠ {alpaca_warn}")
         if alpaca_results:
-            raw.extend(alpaca_results)
+            alpaca_bucket = alpaca_results
             if progress_callback:
                 progress_callback(
                     "fetch",
-                    f"Alpaca: {len(alpaca_results)} raw candidates fetched"
-                    f" (scoring pool — top {limit // 2} will be scored)",
+                    f"Alpaca: {len(alpaca_results)} raw candidates fetched",
                 )
         else:
-            # Alpaca unavailable — always fall back to yfinance
+            # Alpaca unavailable — fall back to yfinance for both slots
             _log.info("discovery: Alpaca returned nothing — using yfinance fallback")
             if progress_callback:
                 progress_callback("fetch", "Fetching from yfinance (Alpaca fallback)…")
             yf_fallback = _fetch_from_yfinance()
-            raw.extend(yf_fallback)
+            yf_bucket = yf_fallback
             if progress_callback:
                 progress_callback("fetch", f"yfinance fallback: {len(yf_fallback)} candidates")
             used_yf_fallback = True
@@ -285,11 +289,31 @@ def fetch_candidates(
         if progress_callback:
             progress_callback("fetch", "Fetching from yfinance screeners…")
         yf_results = _fetch_from_yfinance()
-        raw.extend(yf_results)
+        yf_bucket = yf_results
         if progress_callback:
             progress_callback("fetch", f"yfinance: {len(yf_results)} candidates fetched")
 
-    candidates = _dedupe(raw)[:limit]
+    # Proportional merge: each active source gets limit // n slots so no source
+    # is starved when appended after a larger one (e.g. Alpaca 100 + yfinance 100
+    # with limit=50 previously gave all 50 slots to Alpaca).
+    active_buckets = [b for b in [alpaca_bucket, yf_bucket] if b]
+    if active_buckets:
+        per_src = max(limit // len(active_buckets), 1)
+        merged: list[dict[str, Any]] = []
+        for bucket in active_buckets:
+            merged.extend(bucket[:per_src])
+        # Top up to limit with any remaining items not yet included
+        seen_syms = {c.get("symbol") for c in merged}
+        for bucket in active_buckets:
+            for c in bucket[per_src:]:
+                if len(merged) >= limit:
+                    break
+                if c.get("symbol") not in seen_syms:
+                    merged.append(c)
+                    seen_syms.add(c.get("symbol"))
+        candidates = _dedupe(merged)[:limit]
+    else:
+        candidates = []
     _enrich_missing_prices(candidates)
     _cache_set(cache_key, candidates)
     _log.info("discovery: fetched %d candidates (sources=%s)", len(candidates), sources)

@@ -1268,19 +1268,21 @@ tbody td {
   left: 50%;
   transform: translateX(-50%);
   width: 260px;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  /* Solid dark background — the previous rgba(255,255,255,0.06) was nearly
+     transparent and caused the text to bleed into whatever was behind it. */
+  background: #0d1117;
+  border: 1px solid rgba(255,255,255,0.18);
   border-radius: var(--radius);
   padding: 10px 12px;
   font-size: 11px;
   font-weight: 400;
   line-height: 1.6;
-  color: var(--text);
+  color: #e6edf3;
   text-transform: none;
   letter-spacing: 0;
-  z-index: 200;
+  z-index: 9999;
   pointer-events: none;
-  box-shadow: var(--shadow);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.70), 0 2px 8px rgba(0,0,0,0.50);
   font-family: var(--font-ui);
 }
 .info-tip:hover .info-tip-popup { display: block; }
@@ -2027,6 +2029,28 @@ details.edu-section[open] .edu-chevron {
   font-size: 11px;
   color: var(--dim);
   white-space: nowrap;
+}
+
+/* ── Glossary category collapsible ──────────────────────────────────────────── */
+.gls-category-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  padding: 6px 0;
+  font-weight: 600;
+  font-size: 13px;
+}
+.gls-category-summary::-webkit-details-marker { display: none; }
+.gls-cat-icon  { font-size: 15px; }
+.gls-cat-label { flex: 1; }
+.gls-cat-count {
+  font-size: 11px;
+  color: var(--dim);
+  font-weight: 400;
+  margin-left: 2px;  /* small gap between label text and "(N)" */
 }
 
 /* ── Glossary table ───────────────────────────────────────────────────────────── */
@@ -3129,3 +3153,159 @@ details.edu-section[open] .edu-chevron {
   vertical-align: middle;
 }
 @keyframes discovery-spin { to { transform: rotate(360deg); } }
+
+/* ── Mobile responsiveness ───────────────────────────────────────────────────
+   Targets phones (≤768px) and small tablets (≤900px already handled above).
+   Strategy: CSS-first, no JSX restructuring.  Key goals:
+     • Header fits on one row; nav wraps gracefully.
+     • All multi-column grids collapse to single column.
+     • Tables stay horizontally scrollable (.table-wrap already does this).
+     • Non-essential header chips are hidden to save row space.
+   Viewport test sizes: 375px (iPhone SE), 390px (iPhone 14), 768px (iPad).
+──────────────────────────────────────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+
+  /* ── Global layout ──────────────────────────────────────────────────────── */
+  .main {
+    padding: 12px;
+    gap: 14px;
+  }
+
+  /* ── Header ─────────────────────────────────────────────────────────────── */
+  .header-row {
+    padding: 0 12px;
+    flex-wrap: wrap;
+    min-height: 44px;
+    gap: 8px;
+  }
+
+  .header-statusbar {
+    padding: 3px 12px 5px;
+  }
+
+  .header-left {
+    gap: 10px;
+  }
+
+  .logo {
+    font-size: 15px;
+  }
+
+  /* Nav tabs: allow horizontal scroll so all tabs remain accessible */
+  .header-nav {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;           /* Firefox */
+    flex-shrink: 1;
+  }
+  .header-nav::-webkit-scrollbar { display: none; }
+
+  .nav-tab {
+    padding: 4px 10px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  /* Hide secondary header chips; keep health + LLM status + market clock */
+  .header-live-chips .model-chip:not(:first-child):not(.health-chip):not(.llm-chip):not(.market-chip) {
+    display: none;
+  }
+
+  .header-right {
+    gap: 8px;
+  }
+
+  /* ── Signal cards grid ──────────────────────────────────────────────────── */
+  .signals-cards-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Signal level cells (1fr 1fr 1fr 1fr → 1fr 1fr) */
+  .signal-levels-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  /* ── Charts ─────────────────────────────────────────────────────────────── */
+  /* .charts-grid already collapses at 900px — no change needed here */
+
+  /* ── Settings layout: hide sidebar TOC, go full-width ───────────────────── */
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+  .settings-toc {
+    display: none;
+  }
+
+  /* ── Education layout: sidebar TOC → hidden, content full-width ─────────── */
+  .education-layout {
+    grid-template-columns: 1fr;
+  }
+
+  /* Edu reading grid: always single column on mobile */
+  .edu-reading-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* ── Analysis stepper ───────────────────────────────────────────────────── */
+  .stepper {
+    font-size: 12px;
+  }
+
+  /* ── Explorer page ──────────────────────────────────────────────────────── */
+  .explorer-topbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  /* ── Metric / stat tiles ────────────────────────────────────────────────── */
+  /* Auto-fill grids use minmax so they naturally wrap — reduce minimum so
+     tiles don't overflow on narrow screens */
+  [style*="grid-template-columns: repeat(auto-fit"] {
+    /* Can't override inline styles from JSX here — handled by column min-width */
+  }
+
+  /* ── Paper trading ──────────────────────────────────────────────────────── */
+  /* Tables are in .table-wrap { overflow-x: auto } — already scroll.
+     Just ensure the page doesn't add unwanted x-overflow at the page level. */
+  .app { overflow-x: hidden; }
+
+  /* ── Usage page summary row ─────────────────────────────────────────────── */
+  .usage-summary-row {
+    flex-direction: column;
+  }
+
+  /* ── Analysis result panels ─────────────────────────────────────────────── */
+  .analysis-result {
+    padding: 14px;
+  }
+
+  /* ── Modals and overlays ─────────────────────────────────────────────────── */
+  .modal-body, .modal-card {
+    width: 95vw;
+    max-width: 95vw;
+    padding: 16px;
+  }
+}
+
+/* ── Extra-small phones (≤420px) ────────────────────────────────────────────── */
+@media (max-width: 420px) {
+  .main {
+    padding: 8px;
+    gap: 10px;
+  }
+
+  .header-row {
+    padding: 0 8px;
+  }
+
+  .nav-tab {
+    padding: 3px 8px;
+    font-size: 11px;
+  }
+
+  .signal-levels-grid {
+    grid-template-columns: 1fr;
+  }
+}
