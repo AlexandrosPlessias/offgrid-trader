@@ -9,9 +9,11 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
   const [refreshing, setRefreshing]   = useState(false)
   const [progress,   setProgress]     = useState([])  // {step, message, ts}[]
   const [error,      setError]        = useState(null)
-  const [addStatus,       setAddStatus]       = useState({}) // ticker → 'adding'|'done'|'error'
-  const [tradeStatus,     setTradeStatus]     = useState({}) // ticker → 'trading'|'done'|'error'|string(err)
-  const [assetInfo,       setAssetInfo]       = useState({}) // ticker → {tradable, status, shortable, fractionable, exchange} | null
+  const [addStatus,       setAddStatus]       = useState({}) // ticker → 'adding'|'done'|'removing'
+  const [tradeStatus,     setTradeStatus]     = useState({}) // ticker → 'trading'|'done'|'error:<msg>'
+  const [assetInfo,       setAssetInfo]       = useState({}) // ticker → 'loading'|null|{tradable,status,...}
+  const [hideRestricted,  setHideRestricted]  = useState(false)
+  const [hideOTC,         setHideOTC]         = useState(false)
   const [expandedTicker,  setExpandedTicker]  = useState(null) // ticker whose score breakdown is open
   const [history,         setHistory]         = useState([])
   const [historyOpen,     setHistoryOpen]     = useState(false)
@@ -313,8 +315,39 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
         </div>
       )}
 
-      {candidates.length > 0 && (
-        <div className="card" style={{ overflowX: 'auto' }}>
+      {candidates.length > 0 && (() => {
+        // Apply UI filters — only when assetInfo is confirmed (not 'loading')
+        const displayedCandidates = candidates.filter(c => {
+          const a = assetInfo[c.ticker]
+          const confirmed = a && a !== 'loading'
+          if (confirmed) {
+            if (hideRestricted && (!a.tradable || a.status !== 'active' || (!a.shortable && !a.easy_to_borrow))) return false
+            if (hideOTC && a.exchange === 'OTC') return false
+          }
+          return true
+        })
+        const hiddenCount = candidates.length - displayedCandidates.length
+
+        return (
+        <>
+          {/* Filter toolbar */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 8, fontSize: 12, color: 'var(--text-dim)' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', userSelect: 'none' }}>
+              <input type="checkbox" checked={hideRestricted} onChange={e => setHideRestricted(e.target.checked)} />
+              Hide restricted
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', userSelect: 'none' }}>
+              <input type="checkbox" checked={hideOTC} onChange={e => setHideOTC(e.target.checked)} />
+              Hide OTC
+            </label>
+            {hiddenCount > 0 && (
+              <span style={{ color: 'var(--text-dim)', opacity: 0.6 }}>
+                {hiddenCount} ticker{hiddenCount !== 1 ? 's' : ''} hidden
+              </span>
+            )}
+          </div>
+
+          <div className="card" style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, tableLayout: 'fixed', minWidth: 680 }}>
             <colgroup>
               <col style={{ width: '7%'  }} />{/* Ticker  */}
@@ -339,7 +372,7 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
               </tr>
             </thead>
             <tbody>
-              {candidates.map((c) => {
+              {displayedCandidates.map((c) => {
                 const pctColor   = (c.percent_change || 0) >= 0 ? 'var(--green)' : 'var(--red)'
                 const scoreColor = c.score >= 75 ? 'var(--green)' : c.score >= 50 ? '#f59e0b' : 'var(--text-dim)'
                 const adding   = addStatus[c.ticker] === 'adding'
@@ -566,8 +599,10 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
               })}
             </tbody>
           </table>
-        </div>
-      )}
+          </div>{/* /.card table wrapper */}
+        </>
+        )
+      })()}
 
       {/* Score breakdown chart */}
       {candidates.length > 0 && (() => {
