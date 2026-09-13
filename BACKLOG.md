@@ -273,34 +273,156 @@ Surface *new* tickers to watch automatically from market trends, instead of rely
 
 ---
 
-## 6. Validate and clean up alert channels (Email + Telegram)
+## 6. Pluggable Notification & Alert Channel Integration
 
-Slim the alert layer down to the two channels worth supporting, then validate them end-to-end.
+A channel-agnostic notification system that dispatches rich, actionable alerts across independently toggleable channels whenever a significant event occurs.
 
-### Step 1 — Remove Slack
+---
 
-- Delete `backend/alerts.py` Slack code path and `send_slack_alert()`
-- Remove `SLACK_ENABLED` / `SLACK_WEBHOOK_URL` from `config.py`, `.env.example`, and all docs
-- Update smoke test to no longer reference Slack
+### Trigger events
 
-### Step 2 — Email (Gmail SMTP)
+| Event | When fired |
+|---|---|
+| **Discovery run completes** | Any `POST /discovery/refresh` SSE run finishes (scheduled or manual), regardless of candidate count |
+| **Candidate score exceeds threshold** | A discovered candidate's score ≥ `discovery_min_score` (global setting) — one notification per ticker per run |
+| **Order placed** | A paper or live order is submitted via the UI or the notification action button |
+| **Order filled** | Alpaca webhook delivers a `fill` or `partial_fill` event for an open order |
 
-- Configure App Password on a test Gmail account
-- Verify the formatted message (subject, body, entry/stop/target layout) arrives correctly
-- Test both enabled and disabled states via `.env`
+---
 
-### Step 3 — Telegram
+### Message content
 
-- Complete BotFather setup; document the two-step process (create bot → get chat ID)
-- Verify delivery to a personal chat and a group chat (group chat IDs are negative numbers)
-- Confirm the message format is readable on mobile
-- Deliver actionable notifications for new high-confidence signals, scan results, and paper-trading updates (fill / stop / target hit)
+Every notification must include — at minimum:
 
-### Step 4 — Test endpoint + history
+- **Top-N candidates** (N configurable per channel): ticker symbol, score (0–100), % change, short reasons list
+- **Run metadata**: source list (Alpaca / yfinance), total candidate count before and after scoring, timestamp
+- **Current market status**: US market open/closed, closes/opens in Xh Ym
+- Order notifications additionally include: direction (buy/sell), qty, fill price or limit price, order status
 
-- Add `POST /alerts/test` endpoint that fires a dummy signal through all enabled channels — no need to wait for a real signal to verify credentials
-- Add an `alert_log` table to the DB (channel, ticker, sent\_at, status) so the UI can show "last alert: Telegram · 2h ago"
-- Add rate-limiting: skip re-alerting the same ticker + direction within a configurable cooldown window (default: 1h)
+---
+
+### Interactive actions (where the channel supports it)
+
+| Channel | Supported action |
+|---|---|
+| Telegram | Inline keyboard buttons: **📄 Paper trade** / **💸 Live trade** — tapping routes the order through the existing order flow (`POST /paper/orders` or `/trade`), **not** a shortcut |
+| Email | Deep link in the message body pointing to the Discovery tab with the candidate pre-selected |
+
+Orders triggered by a notification **must** go through the same validation and confirmation path as the UI — no bypass of risk checks, no shortcut endpoints.
+
+---
+
+### Supported channels
+
+| Channel | Default | Credentials |
+|---|---|---|
+| **Telegram** (bot) | Disabled | `bot_token`, `chat_id` |
+| **Email** (SMTP) | Disabled | host, port, username, password, from-address, to-address |
+
+The channel registry must be **extensible** — adding a third channel (e.g. Pushover, ntfy.sh, Slack) requires:
+1. A new class implementing a `NotificationChannel` protocol (`.send(event, payload) → None`)
+2. A new DB-backed config block in Settings
+3. Zero changes to the core dispatch logic
+
+---
+
+### Architecture
+
+```
+NotificationDispatcher
+  ├── TelegramChannel        (backend/notifications/telegram.py)
+  ├── EmailChannel           (backend/notifications/email.py)
+  └── <future channels>
+
+backend/notifications/
+  __init__.py        # NotificationChannel protocol + registry
+  dispatcher.py      # dispatch(event, payload) — iterates enabled channels, isolates failures
+  telegram.py        # BotFather bot, inline keyboard builder, callback handler for order actions
+  email.py           # SMTP, Jinja2 HTML template
+  templates/
+    discovery.html   # Rich email template: top-N table, score bars, market status
+    order.html       # Order confirmation / fill notice
+```
+
+`dispatch()` catches all per-channel exceptions — one failing channel must **never** block another or propagate to the caller (discovery run, webhook handler).
+
+---
+
+### Settings (per channel)
+
+Configurable via the Settings page → new **Notifications** section and via DB-backed keys (no restart needed):
+
+| Setting | Scope | Default |
+|---|---|---|
+| `notifications_enabled` | Global on/off | `false` |
+| `telegram_enabled` | Channel toggle | `false` |
+| `telegram_bot_token` | Telegram credential | `""` |
+| `telegram_chat_id` | Telegram credential | `""` |
+| `email_enabled` | Channel toggle | `false` |
+| `email_smtp_host` | Email credential | `""` |
+| `email_smtp_port` | Email credential | `587` |
+| `email_username` | Email credential | `""` |
+| `email_password` | Email credential | `""` (stored encrypted) |
+| `email_from` | Email config | `""` |
+| `email_to` | Email config | `""` |
+| `notifications_top_n` | Per-channel override possible | `5` |
+| `notifications_min_score` | Falls back to `discovery_min_score` | inherit |
+| `notifications_cooldown_minutes` | De-dup same ticker + direction | `60` |
+
+---
+
+### API additions
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/settings/notifications` | Return all notification settings (passwords masked) |
+| `POST` | `/settings/notifications` | Update one or more settings |
+| `POST` | `/notifications/test` | Fire a dummy event through all enabled channels — validate credentials without waiting for a real event |
+| `GET` | `/notifications/log` | Paginated delivery history |
+| `POST` | `/notifications/telegram/callback` | Webhook for Telegram inline-button responses (order actions) |
+
+---
+
+### DB additions
+
+```sql
+CREATE TABLE notification_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel     TEXT NOT NULL,            -- 'telegram' | 'email'
+  event_type  TEXT NOT NULL,            -- 'discovery_complete' | 'candidate_scored' | 'order_placed' | 'order_filled'
+  ticker      TEXT,                     -- NULL for run-level events
+  payload     TEXT,                     -- JSON snapshot of what was sent
+  status      TEXT NOT NULL,            -- 'sent' | 'failed'
+  error       TEXT,                     -- error message on failure
+  sent_at     TEXT NOT NULL             -- ISO-8601 UTC
+);
+```
+
+The Settings / Notifications section shows a "Last sent" chip per channel (source: `notification_log`).
+
+---
+
+### Acceptance criteria
+
+1. **Per-channel configurability** — every channel is independently enabled/disabled via Settings; credentials are validated lazily (on first send, not on save) and errors surface in `notification_log`
+2. **Global min-score respected** — no notification fires for a candidate below `discovery_min_score`, even if the per-channel threshold is higher
+3. **Order actions use the same flow** — Telegram inline-button taps call the identical `POST /paper/orders` (or live equivalent) endpoint as the UI; they go through the same validation, same Alpaca submission, same order-log persistence
+4. **Channel failure isolation** — if Telegram is down, Email still fires; if both fail, the discovery run completes normally with errors recorded in `notification_log`
+5. **Test endpoint** — `POST /notifications/test` must deliver a dummy notification to every enabled channel and return per-channel success/failure in the response body
+6. **Cooldown de-dup** — the same ticker + direction does not trigger a second notification within the configured cooldown window (default 60 min), even across multiple discovery runs
+7. **No Slack** — remove `send_slack_alert()`, `SLACK_ENABLED`, and `SLACK_WEBHOOK_URL` from `backend/alerts.py`, `config.py`, `.env.example`, and all docs before shipping this item
+
+---
+
+### Implementation order
+
+1. **Housekeeping** — remove Slack code, update `.env.example` and docs
+2. **Protocol + dispatcher** — `NotificationChannel`, `NotificationDispatcher`, `notification_log` table
+3. **Email channel** — SMTP + HTML template; test via `POST /notifications/test`
+4. **Telegram channel** — bot send; inline-keyboard builder; callback webhook for order actions
+5. **Trigger wiring** — hook dispatcher into discovery SSE completion, score filter, Alpaca order webhook
+6. **Settings UI** — Notifications section in Settings page; last-sent chips; test button
+7. **Smoke tests** — mock channel adapters; verify isolation, cooldown, order routing, test endpoint
 
 ---
 

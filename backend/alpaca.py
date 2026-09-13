@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import urllib.parse
+import uuid
 from typing import Any
 
 import httpx
@@ -239,9 +240,10 @@ class AlpacaClient:
         }
         # Sanitise user-supplied strings before logging to prevent log-injection
         # (CodeQL py/log-injection: strip CR/LF that could forge log lines).
+        # entry_price/stop_2dp/tp_2dp are floats formatted with %.2f — CR/LF is impossible.
         safe_side = side.replace("\r", "").replace("\n", "")
         safe_ticker = ticker.replace("\r", "").replace("\n", "")
-        _log.info(
+        _log.info(  # lgtm [py/log-injection]
             "alpaca: placing %s %s qty=%d (notional=$%.0f @ $%.2f) stop=%.2f tp=%.2f",
             safe_side,
             safe_ticker,
@@ -266,7 +268,14 @@ class AlpacaClient:
 
     def cancel_order(self, alpaca_order_id: str) -> bool:
         """Cancel a pending order. Returns True on success."""
-        return self._delete(f"/v2/orders/{alpaca_order_id}")
+        # Validate UUID format before inserting into URL path.
+        # Alpaca order IDs are always UUIDs; normalising via uuid.UUID() also
+        # breaks any taint chain that CodeQL would track as partial SSRF.
+        try:
+            safe_id = str(uuid.UUID(str(alpaca_order_id)))
+        except (ValueError, AttributeError) as exc:
+            raise AlpacaError("cancel_order: invalid order ID format") from exc
+        return self._delete(f"/v2/orders/{safe_id}")
 
     def get_most_actives(self, top: int = 20) -> list[dict[str, Any]]:
         """Return the most-active stocks by volume from the Alpaca screener.

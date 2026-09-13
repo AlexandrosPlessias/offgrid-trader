@@ -178,10 +178,25 @@ Credentials can be set via `.env` **or** pasted directly in the Settings page. T
 
 > **Settings → 🔥 Trending Discovery** — configure the automatic ticker screener. See [trending-discovery.md](trending-discovery) for a full feature description.
 
+### Source selection
+
+Source selection uses **pill-style toggle buttons** (not a text field). Two pills are shown:
+
+| Pill | Provider | Notes |
+|---|---|---|
+| 🔵 **Alpaca** | Alpaca screener API (`most_actives`, `gainers/losers`) | Requires Alpaca credentials; falls back to yfinance automatically if credentials are absent or the screener returns HTTP 403 |
+| 🟡 **yfinance** | yfinance predefined screeners (`day_gainers`, `most_actives`, `day_losers`, `small_cap_gainers`) | No credentials required |
+
+Both can be active simultaneously. At least one must be enabled — the UI shows a warning if both are disabled.
+
+When both sources are active, candidates are interleaved round-robin before scoring, ensuring balanced representation from each source.
+
+### Settings
+
 | Setting | Default | Description |
 |---|---|---|
 | `discovery_enabled` | `false` | Run discovery on a schedule after each watchlist scan |
-| `discovery_sources` | `alpaca,yfinance` | Comma-separated candidate sources. `alpaca` requires API credentials; if unavailable the system falls back to `yfinance` automatically |
+| `discovery_sources` | `alpaca,yfinance` | Active sources (controlled by pill toggles in the UI). `alpaca` requires API credentials; if unavailable the system falls back to `yfinance` automatically |
 | `discovery_max_candidates` | `25` | Maximum candidates to score per run. Fetch pool is 2× this value |
 | `discovery_min_score` | `60` | Candidates scoring below this threshold are hidden in the UI (still stored) |
 | `discovery_interval_minutes` | `60` | Minimum minutes between scheduled runs (cooldown) |

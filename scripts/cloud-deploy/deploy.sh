@@ -26,8 +26,18 @@ fail()  { echo -e "${RED}✗ $*${NC}"; exit 1; }
 
 # ── Pre-flight checks ─────────────────────────────────────────────────────────
 command -v flyctl >/dev/null 2>&1 || fail "flyctl not found. Install: curl -L https://fly.io/install.sh | sh"
-command -v npx    >/dev/null 2>&1 || fail "npx not found. Install Node.js first."
-npx vercel --version >/dev/null 2>&1 || fail "vercel package unavailable via npx. Run: npm install -g vercel"
+command -v node   >/dev/null 2>&1 || fail "node not found. Install Node.js first."
+
+# Resolve a direct (non-npx) vercel binary so the Vercel MCP plugin cannot
+# intercept the call and cause a freeze.  Prefer a globally-installed binary;
+# install one if absent.
+if command -v vercel >/dev/null 2>&1; then
+  VERCEL="vercel"
+else
+  info "vercel not found globally — installing (one-time)..."
+  npm install -g vercel --silent
+  VERCEL="vercel"
+fi
 
 [[ -f fly.toml ]] || fail "fly.toml not found — run this script from the repo root."
 [[ -f frontend/.vercel/project.json ]] || fail "frontend/.vercel/project.json not found. Run: cd frontend && npx vercel link"
@@ -53,19 +63,68 @@ done
 # ── 2. Frontend → Vercel ──────────────────────────────────────────────────────
 echo
 info "Deploying frontend → Vercel"
+
+# Vercel CLI v39+ no longer reads the stored session token automatically when
+# running non-interactively.  Preference order:
+#   1. VERCEL_TOKEN env var (a long-lived API token from vercel.com/account/tokens)
+#   2. CLI session token written by `vercel login` (short-lived; may expire)
+# If the stored session token is expired the script fails with clear instructions
+# rather than a cryptic "token not valid" error from the Vercel CLI.
+if [[ -z "${VERCEL_TOKEN:-}" ]]; then
+  AUTH_FILE="${HOME}/.local/share/com.vercel.cli/auth.json"
+  if [[ -f "$AUTH_FILE" ]]; then
+    VERCEL_TOKEN=$(python3 -c "import json,sys; print(json.load(open('${AUTH_FILE}'))['token'])")
+    # Validate expiry stored in auth.json.
+    # Vercel CLI writes expiresAt as epoch-seconds (9–10 digits).
+    # Older/broken installs sometimes wrote epoch-milliseconds (13 digits).
+    # Detect by magnitude: values < 1e12 are seconds, otherwise milliseconds.
+    # A zero or missing expiresAt is treated as already-expired.
+    EXPIRED=$(python3 -c "
+import json, time
+d = json.load(open('${AUTH_FILE}'))
+raw = d.get('expiresAt', 0)
+exp = raw if raw < 1e12 else raw / 1000   # auto-detect seconds vs ms
+print('yes' if exp < time.time() else 'no')
+")
+    if [[ "$EXPIRED" == "yes" ]]; then
+      echo
+      echo -e "${RED}✗ Vercel session token has expired.${NC}"
+      echo "  Fix (choose one):"
+      echo "  a) Re-authenticate:  vercel login"
+      echo "     Then re-run:      make deploy"
+      echo "  b) Create a permanent API token at https://vercel.com/account/tokens"
+      echo "     Then export it:   export VERCEL_TOKEN=<your-token>"
+      echo "     Then re-run:      make deploy"
+      exit 1
+    fi
+    export VERCEL_TOKEN
+    info "Using Vercel session token from ${AUTH_FILE}"
+  else
+    fail "No VERCEL_TOKEN env var and no saved Vercel auth at ${AUTH_FILE}. Run: vercel login"
+  fi
+fi
+
+# Validate the token works before attempting the full deploy.
+if ! "$VERCEL" whoami --token="$VERCEL_TOKEN" &>/dev/null; then
+  echo -e "${RED}✗ Vercel token rejected by the API.${NC}"
+  echo "  Run 'vercel login' to refresh your session, or set VERCEL_TOKEN to a"
+  echo "  long-lived API token from https://vercel.com/account/tokens"
+  exit 1
+fi
+
 cd frontend
-# Vercel CLI prints a hash deployment URL during build; the clean production alias
-# (offgrid-trader.vercel.app) is updated automatically once the deploy succeeds.
-npx vercel deploy --prod
-# Read the production alias from the project — avoids parsing the hash URL from stdout.
-PROD_DOMAIN=$(npx vercel alias ls 2>/dev/null \
-    | grep -v "^source" \
-    | awk '{print $2}' \
-    | grep -v "vercel\.app.*vercel\.app" \
-    | grep "\.vercel\.app$" \
-    | head -1)
+# Two-step local deploy:
+#   1. Pull production env vars (VITE_API_URL etc.) so the build on Vercel's
+#      side picks up the right values — fast, never hangs.
+#   2. Deploy source to Vercel — Vercel builds on their infrastructure,
+#      which avoids running `vercel build` locally (that step runs npm install
+#      inside Vercel's wrapper and frequently freezes on developer machines).
+# The GHA workflow uses the pull→build→deploy-prebuilt pattern because GitHub
+# Actions runners are clean and fast; locally the simpler pull→deploy is fine.
+"$VERCEL" pull --yes --environment=production --token="$VERCEL_TOKEN"
+DEPLOY_URL=$("$VERCEL" deploy --prod --token="$VERCEL_TOKEN" 2>&1 | grep -o 'https://[^ ]*\.vercel\.app' | tail -1)
 cd ..
-FRONTEND_URL="https://${PROD_DOMAIN:-offgrid-trader.vercel.app}"
+FRONTEND_URL="${DEPLOY_URL:-https://offgrid-trader.vercel.app}"
 ok "Frontend deployed → ${FRONTEND_URL}"
 
 echo

@@ -15,6 +15,8 @@ Alpaca** — actionable signals automatically place bracket orders on a virtual
 $100 k account, with live market prices (price, VWAP, volume, day Δ%)
 updated every 30 s during market hours.
 
+Fully responsive — mobile ≤ 768px shows a hamburger nav drawer. Code split into focused modules: 9 backend route files, 31 frontend components, 16 smoke-test domain files.
+
 ### What MarketSage analyses for each ticker
 
 - **Price & volume** — current price, day change, volume ratio, 52-week range, MA5/MA20
@@ -31,6 +33,13 @@ updated every 30 s during market hours.
 - **Live watchlist prices** — Dashboard watchlist shows Price, Day Chg%, VWAP, Volume, H/L updated every 30 s during market hours via Alpaca market data API; polling stops when market is closed
 - **Paper Orders panel** — collapsible sidebar shows account equity, day P&L, open positions, and recent orders with cancel support
 - **Market clock** — header chip shows live market status (open/closed); scheduler and price polling are both market-hours gated
+
+### Mobile responsiveness
+
+- **Hamburger nav drawer** — replaces horizontal tabs on ≤ 768 px; sections: Navigation, Tools, External links
+- **Responsive Settings** — cards stack vertically on narrow viewports; no horizontal overflow
+- **Responsive Education / Glossary** — wide tables scroll within their container (`overflow-x: auto`)
+- **Paper panel** — starts collapsed on mobile (opens from the hamburger drawer)
 
 > ⚠️ **Not financial advice.** This project is for educational and research
 > purposes only. It does not constitute financial, investment, or trading
@@ -67,6 +76,16 @@ updated every 30 s during market hours.
 |---|---|
 | ![Paper Orders sidebar](docs/screenshots/11-dashboard-paper-orders.png) | ![Paper Trading settings](docs/screenshots/12-settings-paper-trading.png) |
 
+### Discovery & Mobile
+
+| Trending Discovery tab | Discovery Settings |
+|---|---|
+| ![Discovery — scored candidates](docs/screenshots/16-discovery.png) | ![Discovery settings — pill toggles](docs/screenshots/17-discovery-settings.png) |
+
+| Mobile — hamburger nav drawer |
+|---|
+| ![Mobile nav](docs/screenshots/18-mobile-hamburger.png) |
+
 ### Analysis deep-dive (Explorer sections)
 
 | Technical indicators — RSI · MACD · EMA across 1H / 4H / 1D | Financial health — balance sheet + D/E |
@@ -87,19 +106,28 @@ Full section-by-section walkthrough (10 screenshots) → **[docs/wiki/Home.md](d
 
 ```
 backend/
-├── config.py         # settings + thresholds + secrets from env (.env)
-├── data.py           # yfinance OHLCV + ta library -> indicators + market dict
-├── analysis.py       # prompt -> local Ollama /api/chat -> parsed JSON
-├── opportunities.py  # AI output + rule-based checks -> scored signals
-├── database.py       # SQLite: signals + analysis_log + app_settings + ticker_memory + paper_orders
-├── alerts.py         # Gmail SMTP + Slack webhook (confidence-gated)
-├── memory.py         # per-ticker MemoryLayer — persists prior scan context to DB
-├── alpaca.py         # Alpaca REST API client (paper trading + market data)
-├── skills/           # six pipeline skills (fetch, ai, detect, persist, paper_trade, alert)
-├── agent.py          # TickerAgent — runs skills with retry + memory
-├── orchestrator.py   # Orchestrator — prioritised watchlist dispatch, concurrency cap
-├── scheduler.py      # async, market-hours-aware scan loop (uses Orchestrator)
-└── main.py           # FastAPI app (endpoints + CORS + lifespan + SSE streaming)
+├── main.py           # FastAPI app init, lifespan, include_router() calls only
+├── routes/           # 9 domain routers
+│   ├── alpaca.py     # /settings/alpaca*, /paper/*
+│   ├── analysis.py   # /analyze*, /market-data*, /webhook*, /signals*
+│   ├── backtest.py   # /backtest*
+│   ├── data.py       # /data/*
+│   ├── discovery.py  # /discovery/*, /settings/discovery*
+│   ├── health.py     # GET /health, POST /auth/verify
+│   ├── settings.py   # /settings*
+│   ├── usage.py      # /usage, /provider/quota
+│   └── watchlist.py  # /watchlist*, /watchlist/groups*
+├── config.py         # settings + thresholds + secrets from env
+├── data.py           # yfinance + ta library → indicators + market dict
+├── analysis.py       # prompt → LLM → parsed JSON
+├── opportunities.py  # AI output + rule-based checks → scored signals
+├── database.py       # SQLite: all tables
+├── alerts.py         # Gmail SMTP + Telegram (confidence-gated)
+├── alpaca.py         # AlpacaClient — thin httpx wrapper
+├── memory.py         # per-ticker MemoryLayer
+├── skills/           # six pipeline skills
+├── agent.py          # TickerAgent
+└── orchestrator.py   # Orchestrator — concurrency cap
 ```
 
 Pipeline per ticker: **TickerAgent → FetchDataSkill → AIAnalysisSkill (retries) → OpportunityDetectSkill → PersistSkill → PaperTradeSkill → AlertSkill**.  

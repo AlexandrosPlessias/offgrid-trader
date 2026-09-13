@@ -28,6 +28,9 @@
  *   13-trading-page.png        ← NEW: Trading tab (account + charts)
  *   14-trading-orders.png      ← NEW: Orders table (expanded row)
  *   15-signal-card-order.png   ← NEW: Signal card with order status badge
+ *   16-discovery.png             ← NEW: Trending Discovery tab with scored candidates
+ *   17-discovery-settings.png    ← NEW: Discovery settings — source pill toggles
+ *   18-mobile-hamburger.png      ← NEW: Mobile 375px — hamburger nav drawer open
  *
  * Explorer — per-section (10), requires a saved analysis in history:
  *   explorer-01-pipeline.png  …  explorer-10-signals.png
@@ -100,7 +103,8 @@ async function login(page) {
 
 /** Navigate to a page and handle login if needed. */
 async function goto(page, url) {
-  await page.goto(url, { waitUntil: 'networkidle' });
+  // 'load' is faster and more reliable than 'networkidle' on pages with polling APIs
+  await page.goto(url, { waitUntil: 'load', timeout: 45000 });
   await login(page);
 }
 
@@ -114,12 +118,21 @@ const page    = await ctx.newPage();
 
 await shot(page, '01-dashboard.png', async () => {
   await goto(page, BASE);
-  await page.waitForTimeout(1500);
+  // Wait for watchlist, account stats, and signals to load
+  // The app mounts multiple views at once; wait for actual data to replace skeletons
+  await page.waitForTimeout(12000);
 });
 
 await shot(page, '02-explorer.png', async () => {
   await page.click('text=Explorer');
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(800);
+  // Open the analysis history panel so it shows in the screenshot
+  try {
+    const historyHeader = page.locator('.history-panel-header').first();
+    await historyHeader.waitFor({ timeout: 4000 });
+    await historyHeader.click();
+    await page.waitForTimeout(600);
+  } catch { console.warn('⚠  History panel header not found'); }
 });
 
 await shot(page, '03-learn.png', async () => {
@@ -134,7 +147,8 @@ await shot(page, '04-learn-expanded.png', async () => {
 
 await shot(page, '05-settings.png', async () => {
   await goto(page, BASE);
-  await page.locator('.tool-btn').last().click();
+  // Settings nav button is a gear icon SVG with title="Settings" — no text label
+  await page.locator('button[title="Settings"]').click();
   await page.waitForTimeout(700);
 });
 
@@ -190,6 +204,59 @@ await shot(page, '15-signal-card-order.png', async () => {
     await page.waitForTimeout(600);
   } catch { console.warn('⚠  No signal cards found — screenshotting current view'); }
 });
+
+// ── 2b. Discovery / Trending tab ─────────────────────────────────────────────
+
+await shot(page, '16-discovery.png', async () => {
+  await goto(page, BASE);
+  await page.click('text=Learn');        // navigate away first to reset
+  await page.waitForTimeout(300);
+  // Look for Trending or Discovery tab — label may vary
+  try {
+    await page.click('button:has-text("Trending"), button:has-text("Discovery"), text=Trending, text=Discovery');
+  } catch {
+    await page.click('text=Dashboard');
+  }
+  await page.waitForTimeout(2000);
+});
+
+await shot(page, '17-discovery-settings.png', async () => {
+  // Still on Discovery page — click the inline Settings shortcut if visible,
+  // otherwise navigate to Settings → Discovery section
+  try {
+    const inlineSettings = page.locator('button:has-text("Discovery Settings"), button:has-text("⚙")').first();
+    const visible = await inlineSettings.isVisible().catch(() => false);
+    if (visible) {
+      await inlineSettings.click();
+      await page.waitForTimeout(800);
+    } else {
+      await goto(page, BASE);
+      await page.locator('button[title="Settings"]').click();
+      await page.waitForTimeout(600);
+      await page.locator('text=Discovery').first().click();
+      await page.waitForTimeout(600);
+    }
+  } catch { console.warn('⚠  Discovery settings not found — screenshotting current view'); }
+});
+
+// ── 2c. Mobile — hamburger nav drawer (375 × 812) ────────────────────────────
+
+const mobileCtx  = await browser.newContext({ viewport: { width: 375, height: 812 } });
+const mobilePage = await mobileCtx.newPage();
+
+await shot(mobilePage, '18-mobile-hamburger.png', async () => {
+  await goto(mobilePage, BASE);
+  await mobilePage.waitForTimeout(1500);
+  // Open the hamburger drawer
+  try {
+    const hamburger = mobilePage.locator('.hamburger-btn, button[aria-label*="menu" i]').first();
+    await hamburger.waitFor({ timeout: 4000 });
+    await hamburger.click();
+    await mobilePage.waitForTimeout(600);
+  } catch { console.warn('⚠  Hamburger button not found'); }
+});
+
+await mobileCtx.close();
 
 // ── 4. Explorer with a saved analysis loaded ─────────────────────────────────
 
@@ -251,14 +318,14 @@ await shot(page, '07-backtesting-results.png', async () => {
 
 await shot(page, '08-settings-ai-provider.png', async () => {
   await goto(page, BASE);
-  await page.locator('.tool-btn').last().click();
+  await page.locator('button[title="Settings"]').click();
   await page.waitForTimeout(600);
   try { await page.locator('text=AI Provider').first().click(); await page.waitForTimeout(800); } catch {}
 });
 
 await shot(page, '09-settings-ai-usage.png', async () => {
   await goto(page, BASE);
-  await page.locator('.tool-btn').last().click();
+  await page.locator('button[title="Settings"]').click();
   await page.waitForTimeout(600);
   try { await page.locator('text=AI Usage').first().click(); await page.waitForTimeout(1200); } catch { console.warn('⚠  AI Usage not found'); }
 });
@@ -279,12 +346,12 @@ await shot(page, '11-dashboard-paper-orders.png', async () => {
 
 await shot(page, '12-settings-paper-trading.png', async () => {
   await goto(page, BASE);
-  await page.locator('.tool-btn').last().click();
+  await page.locator('button[title="Settings"]').click();
   await page.waitForTimeout(600);
   try { await page.locator('text=Paper Trading').first().click(); await page.waitForTimeout(800); } catch { console.warn('⚠  Paper Trading nav item not found'); }
 });
 
 await browser.close();
-console.log('\n✅ All screenshots saved to:', OUT);
+console.log('\n✅ 28 screenshots saved to:', OUT);
 console.log('\nTo run against production:');
 console.log('  SCREENSHOT_BASE_URL=https://offgrid-trader.vercel.app ADMIN_TOKEN=<token> node capture.mjs');

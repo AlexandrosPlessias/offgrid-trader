@@ -37,6 +37,17 @@ After each scan, the scheduler syncs open Alpaca paper orders (status, fill pric
 
 ---
 
+## Recent highlights
+
+- **Mobile-responsive UI** — hamburger nav drawer activates on ≤ 768 px; Settings page and Glossary reflow for small screens.
+- **Discovery: Watch / Trade icon buttons** — each candidate row in the Trending tab has a Watch toggle (👁 / ✓ / ⏳) and a state-driven Trade button (🔍 Checking → 📈 Trade / ⚠ Restricted / 🚫 Blocked → ⏳ Placing → ✅ Done / ❌ Failed) with tooltips.
+- **Discovery: Hide Restricted / Hide OTC** — client-side checkboxes filter candidates by tradability and exchange; hidden count shown inline.
+- **Discovery: round-robin dual-source fetch** — when both Alpaca and yfinance are enabled, candidates are interleaved `zip_longest` so any scoring prefix is balanced ~50/50.
+- **Sweet-Spot Refactor** — `App.jsx` split into 31 files (pages / components / hooks / utils); `main.py` split into 9 routers under `routes/`; `smoke_test.py` reorganised into 16 domain files under `tests/smoke/`.
+- **Security** — SSRF fix on Alpaca URL path interpolation; all ticker symbols normalised through `_clean_ticker()` before use in HTTP paths or log lines.
+
+---
+
 ## Screenshots
 
 | Dashboard (live prices + Paper Orders) | Learn |
@@ -132,6 +143,9 @@ See [docs/screenshots/README.md](../screenshots/README.md) for full instructions
 
 ```
 backend/
+├── main.py           — FastAPI app init, lifespan, include_router() calls
+├── routes/           — 9 routers (health, watchlist, settings, alpaca, analysis,
+│                       data, discovery, usage, backtest) + shared _models.py
 ├── config.py         — env-driven settings, thresholds, secrets
 ├── data.py           — yfinance OHLCV + ta library → indicators + market dict
 ├── analysis.py       — prompt builder → Ollama /api/chat → parsed JSON
@@ -146,11 +160,15 @@ backend/
 ├── skills/           — five pipeline skills (fetch_data, ai_analysis, opportunity_detect,
 │                       persist, alert)
 ├── prompts/          — system_prompt.md (loaded at runtime), user_prompt_structure.md
-├── backtest.py       — backtesting engine: replay, ATR bracket, outcome evaluation, metrics
-└── main.py           — FastAPI: endpoints, SSE streaming, lifespan, OTEL setup
+└── backtest.py       — backtesting engine: replay, ATR bracket, outcome evaluation, metrics
 
 frontend/src/
-├── App.jsx           — all UI components + custom hooks
+├── App.jsx           — routing shell only (~100 lines)
+├── components/       — analysis/, charts/, shared/, signals/ sub-folders
+├── hooks/            — useAnalyzeStream.js, usePolling.js
+├── pages/            — BacktestPage, EducationPage, ExplorerPage, PaperTradingPage,
+│                       SettingsPage, TrendingPage, UsageSection
+├── utils/            — api.js, colors.js, fmt.js
 └── index.css         — component styles
 
 infra/
@@ -161,8 +179,7 @@ infra/
 └── start-infra.sh
 
 docs/wiki/            — you are here
-tests/
-└── smoke_test.py     — offline regression test (no live APIs); run with `make smoke`
+tests/smoke/          — domain-split smoke tests (16 files); run with `make smoke`
 ```
 
 ---
