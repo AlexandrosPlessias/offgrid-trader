@@ -119,3 +119,53 @@ def test_alpaca_bracket_order(check):
         import traceback as _tb15
 
         check("Alpaca bracket order smoke", False, _tb15.format_exc()[-400:])
+
+
+def test_alpaca_cancel_order_id_validation(check):
+    # --------------------------------------------------------------------------- #
+    # 15c. cancel_order — only UUID order IDs reach the HTTP layer (SSRF guard)
+    # --------------------------------------------------------------------------- #
+    print("\n[15c] Alpaca cancel_order — order ID validation")
+
+    try:
+        from backend.alpaca import AlpacaClient as _AlpacaClient
+        from backend.alpaca import AlpacaError as _AlpacaError
+
+        _deleted: list[str] = []
+
+        class _FakeAlpaca(_AlpacaClient):
+            def __init__(self):
+                super().__init__(
+                    key_id="test-key",
+                    secret_key="test-secret",  # noqa: S106
+                    base_url="https://paper-api.alpaca.markets",
+                )
+
+            def _delete(self, path):
+                _deleted.append(path)
+                return True
+
+        _client = _FakeAlpaca()
+
+        for _bad in ("https://evil.example.com/v2/orders/1", "../../v2/account", "", "not-a-uuid"):
+            try:
+                _client.cancel_order(_bad)
+                _raised = False
+            except _AlpacaError:
+                _raised = True
+            check(f"cancel_order rejects {_bad!r}", _raised)
+
+        check("cancel_order sends no delete for invalid IDs", _deleted == [], detail=str(_deleted))
+
+        _valid = "3d0a2b1c-4e5f-4a6b-8c9d-0e1f2a3b4c5d"
+        check("cancel_order forwards valid UUID", _client.cancel_order(_valid) is True)
+        check(
+            "cancel_order delete path uses the UUID",
+            _deleted == [f"/v2/orders/{_valid}"],
+            detail=str(_deleted),
+        )
+
+    except Exception:
+        import traceback as _tb15c
+
+        check("Alpaca cancel_order validation smoke", False, _tb15c.format_exc()[-400:])

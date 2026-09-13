@@ -536,6 +536,7 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                                 onClick={() => added ? handleUnwatch(c.ticker) : handleAdd(c.ticker)}
                                 disabled={adding || removing}
                                 title={watchTitle}
+                                aria-label={watchTitle}
                                 style={{ ...iconBtn, opacity: removing ? 0.45 : 1 }}
                               >
                                 {watchIcon}
@@ -547,6 +548,7 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                                 onClick={() => handleTrade(c)}
                                 disabled={trading || traded || blocked || isChecking}
                                 title={tradeTitle}
+                                aria-label={tradeTitle}
                                 style={{
                                   ...iconBtn,
                                   opacity: (traded || blocked || isChecking) ? 0.45 : 1,

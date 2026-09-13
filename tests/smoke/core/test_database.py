@@ -30,8 +30,11 @@ def test_database_roundtrip(check):
         }
     )
     check("save_signal returns id", isinstance(sig_id, int) and sig_id > 0)
-    recent = database.get_recent_signals(limit=5, ticker="TEST")
-    check("get_recent_signals round-trip", len(recent) == 1 and recent[0]["ticker"] == "TEST")
+    recent, recent_total = database.get_recent_signals(limit=5, ticker="TEST")
+    check(
+        "get_recent_signals round-trip",
+        len(recent) == 1 and recent[0]["ticker"] == "TEST" and recent_total == 1,
+    )
 
     database.save_analysis("TEST", {"trend": "bullish"}, {"ticker": "TEST"})
     hist = database.get_analysis_history("TEST")
@@ -48,8 +51,8 @@ def test_database_roundtrip(check):
 
     deleted_sig = database.delete_signal(sig_id)
     check("delete_signal returns True", deleted_sig is True)
-    after_del = database.get_recent_signals(limit=5, ticker="TEST")
-    check("signal gone after delete", len(after_del) == 0)
+    after_del, after_del_total = database.get_recent_signals(limit=5, ticker="TEST")
+    check("signal gone after delete", len(after_del) == 0 and after_del_total == 0)
 
     analysis_id = hist[0]["id"]
     deleted_an = database.delete_analysis(analysis_id)

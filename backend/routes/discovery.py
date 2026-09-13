@@ -50,6 +50,34 @@ class DiscoverySettingRequest(BaseModel):
     )
 
 
+_VALID_SOURCES = ("alpaca", "yfinance")
+
+
+def _clean_sources(raw: str) -> str:
+    """Validate a comma-separated discovery source list.
+
+    Returns the normalised CSV (lower-case, de-duplicated, original order).
+    Raises ``HTTPException(400)`` when the selection is empty or contains an
+    unknown source — persisting those would leave the scheduler with nothing
+    to fetch.
+    """
+    cleaned: list[str] = []
+    for part in raw.split(","):
+        source = part.strip().lower()
+        if not source:
+            continue
+        if source not in _VALID_SOURCES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"invalid discovery source; allowed: {', '.join(_VALID_SOURCES)}",
+            )
+        if source not in cleaned:
+            cleaned.append(source)
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="at least one discovery source is required")
+    return ",".join(cleaned)
+
+
 def _discovery_config_response() -> dict[str, Any]:
     """Return current discovery settings (DB overrides env defaults)."""
     from backend.config import get_settings as _cfg
@@ -80,7 +108,7 @@ def save_discovery_settings(request: DiscoverySettingRequest) -> dict[str, Any]:
     if request.enabled is not None:
         set_setting("discovery_enabled", "true" if request.enabled else "false")
     if request.sources is not None:
-        set_setting("discovery_sources", request.sources.strip())
+        set_setting("discovery_sources", _clean_sources(request.sources))
     if request.max_candidates is not None:
         set_setting("discovery_max_candidates", str(request.max_candidates))
     if request.min_score is not None:

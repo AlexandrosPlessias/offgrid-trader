@@ -232,7 +232,9 @@ def fetch_candidates(
 ) -> list[dict[str, Any]]:
     """Fetch and normalise raw candidate tickers from the configured sources.
 
-    Results are cached ~60 min keyed by ``discovery:candidates:{YYYY-MM-DD-HH}``.
+    Results are cached ~60 min keyed by
+    ``discovery:candidates:{sources}:{limit}:{YYYY-MM-DD-HH}`` so a different
+    source selection or limit never reuses another request's entry.
     Pass ``force=True`` to skip the cache and always fetch fresh data (used by
     the explicit ``POST /discovery/refresh`` endpoint).
 
@@ -244,7 +246,9 @@ def fetch_candidates(
     from .data import _cache_get, _cache_set
 
     now = datetime.now(timezone.utc)
-    cache_key = f"discovery:candidates:{now.strftime('%Y-%m-%d-%H')}"
+    source_list = [s.strip().lower() for s in sources.split(",") if s.strip()]
+    source_part = "+".join(sorted(set(source_list))) or "none"
+    cache_key = f"discovery:candidates:{source_part}:{limit}:{now.strftime('%Y-%m-%d-%H')}"
     if not force:
         cached = _cache_get(cache_key, ttl_minutes=60)
         if cached is not None:
@@ -252,8 +256,6 @@ def fetch_candidates(
             if progress_callback:
                 progress_callback("fetch", f"Candidates loaded from cache ({len(cached)} items)")
             return cached
-
-    source_list = [s.strip().lower() for s in sources.split(",") if s.strip()]
 
     # Collect each source into its own bucket so proportional slots can be
     # allocated below — appending to a single list would starve later sources

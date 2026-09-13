@@ -48,9 +48,7 @@ def watchlist() -> dict[str, Any]:
 
 @router.post("/watchlist")
 def add_ticker(request: AddTickerRequest) -> dict[str, Any]:
-    ticker = request.ticker.strip().upper()
-    if not ticker:
-        raise HTTPException(status_code=400, detail="ticker required")
+    ticker = _clean_ticker(request.ticker)
 
     added: list = json.loads(get_setting("watchlist_added", "[]"))
     removed: list = json.loads(get_setting("watchlist_removed", "[]"))

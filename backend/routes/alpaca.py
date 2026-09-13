@@ -322,8 +322,9 @@ def close_paper_position(ticker: str) -> dict[str, Any]:
         qty_total = abs(float(qty_total_raw))
         qty_avail = abs(float(qty_avail_raw)) if qty_avail_raw is not None else qty_total
 
-        # Use available qty; if truly zero (all shares locked), nothing to close
-        close_qty = qty_avail if qty_avail > 0 else qty_total
+        # Use available qty only; if it's zero (all shares locked in pending
+        # bracket legs) there is nothing we can close right now.
+        close_qty = qty_avail
         if close_qty <= 0:
             raise HTTPException(
                 status_code=400,

@@ -58,6 +58,12 @@ export function useAnalyzeStream() {
             }
             return s
           }))
+        } else if (evt.type === 'error') {
+          setError(evt.msg || evt.message || 'Analysis failed')
+          setSteps(prev => prev && prev.map(s => ({
+            ...s,
+            status: s.status === 'running' ? 'error' : s.status,
+          })))
         }
       }
     } catch (e) {

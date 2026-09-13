@@ -155,11 +155,18 @@ async def sync_paper_orders() -> None:
 
         # Compute realized P&L when a close order fills.
         # Close orders (placed by Instant Cashout) have entry_price stored at
-        # placement time.  Once Alpaca fills the order we know the actual exit
-        # price and can calculate the true P&L.
+        # placement time and no ``notional`` — opening bracket orders store
+        # both, so the ``notional is None`` check keeps entry fills out of the
+        # closed-trade totals.  Once Alpaca fills the order we know the actual
+        # exit price and can calculate the true P&L.
         if ao.get("status") == "filled" and filled_avg:
             db_order = get_paper_order_by_alpaca_id(order_id)
-            if db_order and db_order.get("entry_price") and db_order.get("realized_pnl") is None:
+            if (
+                db_order
+                and db_order.get("entry_price")
+                and db_order.get("notional") is None
+                and db_order.get("realized_pnl") is None
+            ):
                 entry = float(db_order["entry_price"])
                 fill = float(filled_avg)
                 qty = float(filled_qty or db_order.get("qty") or 0)
