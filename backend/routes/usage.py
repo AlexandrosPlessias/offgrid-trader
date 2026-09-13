@@ -7,7 +7,6 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from backend.config import get_settings
 from backend.database import get_setting, get_usage_stats
 
 router = APIRouter()

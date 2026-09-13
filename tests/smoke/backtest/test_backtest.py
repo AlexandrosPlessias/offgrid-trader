@@ -355,11 +355,6 @@ def test_backtest_engine(check):
 
         from backend import analysis as _analysis_mod
 
-        _fallback_events: list[dict] = []
-
-        def _mock_emit(evt):
-            _fallback_events.append(evt)
-
         # Patch call_llm to raise LLMError on the first call, succeed on the second
         _call_count = {"n": 0}
 

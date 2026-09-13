@@ -84,13 +84,10 @@ def test_discovery(check):
         )
 
         # 16d. fetch_candidates — caches result; second call returns cache
-        _cache_key16 = (
-            f"discovery:candidates:{__import__('datetime').datetime.utcnow().strftime('%Y-%m-%d-%H')}"
-        )
         with _mock16.patch("yfinance.screen", return_value=_YF_SCREEN_RESPONSE) as _msc16:
             with _mock16.patch("backend.discovery._fetch_from_alpaca", return_value=([], None)):
                 _c1 = fetch_candidates(sources="alpaca,yfinance", limit=50)
-                _c2 = fetch_candidates(sources="alpaca,yfinance", limit=50)  # from cache
+                _ = fetch_candidates(sources="alpaca,yfinance", limit=50)  # from cache; result unused
         check(
             "16d. fetch_candidates returns non-empty list",
             len(_c1) >= 1,

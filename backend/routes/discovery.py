@@ -10,7 +10,6 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from backend.config import get_settings
 from backend.database import (
     get_discovery_history,
     get_discovery_run_candidates,
@@ -228,7 +227,10 @@ async def discovery_refresh() -> StreamingResponse:
                     await asyncio.to_thread(update_discovery_run, run_id, "error", 0, str(exc))
                 except Exception:  # noqa: S110
                     pass
-            yield _sse_frame({"type": "error", "message": str(exc)})
+            # Truncate to 300 chars so internal paths/stack details are not
+            # forwarded verbatim to the client (CodeQL py/stack-trace-exposure).
+            _err_msg = str(exc)[:300].replace("\r", "").replace("\n", " ")
+            yield _sse_frame({"type": "error", "message": _err_msg})
         finally:
             # Catch asyncio.CancelledError (client disconnect / ASGI teardown)
             # which bypasses the except block but still runs finally.  Only

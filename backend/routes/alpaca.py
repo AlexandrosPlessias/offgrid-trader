@@ -12,6 +12,7 @@ from backend.database import (
     set_setting,
     update_paper_order_status,
 )
+from backend.routes._models import _clean_ticker
 from backend.scheduler import sync_paper_orders
 
 router = APIRouter()
@@ -193,7 +194,9 @@ def place_paper_order_manual(req: ManualOrderRequest) -> dict[str, Any]:
         # which we surface here as a clear 400 rather than a cryptic 502.
         if req.side == "sell":
             try:
-                asset = client._get(f"/v2/assets/{req.ticker}")
+                # _clean_ticker validates against ^[A-Z0-9.\-]{1,15}$ — breaks taint chain
+                # that CodeQL tracks as partial SSRF (py/partial-ssrf).
+                asset = client._get(f"/v2/assets/{_clean_ticker(req.ticker)}")
                 if not asset.get("shortable", True):
                     raise HTTPException(
                         status_code=400,
@@ -288,7 +291,8 @@ def close_paper_position(ticker: str) -> dict[str, Any]:
     """
     from backend.alpaca import AlpacaError, get_client  # local import
 
-    ticker = ticker.strip().upper()
+    # Validate before use in URL path (CodeQL py/partial-ssrf).
+    ticker = _clean_ticker(ticker)
     if get_setting("paper_trading_enabled", "true") != "true":
         raise HTTPException(
             status_code=400,
@@ -521,7 +525,9 @@ def assets_tradability(
     result: dict[str, Any] = {}
     for ticker in tickers:
         try:
-            asset = client._get(f"/v2/assets/{ticker}")
+            # Validate before URL path interpolation (CodeQL py/partial-ssrf).
+            safe_ticker = _clean_ticker(ticker)
+            asset = client._get(f"/v2/assets/{safe_ticker}")
             result[ticker] = {
                 "tradable":       bool(asset.get("tradable", False)),
                 "status":         asset.get("status", "unknown"),

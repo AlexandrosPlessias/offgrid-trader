@@ -28,14 +28,14 @@ os.environ["SLACK_ENABLED"] = "false"
 # Section 1 — Import all backend modules; fail fast if any is missing.
 # --------------------------------------------------------------------------- #
 try:
-    from backend import (  # noqa: E402
-        alerts,
-        analysis,
-        config,
-        data,
+    from backend import (  # noqa: E402, F401
+        alerts,      # noqa: F401  — import-existence check; not referenced directly
+        analysis,    # noqa: F401
+        config,      # noqa: F401
+        data,        # noqa: F401
         database,
         opportunities,
-        scheduler,
+        scheduler,   # noqa: F401
     )
     from backend.main import app  # noqa: E402
 except Exception as exc:  # pragma: no cover
