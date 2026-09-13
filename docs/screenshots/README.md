@@ -22,6 +22,22 @@ Captured with headless Chromium via [Playwright](https://playwright.dev).
 | `11-dashboard-paper-orders.png` | Dashboard — Paper Orders collapsible sidebar showing account equity, positions, and recent orders |
 | `12-settings-paper-trading.png` | Settings — Paper Trading section with Alpaca credentials, position size, and Test Connection button |
 
+### Trading
+
+| File | Content |
+|---|---|
+| `13-trading-page.png` | Trading tab — account metrics tiles, equity curve chart, and positions table |
+| `14-trading-orders.png` | Trading tab — Orders table with first row expanded showing fill details |
+| `15-signal-card-order.png` | Dashboard — Signal card with order status badge |
+
+### Discovery & Mobile
+
+| File | Content |
+|---|---|
+| `16-discovery.png` | Trending Discovery tab — scored candidate table with Watch/Trade icon buttons, source badges, score bars, Hide Restricted/OTC toggles |
+| `17-discovery-settings.png` | Settings — Discovery section with 🔵 Alpaca / 🟡 yfinance pill toggles, min-score slider, candidate count |
+| `18-mobile-hamburger.png` | Mobile (375 × 812 px) — hamburger ☰ nav drawer open showing Navigation, Tools, and External sections |
+
 ### Explorer — section walkthrough (AAPL)
 
 | File | Content |
@@ -84,7 +100,7 @@ node capture.mjs
 node docs/screenshots/capture.mjs
 ```
 
-All 22 screenshots are written to `docs/screenshots/` next to the script.
+All 28 screenshots are written to `docs/screenshots/` next to the script.
 Existing files are overwritten — safe to re-run any time.
 
 ### What the script does

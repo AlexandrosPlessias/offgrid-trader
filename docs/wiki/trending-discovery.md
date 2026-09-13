@@ -33,6 +33,13 @@ yfinance screen ───┘                                         │
 If Alpaca returns an error (including HTTP 403 on the free tier), the system
 falls back to yfinance transparently.
 
+### How sources are merged
+
+When both sources are enabled, candidates from Alpaca and yfinance are interleaved
+round-robin (`zip_longest`) before the scoring pool is built. This means any prefix
+of the scoring pool is balanced ~50/50 Alpaca/yfinance. Previously, all Alpaca
+candidates filled the pool before any yfinance candidates were scored.
+
 ### Scoring (0-100, deterministic)
 
 | Component | Max | Logic |
@@ -138,10 +145,35 @@ Manage named watchlist groups (e.g. "Semiconductors", "AI").
 |---|---|
 | **Run summary card** | Shows timestamp, candidate count, source breakdown (`N from Alpaca · M from yfinance`), top score, avg score, and top-5 ticker chips |
 | **Live step log** | Real-time SSE progress — fetch counts, per-ticker `[N/total] TICKER → score` scoring, `⚠️` amber warnings |
-| **Candidate table** | Ticker, Price, Change, Volume, Score (bar), Reasons, Source badge, + Watch |
+| **Candidate table** | Ticker, Price, Change, Volume, Score (bar), Reasons, Source (provider pill — `🔵 Alpaca` or `🟡 yfinance`; full screener name on hover), Watch icon button, Trade icon button |
+| **Hide Restricted / Hide OTC** | Two checkboxes above the candidate table; hidden count shown inline; applies only to tickers with confirmed asset info (tickers still checking are never hidden) |
 | **Score breakdown** | Click the Score cell to expand per-component bars (Momentum / Volume / Trend / RSI/MACD) with earned/max, progress bar, and the matching reason as a caption |
-| **Run history** | Collapsible section at page bottom; click any ✅ row to expand candidates with 🔵 Alpaca / 🟡 yfinance source badges, + Watch, and ticker → Explorer deep-link |
+| **Run history** | Collapsible section at page bottom; the **Details** column shows `▼ view candidates` / `▲ hide` for successful runs and the error message in red for failed runs; Status shows icon-only for errors (no redundant text); expand any ✅ row to see candidates with source badges, Watch button, and ticker → Explorer deep-link |
 | **Settings deep-link** | ⚙ Settings button navigates to Settings and scrolls to the Discovery section |
+
+#### Watch button
+
+Each candidate row includes an icon-only Watch button with tooltip:
+
+| State | Icon | Action |
+|---|---|---|
+| Not in watchlist | 👁 | Click to add ticker to watchlist |
+| Already in watchlist | ✓ (green) | Click again to remove (`DELETE /watchlist/{ticker}`) |
+| Request in-flight | ⏳ | Disabled while request is pending |
+
+#### Trade button
+
+The Trade button is state-driven and reflects asset tradability retrieved from the Alpaca asset info endpoint:
+
+| State | Icon | Condition | Clickable |
+|---|---|---|---|
+| Checking | 🔍 | Asset info pre-fetch in-flight | No |
+| Trade | 📈 | Asset is tradable on Alpaca | Yes — click to place bracket order |
+| Restricted | ⚠ | `tradable=true` but `shortable=false && easy_to_borrow=false` | Yes (amber) |
+| Blocked | 🚫 | Non-tradable on Alpaca | No |
+| Placing | ⏳ | Order submission in-flight | No |
+| Done | ✅ | Order placed successfully | — |
+| Failed | ❌ | Order failed | Hover tooltip shows error reason |
 
 ### Price enrichment
 
