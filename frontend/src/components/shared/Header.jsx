@@ -164,14 +164,18 @@ export default function Header({ health, usage, btTodayTokens = 0, activeView, o
         {!health && (
           <span className="live-chip live-chip-connecting">connecting…</span>
         )}
+
+        {/* 1. System health ──────────────────────────────────────────── */}
         {health && (
           <span
             className={`live-chip live-chip-api ${ok ? 'live-chip-api-ok' : 'live-chip-api-err'}`}
-            title={ok ? 'Backend API is healthy' : 'Backend API error'}
+            title={ok ? 'Backend services are healthy' : 'Backend service error — check logs'}
           >
-            {ok ? '✅' : '🔴'} API
+            {ok ? '✅' : '🔴'} System
           </span>
         )}
+
+        {/* 2. US Market ─────────────────────────────────────────────── */}
         {health && (
           <span
             className={`live-chip ${open ? 'live-chip-market-open' : 'live-chip-market-closed'}`}
@@ -184,11 +188,66 @@ export default function Header({ health, usage, btTodayTokens = 0, activeView, o
             {!open && openIn  && <span style={{ fontWeight: 400, opacity: 0.75, marginLeft: 5 }}>· opens in {openIn}</span>}
           </span>
         )}
+
+        {/* 3. Scanner ───────────────────────────────────────────────── */}
+        {health && (() => {
+          const sched    = health.scheduler ?? {}
+          const running  = sched.running ?? false
+          const lastRun  = sched.last_run ? new Date(sched.last_run).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null
+          const nextRun  = sched.next_run ? new Date(sched.next_run).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null
+          const interval = sched.scan_interval_minutes ?? null
+          const title    = [
+            running ? 'Signal scanner active' : 'Signal scanner stopped',
+            interval ? `Interval: ${interval} min` : null,
+            lastRun  ? `Last scan: ${lastRun}` : null,
+            nextRun  ? `Next scan: ${nextRun}` : null,
+          ].filter(Boolean).join('\n')
+          return (
+            <span className={`live-chip ${running ? 'live-chip-market-open' : 'live-chip-market-closed'}`} title={title}>
+              🤖 Scanner: {running ? 'Active' : 'Off'}
+              {running && nextRun && <span style={{ fontWeight: 400, opacity: 0.75, marginLeft: 5 }}>· next {nextRun}</span>}
+            </span>
+          )
+        })()}
+
+        {/* 4. Discovery ─────────────────────────────────────────────── */}
+        {health && (() => {
+          const sched    = health.scheduler ?? {}
+          const lastDisc = sched.last_discovery ? new Date(sched.last_discovery).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null
+          const nextDisc = sched.next_discovery ? new Date(sched.next_discovery).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null
+          const title    = [
+            lastDisc ? `Last discovery: ${lastDisc}` : 'No discovery run yet',
+            nextDisc ? `Next discovery: ${nextDisc}` : null,
+          ].filter(Boolean).join('\n')
+          return (
+            <span className="live-chip live-chip-tokens" title={title}>
+              🔥 Discovery: {lastDisc ?? 'not run'}
+              {nextDisc && <span style={{ fontWeight: 400, opacity: 0.75, marginLeft: 5 }}>· next {nextDisc}</span>}
+            </span>
+          )
+        })()}
+
+        {/* 5. Watchlist ticker count ────────────────────────────────── */}
+        {health && (
+          <span className="live-chip live-chip-model"
+                title={`Watchlist: ${health.watchlist_size ?? 0} ticker(s) being monitored`}>
+            📋 {health.watchlist_size ?? 0} tickers
+          </span>
+        )}
+
+        {/* separator ───────────────────────────────────────────────── */}
+        {health && (
+          <span className="statusbar-sep" aria-hidden="true">|</span>
+        )}
+
+        {/* 6. LLM provider · model ──────────────────────────────────── */}
         {health && modelLabel && (
           <span className="live-chip live-chip-model" title={`Active LLM: ${modelLabel}`}>
             🧠 {modelLabel}
           </span>
         )}
+
+        {/* 7. Token usage today ─────────────────────────────────────── */}
         {health && usage && (
           <span
             className="live-chip live-chip-tokens"
@@ -202,53 +261,6 @@ export default function Header({ health, usage, btTodayTokens = 0, activeView, o
             ⚡ {fmtTokens(todayTokens)} tok tod
           </span>
         )}
-
-        {/* ── Scheduler chip ───────────────────────────────────────── */}
-        {health && (() => {
-          const sched      = health.scheduler ?? {}
-          const running    = sched.running ?? false
-          const lastRun    = sched.last_run   ? new Date(sched.last_run).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null
-          const nextRun    = sched.next_run   ? new Date(sched.next_run).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null
-          const interval   = sched.scan_interval_minutes ?? null
-          const title      = [
-            running ? 'Scanner active' : 'Scanner stopped',
-            interval ? `Interval: ${interval} min` : null,
-            lastRun  ? `Last scan: ${lastRun}` : null,
-            nextRun  ? `Next scan: ${nextRun}` : null,
-          ].filter(Boolean).join('\n')
-          return (
-            <span className={`live-chip ${running ? 'live-chip-market-open' : 'live-chip-market-closed'}`} title={title}>
-              🤖 Scanner: {running ? 'Active' : 'Off'}
-              {running && lastRun && <span style={{ fontWeight: 400, opacity: 0.75, marginLeft: 5 }}>· last {lastRun}</span>}
-              {running && nextRun && <span style={{ fontWeight: 400, opacity: 0.75, marginLeft: 5 }}>· next {nextRun}</span>}
-            </span>
-          )
-        })()}
-
-        {/* ── Watchlist count chip ─────────────────────────────────── */}
-        {health && (
-          <span className="live-chip live-chip-model"
-                title={`Watchlist: ${health.watchlist_size ?? 0} ticker(s) being monitored`}>
-            📋 {health.watchlist_size ?? 0} tickers
-          </span>
-        )}
-
-        {/* ── Last discovery chip ──────────────────────────────────── */}
-        {health && (() => {
-          const sched       = health.scheduler ?? {}
-          const lastDisc    = sched.last_discovery ? new Date(sched.last_discovery).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null
-          const nextDisc    = sched.next_discovery ? new Date(sched.next_discovery).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null
-          const title       = [
-            lastDisc ? `Last discovery: ${lastDisc}` : 'No discovery run yet',
-            nextDisc ? `Next discovery: ${nextDisc}` : null,
-          ].filter(Boolean).join('\n')
-          return (
-            <span className="live-chip live-chip-tokens" title={title}>
-              🔥 Discovery: {lastDisc ?? 'not run'}
-              {nextDisc && <span style={{ fontWeight: 400, opacity: 0.75, marginLeft: 5 }}>· next {nextDisc}</span>}
-            </span>
-          )
-        })()}
 
       </div>
 

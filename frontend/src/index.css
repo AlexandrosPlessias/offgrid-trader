@@ -1268,19 +1268,21 @@ tbody td {
   left: 50%;
   transform: translateX(-50%);
   width: 260px;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  /* Solid dark background — the previous rgba(255,255,255,0.06) was nearly
+     transparent and caused the text to bleed into whatever was behind it. */
+  background: #0d1117;
+  border: 1px solid rgba(255,255,255,0.18);
   border-radius: var(--radius);
   padding: 10px 12px;
   font-size: 11px;
   font-weight: 400;
   line-height: 1.6;
-  color: var(--text);
+  color: #e6edf3;
   text-transform: none;
   letter-spacing: 0;
-  z-index: 200;
+  z-index: 9999;
   pointer-events: none;
-  box-shadow: var(--shadow);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.70), 0 2px 8px rgba(0,0,0,0.50);
   font-family: var(--font-ui);
 }
 .info-tip:hover .info-tip-popup { display: block; }
@@ -2027,6 +2029,28 @@ details.edu-section[open] .edu-chevron {
   font-size: 11px;
   color: var(--dim);
   white-space: nowrap;
+}
+
+/* ── Glossary category collapsible ──────────────────────────────────────────── */
+.gls-category-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  padding: 6px 0;
+  font-weight: 600;
+  font-size: 13px;
+}
+.gls-category-summary::-webkit-details-marker { display: none; }
+.gls-cat-icon  { font-size: 15px; }
+.gls-cat-label { flex: 1; }
+.gls-cat-count {
+  font-size: 11px;
+  color: var(--dim);
+  font-weight: 400;
+  margin-left: 2px;  /* small gap between label text and "(N)" */
 }
 
 /* ── Glossary table ───────────────────────────────────────────────────────────── */
@@ -3004,6 +3028,14 @@ details.edu-section[open] .edu-chevron {
   font-weight: 400;
 }
 
+.statusbar-sep {
+  color: var(--border);
+  font-size: 13px;
+  font-weight: 300;
+  user-select: none;
+  margin: 0 2px;
+}
+
 /* ── Token Usage settings section ──────────────────────────────────────────── */
 .usage-summary-row {
   display: flex;
@@ -3129,3 +3161,313 @@ details.edu-section[open] .edu-chevron {
   vertical-align: middle;
 }
 @keyframes discovery-spin { to { transform: rotate(360deg); } }
+
+/* ── Mobile responsiveness ───────────────────────────────────────────────────
+   Targets phones (≤768px) and small tablets (≤900px already handled above).
+   Strategy: CSS-first, no JSX restructuring.  Key goals:
+     • Header fits on one row; nav wraps gracefully.
+     • All multi-column grids collapse to single column.
+     • Tables stay horizontally scrollable (.table-wrap already does this).
+     • Non-essential header chips are hidden to save row space.
+   Viewport test sizes: 375px (iPhone SE), 390px (iPhone 14), 768px (iPad).
+──────────────────────────────────────────────────────────────────────────── */
+
+/* ── Hamburger button (hidden on desktop, shown via media query) ─────────── */
+.hamburger-btn { display: none; }
+
+/* ── Mobile nav drawer + backdrop ───────────────────────────────────────── */
+.mobile-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.80);
+  backdrop-filter: blur(3px);
+  animation: fadeIn .15s ease;
+}
+@keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+
+.mobile-menu-drawer {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  background: var(--bg);          /* solid dark — not the semi-transparent card */
+  border-bottom: 1px solid var(--border);
+  padding: 8px 0 16px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.45);
+  animation: slideDown .18s ease;
+  display: flex;
+  flex-direction: column;
+}
+@keyframes slideDown { from { transform: translateY(-8px); opacity: 0 } to { transform: translateY(0); opacity: 1 } }
+
+.mobile-menu-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 10px 20px 4px;
+}
+
+.mobile-menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 0;
+}
+
+.mobile-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 13px 20px;
+  font-size: 15px;
+  color: var(--text);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: none;
+  position: relative;
+  transition: background .12s;
+}
+.mobile-menu-item:hover   { background: rgba(255,255,255,0.07); }
+.mobile-menu-item.active  { color: var(--accent); font-weight: 600; }
+
+.mobile-menu-icon {
+  font-size: 18px;
+  width: 26px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.mobile-menu-active-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+@media (max-width: 768px) {
+
+  /* ── Global layout ──────────────────────────────────────────────────────── */
+  .main {
+    padding: 12px;
+    gap: 14px;
+  }
+
+  /* ── Header ─────────────────────────────────────────────────────────────── */
+  .header-row {
+    padding: 0 12px;
+    flex-wrap: wrap;
+    min-height: 44px;
+    gap: 8px;
+  }
+
+  .header-statusbar {
+    padding: 3px 12px 5px;
+  }
+
+  .header-left {
+    gap: 10px;
+  }
+
+  .logo {
+    font-size: 15px;
+  }
+
+  /* Desktop nav + tools hidden on mobile — hamburger takes over */
+  .header-nav   { display: none; }
+  .header-right { display: none; }
+
+  /* Hamburger button appears only on mobile */
+  .hamburger-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: auto;
+    padding: 6px;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .hamburger-btn:hover { background: var(--surface-2); }
+
+  .nav-tab {
+    padding: 4px 10px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  /* Hide secondary header chips; keep health + LLM status + market clock */
+  .header-live-chips .model-chip:not(:first-child):not(.health-chip):not(.llm-chip):not(.market-chip) {
+    display: none;
+  }
+
+  /* ── Signal cards grid ──────────────────────────────────────────────────── */
+  .signals-cards-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Signal level cells (1fr 1fr 1fr 1fr → 1fr 1fr) */
+  .signal-levels-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  /* ── Charts ─────────────────────────────────────────────────────────────── */
+  /* .charts-grid already collapses at 900px — no change needed here */
+
+  /* ── Settings layout: hide sidebar TOC, go full-width ───────────────────── */
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+  .settings-toc {
+    display: none;
+  }
+
+  /* ── Settings: stack vertically on mobile ───────────────────────────────── */
+  .settings-page {
+    max-width: 100%;
+    min-width: 0;
+    width: 100%;
+  }
+  .settings-section { min-width: 0; }
+
+  /* Rows: vertical stack instead of space-between so nothing gets pushed
+     off the right edge */
+  .settings-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  /* Every child of a settings-row takes full width */
+  .settings-row > *,
+  .settings-row .settings-select,
+  .settings-row .settings-num-input,
+  .settings-row .settings-secret-field,
+  .settings-row input[type="text"],
+  .settings-row input[type="number"],
+  .settings-row input[type="password"],
+  .settings-row input[type="url"] {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    margin-left: 0 !important;
+  }
+
+  /* Pill toggles (source selector) stay as a row but wrap */
+  .settings-row > div { flex-wrap: wrap; }
+
+  /* settings-field inside a row takes full width */
+  .settings-row .settings-field {
+    width: 100%;
+    min-width: 0 !important;
+  }
+
+  /* Any bare table inside a settings section scrolls horizontally */
+  .settings-section table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+  }
+
+  /* ── Education / Glossary ───────────────────────────────────────────────── */
+  /* Grid item must have min-width:0 so it cannot expand its 1fr track.
+     Without this, wide tables grow the grid item and overflow the viewport
+     even though 1fr should equal viewport width. */
+  .education-page {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* Each section is now constrained to education-page width.
+     Switch overflow:hidden → overflow-x:auto so wide tables scroll
+     inside the section instead of being clipped. */
+  .edu-section {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+  }
+
+  /* pre / code blocks: wrap long lines */
+  .edu-section-body pre,
+  .edu-section-body code {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* ── Education layout: sidebar TOC → hidden, content full-width ─────────── */
+  .education-layout {
+    grid-template-columns: 1fr;
+  }
+
+  /* Edu reading grid: always single column on mobile */
+  .edu-reading-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* ── Analysis stepper ───────────────────────────────────────────────────── */
+  .stepper {
+    font-size: 12px;
+  }
+
+  /* ── Explorer page ──────────────────────────────────────────────────────── */
+  .explorer-topbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  /* ── Metric / stat tiles ────────────────────────────────────────────────── */
+  /* Auto-fill grids use minmax so they naturally wrap — reduce minimum so
+     tiles don't overflow on narrow screens */
+  [style*="grid-template-columns: repeat(auto-fit"] {
+    /* Can't override inline styles from JSX here — handled by column min-width */
+  }
+
+  /* ── Paper trading ──────────────────────────────────────────────────────── */
+  /* Tables are in .table-wrap { overflow-x: auto } — already scroll.
+     Just ensure the page doesn't add unwanted x-overflow at the page level. */
+  .app { overflow-x: hidden; }
+
+  /* ── Usage page summary row ─────────────────────────────────────────────── */
+  .usage-summary-row {
+    flex-direction: column;
+  }
+
+  /* ── Analysis result panels ─────────────────────────────────────────────── */
+  .analysis-result {
+    padding: 14px;
+  }
+
+  /* ── Modals and overlays ─────────────────────────────────────────────────── */
+  .modal-body, .modal-card {
+    width: 95vw;
+    max-width: 95vw;
+    padding: 16px;
+  }
+}
+
+/* ── Extra-small phones (≤420px) ────────────────────────────────────────────── */
+@media (max-width: 420px) {
+  .main {
+    padding: 8px;
+    gap: 10px;
+  }
+
+  .header-row {
+    padding: 0 8px;
+  }
+
+  .nav-tab {
+    padding: 3px 8px;
+    font-size: 11px;
+  }
+
+  .signal-levels-grid {
+    grid-template-columns: 1fr;
+  }
+}

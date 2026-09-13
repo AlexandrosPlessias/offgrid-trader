@@ -135,6 +135,8 @@ async def sync_paper_orders() -> None:
         _log.warning("paper sync: Alpaca fetch failed: %s", exc)
         return
 
+    from .database import get_paper_order_by_alpaca_id  # local import
+
     updated = 0
     for ao in alpaca_orders:
         order_id = ao.get("id")
@@ -150,6 +152,22 @@ async def sync_paper_orders() -> None:
         filled_at = ao.get("filled_at")
         if filled_at:
             updates["filled_at"] = filled_at
+
+        # Compute realized P&L when a close order fills.
+        # Close orders (placed by Instant Cashout) have entry_price stored at
+        # placement time.  Once Alpaca fills the order we know the actual exit
+        # price and can calculate the true P&L.
+        if ao.get("status") == "filled" and filled_avg:
+            db_order = get_paper_order_by_alpaca_id(order_id)
+            if db_order and db_order.get("entry_price") and db_order.get("realized_pnl") is None:
+                entry = float(db_order["entry_price"])
+                fill = float(filled_avg)
+                qty = float(filled_qty or db_order.get("qty") or 0)
+                side = db_order.get("side", "sell")
+                # sell-to-close: profit when price rose; buy-to-cover: profit when price fell
+                direction = 1 if side == "sell" else -1
+                updates["realized_pnl"] = round((fill - entry) * qty * direction, 4)
+
         update_paper_order_status(order_id, updates)
         updated += 1
 

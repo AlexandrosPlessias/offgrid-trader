@@ -149,6 +149,7 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
         # Used by the Settings UI to offer "Load Environment Default Values".
         "alpaca_key_id_env_set": bool(cfg.alpaca.key_id),
         "alpaca_secret_env_set": bool(cfg.alpaca.secret_key),
+        "alpaca_profile_name_env": cfg.alpaca.profile_name,  # raw env value for "Load defaults"
         "paper_trading_enabled": get_setting("paper_trading_enabled", "true") == "true",
         "paper_trade_position_size": float(get_setting("paper_trade_position_size", "") or 500),
         "paper_trade_min_confidence": (
@@ -156,6 +157,7 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
             if get_setting("paper_trade_min_confidence", "")
             else None
         ),
+        "paper_profile_name": get_setting("paper_profile_name", ""),
     }
 
 
@@ -343,3 +345,26 @@ def save_performance_settings(
         "concurrent_llm": concurrent_llm,
         "saved": True,
     }
+
+
+class ClearDataRequest(BaseModel):
+    categories: list[str] = Field(..., min_length=1, description="Data categories to erase")
+
+
+@router.post("/settings/clear-data")
+def clear_selected_data(req: ClearDataRequest) -> dict[str, Any]:
+    """Selectively delete one or more data categories.
+
+    Valid categories: signals, analysis_log, paper_orders, discovery_runs,
+    watchlist_overrides, ticker_memory, data_cache, backtest_runs.
+    """
+    import logging as _logging
+    from backend.database import clear_selected_data as _clear, CLEAR_CATEGORIES
+
+    unknown = set(req.categories) - CLEAR_CATEGORIES
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown categories: {sorted(unknown)}")
+
+    _logging.getLogger(__name__).warning("clear_selected_data called — categories: %s", req.categories)
+    result = _clear(req.categories)
+    return {"cleared": True, **result}

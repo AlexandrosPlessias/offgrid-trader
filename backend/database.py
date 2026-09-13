@@ -930,6 +930,67 @@ def get_cache_stats(db_path: str | None = None) -> dict:
     }
 
 
+_CLEAR_CATEGORY_LABELS: dict[str, str] = {
+    "signals":             "signals",
+    "analysis_log":        "analysis_log",
+    "paper_orders":        "paper_orders",
+    "discovery_runs":      "discovery_runs",          # candidates cascade
+    "watchlist_overrides": "watchlist_added/removed",  # app_settings keys
+    "ticker_memory":       "ticker_memory",
+    "data_cache":          "data_cache",
+    "backtest_runs":       "backtest_runs",            # trades/floor_suggests/compares cascade
+}
+
+CLEAR_CATEGORIES = set(_CLEAR_CATEGORY_LABELS.keys())
+
+
+def clear_selected_data(
+    categories: list[str],
+    db_path: str | None = None,
+) -> dict[str, int]:
+    """Delete only the data categories listed in *categories*.
+
+    Valid category names: ``signals``, ``analysis_log``, ``paper_orders``,
+    ``discovery_runs``, ``watchlist_overrides``, ``ticker_memory``,
+    ``data_cache``, ``backtest_runs``.
+
+    Returns a dict mapping ``<category>_deleted`` → row count.
+    Raises ``ValueError`` for unknown category names.
+    """
+    unknown = set(categories) - CLEAR_CATEGORIES
+    if unknown:
+        raise ValueError(f"Unknown clear categories: {unknown!r}")
+
+    result: dict[str, int] = {}
+    cats = set(categories)
+
+    with _connect(db_path) as conn:
+        if "signals" in cats:
+            result["signals_deleted"] = conn.execute("DELETE FROM signals").rowcount
+        if "analysis_log" in cats:
+            result["analysis_log_deleted"] = conn.execute("DELETE FROM analysis_log").rowcount
+        if "paper_orders" in cats:
+            result["paper_orders_deleted"] = conn.execute("DELETE FROM paper_orders").rowcount
+        if "discovery_runs" in cats:
+            # discovery_candidates deleted via ON DELETE CASCADE
+            result["discovery_runs_deleted"] = conn.execute("DELETE FROM discovery_runs").rowcount
+        if "watchlist_overrides" in cats:
+            n = conn.execute(
+                "DELETE FROM app_settings WHERE key IN ('watchlist_added', 'watchlist_removed')"
+            ).rowcount
+            result["watchlist_overrides_deleted"] = n
+        if "ticker_memory" in cats:
+            result["ticker_memory_deleted"] = conn.execute("DELETE FROM ticker_memory").rowcount
+        if "data_cache" in cats:
+            result["data_cache_deleted"] = conn.execute("DELETE FROM data_cache").rowcount
+        if "backtest_runs" in cats:
+            # backtest_trades / backtest_floor_suggests / backtest_compares cascade
+            result["backtest_runs_deleted"] = conn.execute("DELETE FROM backtest_runs").rowcount
+        conn.commit()
+
+    return result
+
+
 def clear_all_data(db_path: str | None = None) -> dict[str, int]:
     """Delete all transient data rows.  app_settings and ticker_memory are preserved."""
     with _connect(db_path) as conn:

@@ -27,6 +27,7 @@ class AlpacaSettingsRequest(BaseModel):
     position_size: float | None = Field(None, ge=1, le=1_000_000)
     min_confidence: float | None = Field(None, ge=0, le=100)
     enabled: bool | None = None
+    profile_name: str | None = Field(None, max_length=80)
     # When True, clear DB-stored credentials so the client falls back to env vars.
     use_env: bool | None = None
 
@@ -79,6 +80,8 @@ def set_alpaca_settings(request: AlpacaSettingsRequest) -> dict[str, Any]:
         set_setting("paper_trade_min_confidence", str(request.min_confidence))
     if request.enabled is not None:
         set_setting("paper_trading_enabled", "true" if request.enabled else "false")
+    if request.profile_name is not None:
+        set_setting("paper_profile_name", request.profile_name.strip())
     return {"saved": True}
 
 
