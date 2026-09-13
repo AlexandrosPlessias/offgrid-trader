@@ -669,21 +669,27 @@ def get_usage_stats(days: int = 30, db_path: str | None = None) -> dict[str, Any
 # --------------------------------------------------------------------------- #
 def get_recent_signals(
     limit: int = 50,
+    offset: int = 0,
     ticker: str | None = None,
     db_path: str | None = None,
-) -> list[dict[str, Any]]:
-    """Return the most recent signals, optionally filtered by ticker."""
+) -> tuple[list[dict[str, Any]], int]:
+    """Return the most recent signals (optionally filtered by ticker) plus total count.
 
-    query = "SELECT * FROM signals"
-    params: list[Any] = []
-    if ticker:
-        query += " WHERE ticker = ?"
-        params.append(ticker.upper())
-    query += " ORDER BY id DESC LIMIT ?"
-    params.append(int(limit))
+    Returns ``(rows, total)`` where *total* is the un-paged count matching the
+    same WHERE clause so the caller can compute page count.
+    """
+
+    where = " WHERE ticker = ?" if ticker else ""
+    params_filter: list[Any] = [ticker.upper()] if ticker else []
 
     with _connect(db_path) as conn:
-        rows = conn.execute(query, params).fetchall()
+        total: int = conn.execute(
+            f"SELECT COUNT(*) FROM signals{where}", params_filter
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT * FROM signals{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            params_filter + [int(limit), int(offset)],
+        ).fetchall()
 
     results: list[dict[str, Any]] = []
     for row in rows:
@@ -694,7 +700,7 @@ def get_recent_signals(
             except (json.JSONDecodeError, TypeError):
                 pass
         results.append(record)
-    return results
+    return results, total
 
 
 def get_recent_analyses(
@@ -922,6 +928,67 @@ def get_cache_stats(db_path: str | None = None) -> dict:
         "oldest": row["oldest"],
         "newest": row["newest"],
     }
+
+
+_CLEAR_CATEGORY_LABELS: dict[str, str] = {
+    "signals":             "signals",
+    "analysis_log":        "analysis_log",
+    "paper_orders":        "paper_orders",
+    "discovery_runs":      "discovery_runs",          # candidates cascade
+    "watchlist_overrides": "watchlist_added/removed",  # app_settings keys
+    "ticker_memory":       "ticker_memory",
+    "data_cache":          "data_cache",
+    "backtest_runs":       "backtest_runs",            # trades/floor_suggests/compares cascade
+}
+
+CLEAR_CATEGORIES = set(_CLEAR_CATEGORY_LABELS.keys())
+
+
+def clear_selected_data(
+    categories: list[str],
+    db_path: str | None = None,
+) -> dict[str, int]:
+    """Delete only the data categories listed in *categories*.
+
+    Valid category names: ``signals``, ``analysis_log``, ``paper_orders``,
+    ``discovery_runs``, ``watchlist_overrides``, ``ticker_memory``,
+    ``data_cache``, ``backtest_runs``.
+
+    Returns a dict mapping ``<category>_deleted`` → row count.
+    Raises ``ValueError`` for unknown category names.
+    """
+    unknown = set(categories) - CLEAR_CATEGORIES
+    if unknown:
+        raise ValueError(f"Unknown clear categories: {unknown!r}")
+
+    result: dict[str, int] = {}
+    cats = set(categories)
+
+    with _connect(db_path) as conn:
+        if "signals" in cats:
+            result["signals_deleted"] = conn.execute("DELETE FROM signals").rowcount
+        if "analysis_log" in cats:
+            result["analysis_log_deleted"] = conn.execute("DELETE FROM analysis_log").rowcount
+        if "paper_orders" in cats:
+            result["paper_orders_deleted"] = conn.execute("DELETE FROM paper_orders").rowcount
+        if "discovery_runs" in cats:
+            # discovery_candidates deleted via ON DELETE CASCADE
+            result["discovery_runs_deleted"] = conn.execute("DELETE FROM discovery_runs").rowcount
+        if "watchlist_overrides" in cats:
+            n = conn.execute(
+                "DELETE FROM app_settings WHERE key IN ('watchlist_added', 'watchlist_removed')"
+            ).rowcount
+            result["watchlist_overrides_deleted"] = n
+        if "ticker_memory" in cats:
+            result["ticker_memory_deleted"] = conn.execute("DELETE FROM ticker_memory").rowcount
+        if "data_cache" in cats:
+            result["data_cache_deleted"] = conn.execute("DELETE FROM data_cache").rowcount
+        if "backtest_runs" in cats:
+            # backtest_trades / backtest_floor_suggests / backtest_compares cascade
+            result["backtest_runs_deleted"] = conn.execute("DELETE FROM backtest_runs").rowcount
+        conn.commit()
+
+    return result
 
 
 def clear_all_data(db_path: str | None = None) -> dict[str, int]:
@@ -1484,6 +1551,24 @@ def update_discovery_run(
             (status, candidate_count, error, run_id),
         )
         conn.commit()
+
+
+def reset_stale_discovery_runs(older_than_minutes: int = 30, db_path: str | None = None) -> int:
+    """Flip any 'running' discovery_runs rows older than *older_than_minutes* to 'error'.
+
+    Called at startup to clean up rows orphaned by a previous server restart or
+    an asyncio cancellation that bypassed the except block.  Returns the number
+    of rows reset.
+    """
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE discovery_runs SET status='error', error='Interrupted (server restart)'"
+            " WHERE status='running'"
+            "   AND created_at < datetime('now', ?)",
+            (f"-{older_than_minutes} minutes",),
+        )
+        conn.commit()
+        return cur.rowcount
 
 
 def save_discovery_candidates(

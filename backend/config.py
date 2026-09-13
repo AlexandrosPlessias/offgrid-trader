@@ -323,6 +323,9 @@ class AlpacaConfig:
     )
     key_id: str = field(default_factory=lambda: _env_str("ALPACA_API_KEY_ID", ""))
     secret_key: str = field(default_factory=lambda: _env_str("ALPACA_API_SECRET_KEY", ""))
+    profile_name: str = field(
+        default_factory=lambda: _env_str("PAPER_PROFILE_NAME", "offgrid-trader-paper")
+    )
 
 
 @dataclass(frozen=True)

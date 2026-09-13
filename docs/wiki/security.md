@@ -137,6 +137,43 @@ fly secrets set CORS_ORIGINS=https://offgrid-trader.vercel.app
 
 ---
 
+## SSRF Prevention — Alpaca URL path validation
+
+### Background
+
+The `AlpacaClient` in `backend/alpaca.py` validates the **base URL** against an
+allowlist of known Alpaca hostnames (`paper-api.alpaca.markets`,
+`api.alpaca.markets`, `data.alpaca.markets`) via `_validate_url()` —
+preventing a compromised DB setting from redirecting requests to an internal
+network address.
+
+### Ticker path validation
+
+Three endpoints in `backend/routes/alpaca.py` interpolate user-supplied ticker
+symbols directly into the URL path (e.g. `/v2/assets/{ticker}`).
+Without validation, a crafted ticker could inject path-traversal sequences.
+
+**Fix (2026-09-13):** all three call sites now pass the ticker through
+`_clean_ticker()` before URL construction:
+
+| Endpoint | Path | Fix applied |
+|---|---|---|
+| `POST /paper/orders/place` (short-sell pre-check) | `/v2/assets/{ticker}` | `_clean_ticker(req.ticker)` |
+| `POST /paper/positions/{ticker}/close` | `/v2/positions/{ticker}` | `ticker = _clean_ticker(ticker)` |
+| `GET /paper/assets` (batch) | `/v2/assets/{ticker}` per ticker | `safe_ticker = _clean_ticker(ticker)` |
+
+`_clean_ticker()` validates `^[A-Z0-9.\-]{1,15}$` and raises `HTTP 400` for
+any input outside that range — preventing path-traversal characters (`/`, `?`,
+`..`, etc.) from reaching the HTTP request.
+
+### Cancel-order UUID validation
+
+`cancel_order(alpaca_order_id)` now normalises the Alpaca order ID through
+`uuid.UUID()` before interpolating into `/v2/orders/{id}`. Any non-UUID string
+raises `AlpacaError` before the HTTP call is made.
+
+---
+
 ## Related pages
 
 - [Architecture](architecture.md) — AdminTokenMiddleware in the request flow diagram

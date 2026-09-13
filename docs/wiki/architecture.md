@@ -164,6 +164,84 @@ nginx buffers the response and the client sees nothing until the stream ends.
 
 ---
 
+## Code structure
+
+### Backend
+
+```
+backend/
+├── main.py           # FastAPI app init, lifespan, include_router() calls only
+├── routes/
+│   ├── __init__.py   # exports all routers
+│   ├── _models.py    # shared Pydantic models + helpers (_clean_ticker, _log_safe, _sse_frame)
+│   ├── health.py     # GET /health, POST /auth/verify
+│   ├── watchlist.py  # /watchlist*, /watchlist/groups*
+│   ├── settings.py   # /settings* (non-alpaca, non-discovery)
+│   ├── alpaca.py     # /settings/alpaca*, /paper/*
+│   ├── analysis.py   # /analyze*, /market-data*, /webhook*, /signals*, /analysis*
+│   ├── data.py       # /data/*
+│   ├── discovery.py  # /discovery/*, /settings/discovery*
+│   ├── usage.py      # /usage, /provider/quota
+│   └── backtest.py   # /backtest*
+├── config.py
+├── database.py
+├── alpaca.py         # AlpacaClient (HTTP wrapper, not routes)
+... (rest unchanged)
+```
+
+`main.py` is now a thin entry point: it sets up the FastAPI app, configures the lifespan handler (scheduler, OTEL), and calls `include_router()` for each router exported from `routes/__init__.py`. All endpoint logic lives in the route modules.
+
+`routes/_models.py` provides shared Pydantic models and helper functions used across multiple routes:
+- `_clean_ticker(ticker)` — normalises and validates ticker symbols (SSRF fix: rejects path traversal and control characters)
+- `_log_safe(ticker)` — strips control characters for safe log output
+- `_sse_frame(data)` — encodes a dict as a `data: {...}\n\n` SSE frame
+
+### Frontend
+
+```
+frontend/src/
+├── App.jsx               # routing shell only (~100 lines)
+├── components/
+│   ├── analysis/         # AnalysisResult, AnalysisStepper, AnalyzePanel, IndicatorTable, LLMReasoning
+│   ├── charts/           # BalanceSheetChart, EmaChart, MacdChart, MarketCharts, PriceHistoryChart, RsiChart
+│   ├── shared/           # AnalysisHistoryPanel, Header, InfoTip, LoginScreen, PaperOrdersPanel, WatchlistCard
+│   └── signals/          # SignalCard, SignalsTable
+├── hooks/
+│   ├── useAnalyzeStream.js
+│   └── usePolling.js
+├── pages/
+│   ├── BacktestPage.jsx
+│   ├── EducationPage.jsx
+│   ├── ExplorerPage.jsx
+│   ├── PaperTradingPage.jsx
+│   ├── SettingsPage.jsx
+│   ├── TrendingPage.jsx
+│   └── UsageSection.jsx
+└── utils/
+    ├── api.js            # getAuthHeaders, signal401, readSSEStream
+    ├── colors.js         # CONF_BAND_COLOR, EVIDENCE_DIR_COLOR, RISK_SEV_COLOR, PROVIDER_META
+    └── fmt.js            # fmtTokens, fmtN, fmtTime, fmtMarketCap, fmtPct, fmtMoney, etc.
+```
+
+`App.jsx` is now a routing shell (~100 lines). All page-level concerns are extracted into `pages/`, reusable UI pieces into `components/`, data-fetching hooks into `hooks/`, and pure utility functions into `utils/`.
+
+### Tests
+
+```
+tests/smoke/
+├── conftest.py           # shared fixtures, TestClient, DB setup (auto-discovered)
+├── core/                 # test_routes, test_config, test_database, test_health, test_market_hours
+├── indicators/           # test_indicators, test_opportunity, test_data_layer
+├── ai/                   # test_ai_analysis, test_agentic, test_sentiment
+├── trading/              # test_alerts, test_alpaca
+├── discovery/            # test_discovery (16 checks, 16a–16k)
+└── backtest/             # test_backtest
+```
+
+Previously a single `smoke_test.py`; now split into domain folders for easier navigation. pytest auto-discovers all `test_*.py` files via `conftest.py`. Run with `make smoke`.
+
+---
+
 ## Docker services
 
 All Docker files live in [`infra/`](https://github.com/AlexandrosPlessias/offgrid-trader/tree/main/infra). Use the `Makefile` at the project root:

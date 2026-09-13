@@ -177,7 +177,7 @@ All local DB orders (up to 200, filter: **All / Open / Filled / Cancelled**).
 |---|---|
 | ▸ / ▾ | Click any row to expand its full detail panel |
 | Direction | ▲ LONG / ▼ SHORT |
-| Status | PENDING / NEW (stacked), FILLED, CANCELLED … |
+| Status | Current order state. See [Understanding order statuses](#understanding-order-statuses) below for a plain-English guide to every possible value. |
 | Position Size | Whole shares + actual cost (e.g. `2 shares / $452.10`). Tooltip shows target notional. |
 | Entry | Signal entry price |
 | Stop | Red stop price + **−$XX max loss** below |
@@ -188,6 +188,19 @@ All local DB orders (up to 200, filter: **All / Open / Filled / Cancelled**).
 | Source | Each source on its own line (ai / macd_crossover / …) |
 | Placed | Date on line 1, time on line 2 |
 | Cancel | Button for open orders only |
+
+#### Understanding order statuses
+
+When you place a paper trade, it does not execute instantly — it goes on a journey. You submit a request; the exchange puts it in a queue; from there it either fills (gets bought or sold at the market) or it does not (cancelled by you, or expired at market close). The table below shows every status label the app can display, in the order you are likely to see them.
+
+| Status | Plain-English label | What it means |
+|---|---|---|
+| `pending_new` | Waiting to be sent | Your request is on its way to the exchange — nothing has happened yet. |
+| `accepted` / `held` | In the queue | The exchange received it and is waiting for the right moment to act. |
+| `partially_filled` | Half done | Some shares were bought or sold, but the rest is still waiting. |
+| `filled` | Done ✓ | All shares bought or sold. The "Filled @" price is what you actually paid or received. |
+| `cancelled` | Cancelled | Called off before it could complete. Nothing was bought or sold. |
+| `expired` | Ran out of time | Day orders automatically cancel at market close if they were not filled — like a shop closing before you reached the till. |
 
 #### Expanded row
 

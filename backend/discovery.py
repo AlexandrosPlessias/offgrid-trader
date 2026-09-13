@@ -20,6 +20,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
+from itertools import zip_longest
 from typing import Any
 
 _log = logging.getLogger(__name__)
@@ -231,7 +232,9 @@ def fetch_candidates(
 ) -> list[dict[str, Any]]:
     """Fetch and normalise raw candidate tickers from the configured sources.
 
-    Results are cached ~60 min keyed by ``discovery:candidates:{YYYY-MM-DD-HH}``.
+    Results are cached ~60 min keyed by
+    ``discovery:candidates:{sources}:{limit}:{YYYY-MM-DD-HH}`` so a different
+    source selection or limit never reuses another request's entry.
     Pass ``force=True`` to skip the cache and always fetch fresh data (used by
     the explicit ``POST /discovery/refresh`` endpoint).
 
@@ -243,7 +246,9 @@ def fetch_candidates(
     from .data import _cache_get, _cache_set
 
     now = datetime.now(timezone.utc)
-    cache_key = f"discovery:candidates:{now.strftime('%Y-%m-%d-%H')}"
+    source_list = [s.strip().lower() for s in sources.split(",") if s.strip()]
+    source_part = "+".join(sorted(set(source_list))) or "none"
+    cache_key = f"discovery:candidates:{source_part}:{limit}:{now.strftime('%Y-%m-%d-%H')}"
     if not force:
         cached = _cache_get(cache_key, ttl_minutes=60)
         if cached is not None:
@@ -252,8 +257,11 @@ def fetch_candidates(
                 progress_callback("fetch", f"Candidates loaded from cache ({len(cached)} items)")
             return cached
 
-    source_list = [s.strip().lower() for s in sources.split(",") if s.strip()]
-    raw: list[dict[str, Any]] = []
+    # Collect each source into its own bucket so proportional slots can be
+    # allocated below — appending to a single list would starve later sources
+    # because _dedupe(raw)[:limit] would only take from whichever filled first.
+    alpaca_bucket: list[dict[str, Any]] = []
+    yf_bucket:     list[dict[str, Any]] = []
 
     used_yf_fallback = False
     if "alpaca" in source_list:
@@ -263,20 +271,19 @@ def fetch_candidates(
             if progress_callback:
                 progress_callback("warn", f"⚠ {alpaca_warn}")
         if alpaca_results:
-            raw.extend(alpaca_results)
+            alpaca_bucket = alpaca_results
             if progress_callback:
                 progress_callback(
                     "fetch",
-                    f"Alpaca: {len(alpaca_results)} raw candidates fetched"
-                    f" (scoring pool — top {limit // 2} will be scored)",
+                    f"Alpaca: {len(alpaca_results)} raw candidates fetched",
                 )
         else:
-            # Alpaca unavailable — always fall back to yfinance
+            # Alpaca unavailable — fall back to yfinance for both slots
             _log.info("discovery: Alpaca returned nothing — using yfinance fallback")
             if progress_callback:
                 progress_callback("fetch", "Fetching from yfinance (Alpaca fallback)…")
             yf_fallback = _fetch_from_yfinance()
-            raw.extend(yf_fallback)
+            yf_bucket = yf_fallback
             if progress_callback:
                 progress_callback("fetch", f"yfinance fallback: {len(yf_fallback)} candidates")
             used_yf_fallback = True
@@ -285,11 +292,31 @@ def fetch_candidates(
         if progress_callback:
             progress_callback("fetch", "Fetching from yfinance screeners…")
         yf_results = _fetch_from_yfinance()
-        raw.extend(yf_results)
+        yf_bucket = yf_results
         if progress_callback:
             progress_callback("fetch", f"yfinance: {len(yf_results)} candidates fetched")
 
-    candidates = _dedupe(raw)[:limit]
+    # Round-robin interleave across sources: alpaca[0], yf[0], alpaca[1], yf[1], …
+    # This guarantees that ANY prefix of the result (e.g. after run_discovery culls
+    # to max_candidates before scoring) contains a balanced mix from every active
+    # source, rather than exhausting the first source before reaching the second.
+    active_buckets = [b for b in [alpaca_bucket, yf_bucket] if b]
+    if active_buckets:
+        merged: list[dict[str, Any]] = []
+        seen_syms: set[str] = set()
+        for group in zip_longest(*active_buckets):
+            for item in group:
+                if item is None:
+                    continue
+                sym = item.get("symbol", "")
+                if sym and sym not in seen_syms:
+                    seen_syms.add(sym)
+                    merged.append(item)
+            if len(merged) >= limit:
+                break
+        candidates = merged[:limit]
+    else:
+        candidates = []
     _enrich_missing_prices(candidates)
     _cache_set(cache_key, candidates)
     _log.info("discovery: fetched %d candidates (sources=%s)", len(candidates), sources)
