@@ -432,6 +432,40 @@ curl -X POST http://localhost:8010/settings/ollama \
 
 ---
 
+## Notifications
+
+Full setup and per-channel details: **[Notifications](notifications.md)**.
+
+### `GET /settings/notifications`
+
+Effective config for all channels (ntfy, Telegram, Email) + the global alerts toggle. Secrets are masked (`*_set` booleans only); `*_env` fields expose the `.env` defaults for the "Load env" buttons.
+
+### `POST /settings/notifications/{ntfy,telegram,email}`
+
+Update one channel at runtime (no restart). All fields optional; secrets are only overwritten when a non-empty value is sent.
+
+```bash
+curl -X POST http://localhost:8010/settings/notifications/ntfy \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true, "topic": "a1b2c3d4e5f6", "server": "http://localhost:18880"}'
+```
+
+### `POST /notifications/test`
+
+Fire a test through every enabled channel; returns per-channel results. ntfy accepts optional `topic`/`server` overrides to test unsaved form values.
+
+```bash
+curl -X POST http://localhost:8010/notifications/test \
+  -H 'Content-Type: application/json' -d '{}'
+# → {"ok": true, "results": {"ntfy": "sent", "telegram": "skipped or failed", "email": "skipped or failed"}}
+```
+
+### `POST /notifications/telegram/callback`
+
+Telegram webhook for inline-button taps (paper-trade actions). Register with `setWebhook`; verified via `TELEGRAM_WEBHOOK_SECRET`.
+
+---
+
 ## Data
 
 ### `POST /data/reset`

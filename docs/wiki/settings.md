@@ -100,21 +100,30 @@ These are read-only from the UI — edit `.env` then `make up` to recreate the c
 
 ## Alerts
 
+All channels below are also configurable at runtime from **Settings → Notifications**
+(DB values override these `.env` defaults, no restart). See the
+[Notifications](notifications.md) page for full setup. `.env` values here are the
+boot-time defaults / fallbacks.
+
 | Variable | Default | Runtime-mutable | Description |
 |---|---|---|---|
-| `ALERTS_SEND_ENABLED` | `true` | ✓ (Settings page or `POST /settings/alerts`) | Global on/off for email + Slack. Telegram has its own flag. |
-| `EMAIL_ENABLED` | `false` | ✗ | Enable Gmail SMTP alerts. Requires the SMTP vars below. |
-| `SMTP_HOST` | `smtp.gmail.com` | ✗ | |
-| `SMTP_PORT` | `587` | ✗ | |
-| `SMTP_USERNAME` | *(unset)* | ✗ | Your Gmail address |
-| `SMTP_APP_PASSWORD` | *(unset)* | ✗ | 16-character Gmail App Password (not your account password). Create at https://myaccount.google.com/apppasswords |
-| `EMAIL_FROM` | *(unset)* | ✗ | Sender address |
-| `EMAIL_TO` | *(unset)* | ✗ | Recipient address |
-| `SLACK_ENABLED` | `false` | ✗ | Enable Slack Incoming Webhook alerts. |
-| `SLACK_WEBHOOK_URL` | *(unset)* | ✗ | Incoming Webhook URL from https://api.slack.com/messaging/webhooks |
-| `TELEGRAM_ENABLED` | `false` | ✗ | Enable Telegram bot alerts. |
-| `TELEGRAM_BOT_TOKEN` | *(unset)* | ✗ | Token from @BotFather |
-| `TELEGRAM_CHAT_ID` | *(unset)* | ✗ | Chat or group ID. Get it via `https://api.telegram.org/bot<TOKEN>/getUpdates` |
+| `ALERTS_SEND_ENABLED` | `true` | ✓ (Settings page or `POST /settings/alerts`) | Global on/off for **email** dispatch. Telegram and ntfy have their own flags. |
+| `EMAIL_ENABLED` | `false` | ✓ (Settings page) | Enable Gmail SMTP alerts. Requires the SMTP vars below. |
+| `SMTP_HOST` | `smtp.gmail.com` | ✓ (Settings page) | |
+| `SMTP_PORT` | `587` | ✓ (Settings page) | |
+| `SMTP_USERNAME` | *(unset)* | ✓ (Settings page) | Your Gmail address |
+| `SMTP_APP_PASSWORD` | *(unset)* | ✓ (Settings page) | 16-character Gmail App Password (not your account password). Create at https://myaccount.google.com/apppasswords |
+| `EMAIL_FROM` | *(unset)* | ✓ (Settings page) | Sender address |
+| `EMAIL_TO` | *(unset)* | ✓ (Settings page) | Recipient address |
+| `TELEGRAM_ENABLED` | `false` | ✓ (Settings page) | Enable Telegram bot alerts. |
+| `TELEGRAM_BOT_TOKEN` | *(unset)* | ✓ (Settings page) | Token from @BotFather |
+| `TELEGRAM_CHAT_ID` | *(unset)* | ✓ (Settings page) | Chat or group ID. Get it via `https://api.telegram.org/bot<TOKEN>/getUpdates` |
+| `TELEGRAM_WEBHOOK_SECRET` | *(unset)* | ✗ | Optional secret token for verifying Telegram inline-button callbacks (`POST /notifications/telegram/callback`). |
+| `NTFY_ENABLED` | `false` | ✓ (Settings page) | Enable ntfy push notifications. |
+| `NTFY_TOPIC` | *(unset)* | ✓ (Settings page) | Topic name — acts as the shared secret. Use a long random string. |
+| `NTFY_SERVER` | `http://localhost:18880` | ✓ (Settings page) | **Internal** ntfy address the backend publishes to: `http://ntfy:80` (local Docker) or `http://localhost:18880` (Fly sidecar). Not the public subscribe URL. |
+| `NTFY_BASE_URL` | *(unset)* | ✗ | ntfy's own public URL (read natively by ntfy) so it generates correct subscribe/WebSocket URLs behind a proxy. Set in `fly.toml` for cloud. |
+| `BACKEND_PUBLIC_URL` | `http://localhost:8010` | ✗ | Public backend URL embedded in ntfy action-button URLs (so phone taps reach `POST /paper/orders`). |
 
 ---
 
