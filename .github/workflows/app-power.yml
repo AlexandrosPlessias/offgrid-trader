@@ -2,10 +2,17 @@ name: App Power
 run-name: App Power — ${{ inputs.action || 'scheduled' }}
 
 # Manually take the app offline or bring it back online, OR let the
-# cron schedule do it automatically around US market hours (EDT anchor):
-#   Start  ~8:30 AM ET  Mon–Fri  →  12:30 UTC  (1 h before market open)
-#   Stop   ~5:00 PM ET  Mon–Fri  →  21:00 UTC  (1 h after  market close)
-# Note: times shift ~1 h during winter EST — acceptable trade-off.
+# cron schedule do it automatically around US market hours, with a 1 h buffer:
+#   Start  8:30 AM ET  Mon–Fri  (1 h before the 9:30 AM open)
+#   Stop   5:00 PM ET  Mon–Fri  (1 h after  the 4:00 PM close)
+#
+# GitHub cron only runs in UTC and does not follow US Daylight Saving, so a
+# fixed UTC time drifts by 1 h twice a year.  To keep the buffer exact all year
+# we register BOTH the EDT and EST UTC times for each action, then the resolve
+# step below honours only the cron that matches the current Eastern offset
+# (the off-season twin becomes a no-op).  This is delay-immune: it keys off
+# which cron string fired (github.event.schedule) + today's offset, never the
+# wall-clock time the runner happened to start.
 on:
   workflow_dispatch:
     inputs:
@@ -20,8 +27,10 @@ on:
         type: string
         default: 'offgrid-trader'
   schedule:
-    - cron: '30 12 * * 1-5'   # Auto-start: ~8:30 AM ET Mon–Fri (EDT)
-    - cron: '0 21 * * 1-5'    # Auto-stop:  ~5:00 PM ET Mon–Fri (EDT)
+    - cron: '30 12 * * 1-5'   # 8:30 AM ET start — honoured during EDT (summer)
+    - cron: '30 13 * * 1-5'   # 8:30 AM ET start — honoured during EST (winter)
+    - cron: '0 21 * * 1-5'    # 5:00 PM ET stop  — honoured during EDT (summer)
+    - cron: '0 22 * * 1-5'    # 5:00 PM ET stop  — honoured during EST (winter)
 
 env:
   FLY_APP: offgrid-trader
@@ -36,19 +45,37 @@ jobs:
     steps:
       - name: Determine start or stop
         id: resolve
+        env:
+          SCHED: ${{ github.event.schedule }}
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            HOUR=$(date -u +%H)
-            if [ "$HOUR" -lt 18 ]; then
-              echo "action=start" >> $GITHUB_OUTPUT
-              echo "Scheduled trigger → start (UTC hour: $HOUR)"
-            else
-              echo "action=stop" >> $GITHUB_OUTPUT
-              echo "Scheduled trigger → stop (UTC hour: $HOUR)"
-            fi
-          else
-            echo "action=${{ inputs.action }}" >> $GITHUB_OUTPUT
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "action=${{ inputs.action }}" >> "$GITHUB_OUTPUT"
             echo "Manual trigger → ${{ inputs.action }}"
+            exit 0
+          fi
+
+          # Eastern UTC offset today: -0400 in EDT (summer), -0500 in EST (winter).
+          OFFSET=$(TZ="America/New_York" date +%z)
+          echo "Eastern offset today: $OFFSET · cron fired: '$SCHED'"
+
+          ACTION=none
+          if [ "$OFFSET" = "-0400" ]; then      # EDT — honour the summer crons
+            case "$SCHED" in
+              "30 12 * * 1-5") ACTION=start ;;
+              "0 21 * * 1-5")  ACTION=stop  ;;
+            esac
+          else                                   # EST — honour the winter crons
+            case "$SCHED" in
+              "30 13 * * 1-5") ACTION=start ;;
+              "0 22 * * 1-5")  ACTION=stop  ;;
+            esac
+          fi
+
+          echo "action=$ACTION" >> "$GITHUB_OUTPUT"
+          if [ "$ACTION" = "none" ]; then
+            echo "Off-season twin cron for this offset → no-op (skipping)."
+          else
+            echo "Scheduled trigger → $ACTION"
           fi
 
   # ── Validate confirmation (manual dispatch only) ─────────────────────────────
@@ -73,6 +100,7 @@ jobs:
     if: |
       always() &&
       needs.resolve.result == 'success' &&
+      needs.resolve.outputs.action != 'none' &&
       (needs.check.result == 'success' || needs.check.result == 'skipped')
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
@@ -98,6 +126,7 @@ jobs:
     if: |
       always() &&
       needs.resolve.result == 'success' &&
+      needs.resolve.outputs.action != 'none' &&
       (needs.check.result == 'success' || needs.check.result == 'skipped')
     env:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
