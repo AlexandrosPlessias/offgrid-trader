@@ -15,9 +15,20 @@ COPY tests/ tests/
 # Data dir for the SQLite database (mounted as a volume in compose).
 RUN mkdir -p /app/data
 
+# ntfy binary — lightweight push-notification server (used as a Fly.io sidecar).
+# Download is architecture-aware; ARM64 for Apple Silicon VMs, amd64 otherwise.
+RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
+    curl -fsSL \
+      "https://github.com/binwiederhier/ntfy/releases/latest/download/ntfy_linux_${ARCH}.tar.gz" \
+      | tar xz --strip-components=1 -C /usr/local/bin "ntfy_linux_${ARCH}/ntfy" && \
+    chmod +x /usr/local/bin/ntfy
+
+COPY infra/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 ENV PYTHONUNBUFFERED=1 \
     DATABASE_PATH=/app/data/offgrid_trader.db
 
-EXPOSE 8000
+EXPOSE 8000 18880
 
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/entrypoint.sh"]

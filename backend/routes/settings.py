@@ -368,3 +368,46 @@ def clear_selected_data(req: ClearDataRequest) -> dict[str, Any]:
     _logging.getLogger(__name__).warning("clear_selected_data called — categories: %s", req.categories)
     result = _clear(req.categories)
     return {"cleared": True, **result}
+
+
+# --------------------------------------------------------------------------- #
+# Notifications — ntfy
+# --------------------------------------------------------------------------- #
+class NtfySettingRequest(BaseModel):
+    enabled: bool | None = Field(None, description="Enable or disable ntfy notifications")
+    topic: str | None = Field(None, description="ntfy topic (acts as shared secret)")
+    server: str | None = Field(None, description="ntfy server URL (e.g. http://ntfy:80)")
+
+
+@router.get("/settings/notifications")
+def get_notification_settings() -> dict[str, Any]:
+    """Return effective ntfy notification settings (topic masked)."""
+    cfg = get_settings()
+    topic = get_setting("ntfy_topic", "") or cfg.ntfy.topic
+    enabled_raw = get_setting("ntfy_enabled", "")
+    enabled = (enabled_raw.lower() == "true") if enabled_raw else cfg.ntfy.enabled
+    server = get_setting("ntfy_server", "") or cfg.ntfy.server
+    return {
+        "ntfy_enabled": enabled,
+        "ntfy_topic_set": bool(topic),
+        "ntfy_server": server,
+        "ntfy_configured": enabled and bool(topic),
+    }
+
+
+@router.post("/settings/notifications/ntfy")
+def set_ntfy_settings(request: NtfySettingRequest) -> dict[str, Any]:
+    """Persist ntfy settings to the DB (no restart required).
+
+    Re-registers notification channels so the change takes effect immediately.
+    """
+    from backend.notifications import register_channels
+
+    if request.enabled is not None:
+        set_setting("ntfy_enabled", "true" if request.enabled else "false")
+    if request.topic is not None:
+        set_setting("ntfy_topic", request.topic)
+    if request.server is not None:
+        set_setting("ntfy_server", request.server)
+    register_channels()
+    return get_notification_settings()

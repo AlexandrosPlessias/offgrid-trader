@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 _TMP_DB = os.path.join(tempfile.gettempdir(), "offgrid_smoke.db")
 os.environ["DATABASE_PATH"] = _TMP_DB
 os.environ["EMAIL_ENABLED"] = "false"
-os.environ["SLACK_ENABLED"] = "false"
+os.environ["NTFY_ENABLED"] = "false"
 
 # --------------------------------------------------------------------------- #
 # Section 1 — Import all backend modules; fail fast if any is missing.
