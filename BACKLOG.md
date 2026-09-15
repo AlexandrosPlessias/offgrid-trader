@@ -440,7 +440,8 @@ The Settings / Notifications section shows a "Last sent" chip per channel (sourc
 
 ---
 
-## 7. Sweet-Spot Refactor
+## ✅ 7. Sweet-Spot Refactor
+*Shipped on branch `feat/backlog-7-sweet-spot-refactor` (PR #18)*
 
 Split the largest files at clear responsibility boundaries to reach a shallow, moderate hierarchy. No new abstraction layers — the goal is readability, not over-engineering. Fewer files is better than more.
 
