@@ -73,28 +73,62 @@ def format_alert(opportunity: dict[str, Any]) -> dict[str, str]:
 # --------------------------------------------------------------------------- #
 # Channels
 # --------------------------------------------------------------------------- #
+# Effective config resolvers — DB override first, env default second, so every
+# channel is configurable at runtime from the Settings page (no restart).
+# --------------------------------------------------------------------------- #
+def _db_or(key: str, env_val: str) -> str:
+    return get_setting(key, "") or env_val
+
+
+def _bool_db_or(key: str, env_val: bool) -> bool:
+    raw = get_setting(key, "")
+    return raw.lower() == "true" if raw else env_val
+
+
+def resolve_email() -> dict[str, Any]:
+    e = get_settings().email
+    port_raw = get_setting("email_smtp_port", "")
+    return {
+        "enabled": _bool_db_or("email_enabled", e.enabled),
+        "smtp_host": _db_or("email_smtp_host", e.smtp_host),
+        "smtp_port": int(port_raw) if port_raw.isdigit() else e.smtp_port,
+        "username": _db_or("email_username", e.username),
+        "password": _db_or("email_password", e.password),
+        "sender": _db_or("email_from", e.sender),
+        "recipient": _db_or("email_to", e.recipient),
+    }
+
+
+def resolve_telegram() -> dict[str, Any]:
+    t = get_settings().telegram
+    return {
+        "enabled": _bool_db_or("telegram_enabled", t.enabled),
+        "bot_token": _db_or("telegram_bot_token", t.bot_token),
+        "chat_id": _db_or("telegram_chat_id", t.chat_id),
+    }
+
+
 def send_email(subject: str, body: str) -> bool:
     """Send *body* via Gmail SMTP using an App Password. Returns success."""
 
-    settings = get_settings()
-    email = settings.email
-    if not email.is_configured:
+    email = resolve_email()
+    if not (email["enabled"] and email["username"] and email["password"] and email["recipient"]):
         return False
 
     message = MIMEMultipart()
-    message["From"] = email.sender or email.username
-    message["To"] = email.recipient
+    message["From"] = email["sender"] or email["username"]
+    message["To"] = email["recipient"]
     message["Subject"] = subject
     message.attach(MIMEText(body, "plain"))
 
     try:
         context = ssl.create_default_context()
-        with smtplib.SMTP(email.smtp_host, email.smtp_port, timeout=20) as server:
+        with smtplib.SMTP(email["smtp_host"], email["smtp_port"], timeout=20) as server:
             server.starttls(context=context)
-            server.login(email.username, email.password)
+            server.login(email["username"], email["password"])
             server.sendmail(
-                email.sender or email.username,
-                [email.recipient],
+                email["sender"] or email["username"],
+                [email["recipient"]],
                 message.as_string(),
             )
         return True
@@ -108,18 +142,17 @@ def send_telegram(subject: str, body: str) -> bool:
 
     import httpx  # already in requirements; local import to avoid top-level dep
 
-    settings = get_settings()
-    tg = settings.telegram
-    if not tg.is_configured:
+    tg = resolve_telegram()
+    if not (tg["enabled"] and tg["bot_token"] and tg["chat_id"]):
         return False
 
     text = f"*{subject}*\n\n{body}"
-    url = f"https://api.telegram.org/bot{tg.bot_token}/sendMessage"
+    url = f"https://api.telegram.org/bot{tg['bot_token']}/sendMessage"
     try:
         r = httpx.post(
             url,
             json={
-                "chat_id": tg.chat_id,
+                "chat_id": tg["chat_id"],
                 "text": text,
                 "parse_mode": "Markdown",
             },

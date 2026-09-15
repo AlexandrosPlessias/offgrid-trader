@@ -17,12 +17,68 @@ from backend.database import get_setting
 _log = logging.getLogger(__name__)
 
 
-def _confidence_to_priority(confidence: float) -> str:
-    if confidence >= 80:
-        return "high"
-    if confidence >= 65:
-        return "default"
-    return "low"
+def _ascii_header(value: str) -> str:
+    """Coerce a string to an ASCII-safe HTTP header value.
+
+    HTTP headers must be Latin-1; ntfy Title/Tags with unicode (em dash, emoji)
+    make httpx raise. Replace common punctuation, drop anything else. Emoji and
+    unicode belong in the message *body* (UTF-8), not headers.
+    """
+    replacements = {"—": "-", "–": "-", "’": "'", "‘": "'", "“": '"', "”": '"', "…": "..."}
+    for uni, ascii_ in replacements.items():
+        value = value.replace(uni, ascii_)
+    return value.encode("ascii", "ignore").decode("ascii").strip()
+
+
+def resolve_topic() -> str:
+    return get_setting("ntfy_topic", "") or get_settings().ntfy.topic
+
+
+def resolve_server() -> str:
+    return get_setting("ntfy_server", "") or get_settings().ntfy.server
+
+
+def post_ntfy(
+    server: str,
+    topic: str,
+    subject: str,
+    body: str,
+    *,
+    actions: list[dict] | None = None,
+    priority: str | None = None,
+) -> bool:
+    """Low-level ntfy publish. Returns True on 2xx.
+
+    actions is an optional list of {"label", "url", "method", "body"} dicts
+    rendered as ntfy `http` action buttons.
+    """
+    url = f"{server.rstrip('/')}/{topic}"
+    headers: dict[str, str] = {
+        "Title": _ascii_header(subject) or "MarketSage",
+        "Tags": "chart_with_upwards_trend,bell",
+        "Content-Type": "text/plain; charset=utf-8",
+    }
+    if priority:
+        headers["Priority"] = priority
+    if actions:
+        action_parts = []
+        for a in actions:
+            label = _ascii_header(a["label"]) or "Action"
+            parts = [f"http, {label}, {a['url']}", f"method={a.get('method', 'POST')}"]
+            if a.get("body"):
+                parts.append(f"body={a['body']}")
+            parts.append("headers.Content-Type=application/json")
+            action_parts.append(", ".join(parts))
+        headers["Actions"] = _ascii_header("; ".join(action_parts))
+
+    try:
+        r = httpx.post(url, content=body.encode(), headers=headers, timeout=10.0)
+        r.raise_for_status()
+        _log.info("ntfy notification sent to %s/%s", server, topic)
+        return True
+    except Exception as exc:  # pragma: no cover - network dependent
+        _log.warning("ntfy send failed: %s", exc)
+        return False
 
 
 class NtfyChannel:
@@ -31,16 +87,10 @@ class NtfyChannel:
     @property
     def is_configured(self) -> bool:
         enabled = get_setting("ntfy_enabled", "")
-        topic = get_setting("ntfy_topic", "") or get_settings().ntfy.topic
+        topic = resolve_topic()
         if enabled:
             return enabled.lower() == "true" and bool(topic)
         return get_settings().ntfy.is_configured
-
-    def _topic(self) -> str:
-        return get_setting("ntfy_topic", "") or get_settings().ntfy.topic
-
-    def _server(self) -> str:
-        return get_setting("ntfy_server", "") or get_settings().ntfy.server
 
     def send(
         self,
@@ -49,39 +99,4 @@ class NtfyChannel:
         *,
         actions: list[dict] | None = None,
     ) -> bool:
-        """POST a notification to the ntfy server.
-
-        actions is an optional list of {"label": str, "url": str, "method": str, "body": str}
-        dicts that become ntfy `http` action buttons.
-        """
-        topic = self._topic()
-        server = self._server().rstrip("/")
-        url = f"{server}/{topic}"
-
-        headers: dict[str, str] = {
-            "Title": subject,
-            "Tags": "chart_with_upwards_trend,bell",
-            "Content-Type": "text/plain",
-        }
-
-        if actions:
-            action_parts = []
-            for a in actions:
-                parts = [
-                    f"http, {a['label']}, {a['url']}",
-                    f"method={a.get('method', 'POST')}",
-                ]
-                if a.get("body"):
-                    parts.append(f"body={a['body']}")
-                parts.append("headers.Content-Type=application/json")
-                action_parts.append(", ".join(parts))
-            headers["Actions"] = "; ".join(action_parts)
-
-        try:
-            r = httpx.post(url, content=body.encode(), headers=headers, timeout=10.0)
-            r.raise_for_status()
-            _log.info("ntfy notification sent to %s/%s", server, topic)
-            return True
-        except Exception as exc:  # pragma: no cover - network dependent
-            _log.warning("ntfy send failed: %s", exc)
-            return False
+        return post_ntfy(resolve_server(), resolve_topic(), subject, body, actions=actions)
