@@ -1,5 +1,6 @@
 # offgrid-trader backend image.
 # Single FastAPI service; the LLM runs in the separate `ollama` container.
+# ntfy push-notification server runs as a sidecar (see infra/entrypoint.sh).
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -15,13 +16,9 @@ COPY tests/ tests/
 # Data dir for the SQLite database (mounted as a volume in compose).
 RUN mkdir -p /app/data
 
-# ntfy binary — lightweight push-notification server (used as a Fly.io sidecar).
-# Download is architecture-aware; ARM64 for Apple Silicon VMs, amd64 otherwise.
-RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
-    curl -fsSL \
-      "https://github.com/binwiederhier/ntfy/releases/latest/download/ntfy_linux_${ARCH}.tar.gz" \
-      | tar xz --strip-components=1 -C /usr/local/bin "ntfy_linux_${ARCH}/ntfy" && \
-    chmod +x /usr/local/bin/ntfy
+# ntfy binary — copied from the official multi-arch image (no download needed).
+# Pin the version here; Docker resolves the correct architecture automatically.
+COPY --from=binwiederhier/ntfy:v2.28.0 /usr/bin/ntfy /usr/local/bin/ntfy
 
 COPY infra/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

@@ -29,6 +29,9 @@ services:
       - ../.env
     environment:
       OLLAMA_HOST: http://ollama:11434
+      # ntfy runs in the shared ai-shared stack — reach it over the Docker network,
+      # not localhost (which is the backend container itself).
+      NTFY_SERVER: http://ntfy:80
       DATABASE_PATH: /app/data/offgrid_trader.db
       OTEL_EXPORTER_OTLP_ENDPOINT: http://aspire:18889
     ports:

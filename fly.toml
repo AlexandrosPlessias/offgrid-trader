@@ -24,33 +24,59 @@ primary_region = "lhr"
 [env]
   DATABASE_PATH     = "/app/data/offgrid_trader.db"
   LLM_PROVIDER      = "groq"   # Ollama is not available on Fly; use a cloud provider
-  NTFY_SERVER       = "http://localhost:18880"  # ntfy sidecar running in the same container
+  # Backend → sidecar (internal, same container):
+  NTFY_SERVER       = "http://localhost:18880"
+  # ntfy's own config (it reads NTFY_* natively). base-url lets it generate correct
+  # subscribe/WebSocket URLs. behind-proxy is off because the tls-only handler does
+  # TCP passthrough (no X-Forwarded-* headers are added).
+  NTFY_BASE_URL     = "https://offgrid-trader.fly.dev:18880"
+  # Public backend URL embedded in ntfy action-button URLs (phone → POST /paper/orders):
+  BACKEND_PUBLIC_URL = "https://offgrid-trader.fly.dev"
 
 [[mounts]]
   source      = "offgrid_trader_data"
   destination = "/app/data"
 
-[http_service]
-  internal_port       = 8000
-  force_https         = true
-  auto_stop_machines  = "stop"
-  auto_start_machines = true
+# NOTE: use EITHER [http_service] OR [[services]] — never both (mixing breaks the
+# proxy). We use [[services]] here because we expose two ports: the API (8000) and
+# the ntfy sidecar (18880). Each port lists its own handlers so Fly terminates TLS.
+
+# ── Main API (FastAPI on :8000) ──────────────────────────────────────────────
+[[services]]
+  internal_port        = 8000
+  protocol             = "tcp"
+  auto_stop_machines   = "stop"
+  auto_start_machines  = true
   min_machines_running = 0
 
-[[http_service.checks]]
-  grace_period = "20s"
-  interval     = "15s"
-  method       = "GET"
-  path         = "/health"
-  timeout      = "5s"
+  [[services.ports]]
+    port     = 443
+    handlers = ["tls", "http"]
 
-# ntfy push-notification sidecar — accessible at https://<app>.fly.dev:18880/<topic>
+  [[services.ports]]
+    port        = 80
+    handlers    = ["http"]
+    force_https = true
+
+  [[services.http_checks]]
+    grace_period = "20s"
+    interval     = "15s"
+    method       = "get"
+    path         = "/health"
+    timeout      = "5s"
+
+# ── ntfy push sidecar (:18880) — subscribe at https://<app>.fly.dev:18880/<topic> ──
+# Handler is "tls" ONLY (not "http"): Fly terminates TLS and forwards the raw
+# stream to ntfy, which speaks HTTP/1.1 and handles the WebSocket upgrade itself.
+# Adding "http" makes Fly negotiate HTTP/2, which breaks the WS upgrade (the
+# ntfy app fails with "websocket upgrade failed / 404").
 [[services]]
   internal_port = 18880
   protocol      = "tcp"
 
   [[services.ports]]
-    port = 18880
+    port     = 18880
+    handlers = ["tls"]
 
 [[vm]]
   cpu_kind = "shared"
