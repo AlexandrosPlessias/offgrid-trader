@@ -240,20 +240,6 @@ class EmailConfig:
 
 
 @dataclass(frozen=True)
-class SlackConfig:
-    """Slack Incoming Webhook settings."""
-
-    enabled: bool = field(
-        default_factory=lambda: _env_str("SLACK_ENABLED", "false").lower() == "true"
-    )
-    webhook_url: str = field(default_factory=lambda: _env_str("SLACK_WEBHOOK_URL", ""))
-
-    @property
-    def is_configured(self) -> bool:
-        return bool(self.enabled and self.webhook_url)
-
-
-@dataclass(frozen=True)
 class TelegramConfig:
     """Telegram Bot API settings for alert delivery."""
 
@@ -263,9 +249,35 @@ class TelegramConfig:
     bot_token: str = field(default_factory=lambda: _env_str("TELEGRAM_BOT_TOKEN", ""))
     chat_id: str = field(default_factory=lambda: _env_str("TELEGRAM_CHAT_ID", ""))
 
+    # Optional: secret token for Telegram webhook verification (POST /notifications/telegram/callback)
+    webhook_secret: str = field(default_factory=lambda: _env_str("TELEGRAM_WEBHOOK_SECRET", ""))
+
     @property
     def is_configured(self) -> bool:
         return bool(self.enabled and self.bot_token and self.chat_id)
+
+
+@dataclass(frozen=True)
+class NtfyConfig:
+    """ntfy push-notification settings (self-hosted or sidecar)."""
+
+    enabled: bool = field(
+        default_factory=lambda: _env_str("NTFY_ENABLED", "false").lower() == "true"
+    )
+    # Random string that acts as the shared secret (topic = channel name).
+    # Pick a long, unguessable value: e.g. `openssl rand -hex 12`
+    topic: str = field(default_factory=lambda: _env_str("NTFY_TOPIC", ""))
+    # Server URL — override to point at the local infra container or the Fly.io sidecar.
+    # Defaults to the public ntfy.sh only as a fallback; the recommended paths are:
+    #   Local Docker:  NTFY_SERVER=http://ntfy:80
+    #   Fly.io:        NTFY_SERVER=http://localhost:18880
+    server: str = field(
+        default_factory=lambda: _env_str("NTFY_SERVER", "http://localhost:18880")
+    )
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.enabled and self.topic)
 
 
 @dataclass(frozen=True)
@@ -332,7 +344,7 @@ class AlpacaConfig:
 class Settings:
     """Top-level settings aggregate."""
 
-    # Set false to suppress email + Slack sends while keeping Telegram active.
+    # Set false to suppress email sends while keeping Telegram/ntfy active.
     alerts_send_enabled: bool = field(
         default_factory=lambda: (_env_str("ALERTS_SEND_ENABLED", "true").lower() == "true")
     )
@@ -376,6 +388,12 @@ class Settings:
     # (all routes are open — safe for local/dev use only).
     admin_token: str = field(default_factory=lambda: _env_str("ADMIN_TOKEN", ""))
 
+    # Public URL of the backend — embedded in ntfy action buttons so the phone can call
+    # POST /paper/orders directly.  e.g. https://offgrid-trader.fly.dev  (no trailing slash)
+    backend_public_url: str = field(
+        default_factory=lambda: _env_str("BACKEND_PUBLIC_URL", "http://localhost:8010")
+    )
+
     finnhub_api_key: str = field(default_factory=lambda: _env_str("FINNHUB_API_KEY", ""))
 
     # Optional FRED API key — enables the FRED REST API (api.stlouisfed.org)
@@ -408,8 +426,8 @@ class Settings:
     market_hours: MarketHours = field(default_factory=MarketHours)
     thresholds: Thresholds = field(default_factory=Thresholds)
     email: EmailConfig = field(default_factory=EmailConfig)
-    slack: SlackConfig = field(default_factory=SlackConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    ntfy: NtfyConfig = field(default_factory=NtfyConfig)
     otel: OtelConfig = field(default_factory=OtelConfig)
     alpaca: AlpacaConfig = field(default_factory=AlpacaConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
@@ -475,10 +493,11 @@ def _redacted_summary(cfg: Settings) -> dict:
             "recipient": cfg.email.recipient or "(unset)",
             "configured": cfg.email.is_configured,
         },
-        "slack": {
-            "enabled": cfg.slack.enabled,
-            "webhook_url": mask(cfg.slack.webhook_url),
-            "configured": cfg.slack.is_configured,
+        "ntfy": {
+            "enabled": cfg.ntfy.enabled,
+            "topic": mask(cfg.ntfy.topic),
+            "server": cfg.ntfy.server,
+            "configured": cfg.ntfy.is_configured,
         },
         "telegram": {
             "enabled": cfg.telegram.enabled,

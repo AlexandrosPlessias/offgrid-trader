@@ -8,6 +8,7 @@ from backend.routes.data import router as data_router
 from backend.routes.discovery import router as discovery_router
 from backend.routes.usage import router as usage_router
 from backend.routes.backtest import router as backtest_router
+from backend.routes.notifications import router as notifications_router
 
 all_routers = [
     health_router,
@@ -19,6 +20,7 @@ all_routers = [
     discovery_router,
     usage_router,
     backtest_router,
+    notifications_router,
 ]
 
 __all__ = [
@@ -31,5 +33,6 @@ __all__ = [
     "discovery_router",
     "usage_router",
     "backtest_router",
+    "notifications_router",
     "all_routers",
 ]

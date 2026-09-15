@@ -106,6 +106,8 @@ async def lifespan(app: FastAPI):
     """
     init_db()
     reset_stale_discovery_runs()  # clean up 'running' rows orphaned by prior restarts
+    from backend.notifications import register_channels
+    register_channels()
     # Start the scheduler if the DB setting says "true" (user has toggled it
     # at runtime), or if no DB override exists yet and SCHEDULER_AUTO_START=true
     # is set in .env (fresh install default).

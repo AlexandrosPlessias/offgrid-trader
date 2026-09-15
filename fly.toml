@@ -22,8 +22,9 @@ primary_region = "lhr"
   # Build context is the repo root; all COPY paths in the Dockerfile are relative to it.
 
 [env]
-  DATABASE_PATH = "/app/data/offgrid_trader.db"
-  LLM_PROVIDER  = "groq"   # Ollama is not available on Fly; use a cloud provider
+  DATABASE_PATH     = "/app/data/offgrid_trader.db"
+  LLM_PROVIDER      = "groq"   # Ollama is not available on Fly; use a cloud provider
+  NTFY_SERVER       = "http://localhost:18880"  # ntfy sidecar running in the same container
 
 [[mounts]]
   source      = "offgrid_trader_data"
@@ -42,6 +43,14 @@ primary_region = "lhr"
   method       = "GET"
   path         = "/health"
   timeout      = "5s"
+
+# ntfy push-notification sidecar — accessible at https://<app>.fly.dev:18880/<topic>
+[[services]]
+  internal_port = 18880
+  protocol      = "tcp"
+
+  [[services.ports]]
+    port = 18880
 
 [[vm]]
   cpu_kind = "shared"

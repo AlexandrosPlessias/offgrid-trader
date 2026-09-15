@@ -10,6 +10,7 @@
 | [Settings Reference](settings.md) | Every `.env` variable, defaults, and which ones can be changed at runtime |
 | [Observability](observability.md) | OTEL span hierarchy, metric instruments, Aspire usage guide, log reference |
 | [Indicators](indicators.md) | RSI, MACD, EMA, Bollinger Bands, Stochastic, Volume ratio — definitions, scales, what the system checks |
+| [Notifications](notifications.md) | ntfy, Telegram, and Email setup — channel config, action buttons, API reference, troubleshooting |
 | [Glossary](glossary.md) | Alphabetical trading terminology (bullish/bearish, long/short, support/resistance, R-multiple, etc.) |
 
 The same indicator and glossary content is available in-app on the **Learn** tab at http://localhost:5174.

@@ -1,11 +1,11 @@
-"""Alerting: format opportunities and deliver via Gmail SMTP, Slack, and/or Telegram.
+"""Alerting: format opportunities and deliver via Gmail SMTP, Telegram, and/or ntfy.
 
 Alerts only fire for opportunities whose confidence meets the configured
 floor. All channels are optional and independently gated by their
 ``*_ENABLED`` env flags and by having complete credentials.
 
-Email and Slack can be suspended globally with ``ALERTS_SEND_ENABLED=false``
-(e.g. during local testing) while keeping Telegram active.
+Email can be suspended globally with ``ALERTS_SEND_ENABLED=false``
+(e.g. during local testing) while keeping Telegram/ntfy active.
 
 Run standalone to send a test alert through whatever channels are configured::
 
@@ -20,8 +20,6 @@ import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any
-
-import requests
 
 from .config import get_settings
 from .database import get_setting
@@ -105,24 +103,6 @@ def send_email(subject: str, body: str) -> bool:
         return False
 
 
-def send_slack(text: str) -> bool:
-    """Post *text* to the configured Slack Incoming Webhook. Returns success."""
-
-    settings = get_settings()
-    slack = settings.slack
-    if not slack.is_configured:
-        return False
-    try:
-        response = requests.post(slack.webhook_url, json={"text": text}, timeout=15)
-        if response.status_code // 100 == 2:
-            return True
-        _log.warning("slack returned HTTP %s: %s", response.status_code, response.text[:200])
-        return False
-    except Exception as exc:  # pragma: no cover - network dependent
-        _log.warning("slack send failed: %s", exc)
-        return False
-
-
 def send_telegram(subject: str, body: str) -> bool:
     """Send *subject* + *body* via Telegram Bot API. Returns success."""
 
@@ -160,7 +140,7 @@ def send_alert(
     """Format and dispatch an alert if it clears the confidence floor.
 
     Returns a result dict describing what happened, e.g.
-    ``{"sent": True, "channels": ["slack"], "skipped": False}``.
+    ``{"sent": True, "channels": ["telegram", "ntfy"], "skipped": False}``.
     """
 
     settings = get_settings()
@@ -175,19 +155,42 @@ def send_alert(
             "channels": [],
         }
 
+    from .notifications import dispatch as _notify_dispatch
+
+    cfg = get_settings()
     message = format_alert(opportunity)
     channels: list[str] = []
 
     if _is_alerts_enabled():
         if send_email(message["subject"], message["text"]):
             channels.append("email")
-        if send_slack(message["text"]):
-            channels.append("slack")
     else:
-        _log.info("alerts disabled — skipping email/Slack")
+        _log.info("alerts disabled — skipping email")
 
     if send_telegram(message["subject"], message["text"]):
         channels.append("telegram")
+
+    # ntfy and any other registered channels
+    backend_url = get_setting("backend_public_url", "") or cfg.backend_public_url
+    ticker = opportunity.get("ticker", "?")
+    side = str(opportunity.get("type", "buy"))
+    actions: list[dict] | None = None
+    if opportunity.get("ticker"):
+        order_body = (
+            f'{{"ticker": "{ticker}", "side": "{side}",'
+            f' "qty": 1, "order_type": "market", "time_in_force": "day"}}'
+        )
+        actions = [
+            {
+                "label": f"Paper {ticker} {side.upper()}",
+                "url": f"{backend_url}/paper/orders",
+                "method": "POST",
+                "body": order_body,
+            }
+        ]
+
+    ntfy_results = _notify_dispatch(message["subject"], message["text"], actions=actions)
+    channels.extend(k for k, v in ntfy_results.items() if v)
 
     return {
         "sent": bool(channels),
