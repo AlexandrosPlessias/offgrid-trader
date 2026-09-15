@@ -3,15 +3,24 @@ import { API, getAuthHeaders } from '../utils/api'
 import UsageSection from './UsageSection'
 import InfoTip from '../components/shared/InfoTip'
 
-const SETTINGS_SECTIONS = [
-  { id: 'settings-signal',       icon: '📡', label: 'Signal Config' },
-  { id: 'settings-paper',        icon: '📈', label: 'Paper Trading' },
-  { id: 'settings-ai-provider', icon: '🧠', label: 'AI Provider' },
-  { id: 'settings-usage',       icon: '⚡', label: 'AI Usage' },
-  { id: 'settings-perf',        icon: '🚀', label: 'Performance' },
-  { id: 'settings-discovery',   icon: '🔥', label: 'Discovery' },
-  { id: 'settings-cache',       icon: '💾', label: 'Data Cache' },
-  { id: 'settings-data',        icon: '🗑️', label: 'Data' },
+const SETTINGS_GROUPS = [
+  { label: 'Signals', icon: '📡', children: [
+    { id: 'settings-signal',        icon: '📡', label: 'Signal Config' },
+    { id: 'settings-notifications', icon: '🔔', label: 'Notifications' },
+    { id: 'settings-discovery',     icon: '🔥', label: 'Discovery' },
+  ]},
+  { label: 'Trading', icon: '📈', children: [
+    { id: 'settings-paper',         icon: '📈', label: 'Paper Trading' },
+  ]},
+  { label: 'AI', icon: '🧠', children: [
+    { id: 'settings-ai-provider',   icon: '🧠', label: 'AI Provider' },
+    { id: 'settings-usage',         icon: '⚡', label: 'AI Usage' },
+    { id: 'settings-perf',          icon: '🚀', label: 'Performance' },
+  ]},
+  { label: 'Data', icon: '💾', children: [
+    { id: 'settings-cache',         icon: '💾', label: 'Data Cache' },
+    { id: 'settings-data',          icon: '🗑️', label: 'Data' },
+  ]},
 ]
 
 function SettingSection({ id, title, icon, children }) {
@@ -227,6 +236,313 @@ function DiscoverySettingsSection() {
   )
 }
 
+function ChannelHeader({ icon, name, configured }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '18px 0 10px' }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                    letterSpacing: '0.09em' }}>{icon} {name}</div>
+      <span style={{ fontSize: 11, color: configured ? 'var(--green, #22c55e)' : 'var(--dim)' }}>
+        {configured ? '● configured' : '○ not configured'}
+      </span>
+    </div>
+  )
+}
+
+function NotificationsSection() {
+  const [cfg,      setCfg]      = useState(null)
+  const [fetchErr, setFetchErr] = useState(false)
+
+  // global alert dispatch
+  const [alertsOn,     setAlertsOn]     = useState(true)
+  const [alertsStatus, setAlertsStatus] = useState(null)
+
+  // ntfy
+  const [ntfyEnabled, setNtfyEnabled] = useState(false)
+  const [ntfyTopic,   setNtfyTopic]   = useState('')
+  const [ntfyServer,  setNtfyServer]  = useState('')
+  const [ntfyStatus, setNtfyStatus] = useState(null)
+  const [ntfyErr,    setNtfyErr]    = useState('')
+
+  // telegram
+  const [tgEnabled, setTgEnabled] = useState(false)
+  const [tgToken,   setTgToken]   = useState('')
+  const [tgChatId,  setTgChatId]  = useState('')
+  const [tgTokenSet, setTgTokenSet] = useState(false)
+  const [showTgToken, setShowTgToken] = useState(false)
+  const [tgStatus, setTgStatus] = useState(null)
+  const [tgErr,    setTgErr]    = useState('')
+
+  // email
+  const [emEnabled, setEmEnabled] = useState(false)
+  const [emHost, setEmHost] = useState('smtp.gmail.com')
+  const [emPort, setEmPort] = useState(587)
+  const [emUser, setEmUser] = useState('')
+  const [emPass, setEmPass] = useState('')
+  const [emPassSet, setEmPassSet] = useState(false)
+  const [showEmPass, setShowEmPass] = useState(false)
+  const [emFrom, setEmFrom] = useState('')
+  const [emTo,   setEmTo]   = useState('')
+  const [emStatus, setEmStatus] = useState(null)
+  const [emErr,    setEmErr]    = useState('')
+
+  const [env, setEnv] = useState({})
+
+  // test-all
+  const [testStatus, setTestStatus] = useState(null)
+  const [testMsg,    setTestMsg]    = useState('')
+
+  const applyCfg = (d) => {
+    setCfg(d)
+    setAlertsOn(d.alerts_enabled ?? true)
+    setNtfyEnabled(d.ntfy_enabled ?? false)
+    setNtfyServer(d.ntfy_server ?? '')
+    setNtfyTopic(d.ntfy_topic ?? '')
+    setTgEnabled(d.telegram_enabled ?? false)
+    setTgChatId(d.telegram_chat_id ?? '')
+    setTgTokenSet(d.telegram_bot_token_set ?? false)
+    setEmEnabled(d.email_enabled ?? false)
+    setEmHost(d.email_smtp_host ?? 'smtp.gmail.com')
+    setEmPort(d.email_smtp_port ?? 587)
+    setEmUser(d.email_username ?? '')
+    setEmFrom(d.email_from ?? '')
+    setEmTo(d.email_to ?? '')
+    setEmPassSet(d.email_password_set ?? false)
+    setEnv({
+      ntfyEnabled: d.ntfy_enabled_env, ntfyServer: d.ntfy_server_env, ntfyTopic: d.ntfy_topic_env,
+      tgEnabled: d.telegram_enabled_env, tgChatId: d.telegram_chat_id_env,
+      emEnabled: d.email_enabled_env,
+    })
+  }
+
+  useEffect(() => {
+    fetch(`${API}/settings/notifications`, { headers: getAuthHeaders() })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(applyCfg)
+      .catch(() => setFetchErr(true))
+  }, [])
+
+  const flash = (setStatus, val, ms = 3000) => {
+    setStatus(val); setTimeout(() => setStatus(null), ms)
+  }
+
+  const toggleAlerts = async () => {
+    const next = !alertsOn
+    try {
+      await fetch(`${API}/settings/alerts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ enabled: next }),
+      })
+      setAlertsOn(next); flash(setAlertsStatus, 'ok', 2000)
+    } catch { flash(setAlertsStatus, 'error', 3000) }
+  }
+
+  const saveChannel = async (url, body, setStatus, setErr) => {
+    setStatus('saving'); setErr('')
+    try {
+      const r = await fetch(`${API}${url}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify(body),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      applyCfg(await r.json())
+      flash(setStatus, 'ok')
+    } catch (e) { setErr(e.message || 'Save failed'); flash(setStatus, 'error', 4000) }
+  }
+
+  const saveNtfy = () => {
+    const body = { enabled: ntfyEnabled, server: ntfyServer }
+    if (ntfyTopic.trim()) body.topic = ntfyTopic.trim()
+    saveChannel('/settings/notifications/ntfy', body, setNtfyStatus, setNtfyErr)
+  }
+  const saveTelegram = () => {
+    const body = { enabled: tgEnabled, chat_id: tgChatId }
+    if (tgToken.trim()) body.bot_token = tgToken.trim()
+    saveChannel('/settings/notifications/telegram', body, setTgStatus, setTgErr).then(() => setTgToken(''))
+  }
+  const saveEmail = () => {
+    const body = {
+      enabled: emEnabled, smtp_host: emHost, smtp_port: Number(emPort),
+      username: emUser, email_from: emFrom, email_to: emTo,
+    }
+    if (emPass.trim()) body.password = emPass.trim()
+    saveChannel('/settings/notifications/email', body, setEmStatus, setEmErr).then(() => setEmPass(''))
+  }
+
+  const sendTest = async () => {
+    setTestStatus('testing'); setTestMsg('')
+    try {
+      const r = await fetch(`${API}/notifications/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ topic: ntfyTopic.trim() || null, server: ntfyServer.trim() || null }),
+      })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(d.detail || 'Test failed')
+      const summary = Object.entries(d.results || {}).map(([k, v]) => `${k}: ${v}`).join(' · ')
+      setTestStatus('ok'); setTestMsg(summary || 'Sent'); setTimeout(() => setTestStatus(null), 7000)
+    } catch (e) {
+      setTestStatus('error'); setTestMsg(e.message || 'Test failed'); setTimeout(() => setTestStatus(null), 7000)
+    }
+  }
+
+  return (
+    <SettingSection id="settings-notifications" title="Notifications" icon="🔔">
+      {fetchErr && (
+        <p className="text-dim" style={{ fontSize: 13, color: 'var(--red)', marginBottom: 12 }}>
+          ⚠ Could not load notification settings — backend may still be starting up. Reload to retry.
+        </p>
+      )}
+      {!cfg && !fetchErr && (
+        <p className="text-dim" style={{ fontSize: 13, marginBottom: 12 }}>Loading…</p>
+      )}
+      {cfg && (<>
+      <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
+        All alert channels in one place. Each fires a batched summary of a scan's actionable signals.
+        Configure any combination; use <strong>Send test</strong> to verify delivery.
+      </p>
+
+      {/* Global dispatch */}
+      <div className="settings-row">
+        <div className="settings-row-label">
+          <span>Alert dispatch</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>
+            {alertsOn ? 'Enabled — alerts sent on actionable signals' : 'Suppressed — email silenced'}
+          </span>
+        </div>
+        <button className={`settings-toggle ${alertsOn ? 'on' : 'off'}`} onClick={toggleAlerts}>
+          <span className="settings-toggle-knob" />
+        </button>
+        {alertsStatus === 'ok'    && <span className="settings-ok" style={{ marginLeft: 8 }}>✓</span>}
+        {alertsStatus === 'error' && <span className="settings-err" style={{ marginLeft: 8 }}>✗</span>}
+      </div>
+
+      {/* ntfy */}
+      <ChannelHeader icon="🔔" name="ntfy (push)" configured={cfg.ntfy_configured} />
+      <div className="settings-row">
+        <label className="settings-label">Enable</label>
+        <input type="checkbox" checked={ntfyEnabled} onChange={e => setNtfyEnabled(e.target.checked)} />
+      </div>
+      <div className="settings-row">
+        <label className="settings-label">
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            Topic
+            <InfoTip text="Private ntfy channel name = shared secret. Use a long random value. Leave blank to keep the saved/env topic." />
+          </span>
+        </label>
+        <input className="settings-input" type="text" value={ntfyTopic}
+               onChange={e => setNtfyTopic(e.target.value)}
+               placeholder="e.g. marketsage-a1b2c3d4"
+               style={{ width: 300 }} />
+      </div>
+      <div className="settings-row">
+        <label className="settings-label">
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            Server
+            <InfoTip text="Local Docker: http://ntfy:80 · Fly.io sidecar: http://localhost:18880 · public: https://ntfy.sh" />
+          </span>
+        </label>
+        <input className="settings-input" type="text" value={ntfyServer}
+               onChange={e => setNtfyServer(e.target.value)} placeholder="http://ntfy:80" style={{ width: 240 }} />
+        <button className="btn-secondary btn-sm" type="button" style={{ marginLeft: 6 }}
+                onClick={() => { setNtfyEnabled(env.ntfyEnabled ?? false); setNtfyServer(env.ntfyServer ?? ''); setNtfyTopic(env.ntfyTopic ?? '') }}>
+          Load env
+        </button>
+      </div>
+      <SaveRow status={ntfyStatus} errMsg={ntfyErr} onSave={saveNtfy} />
+
+      {/* telegram */}
+      <ChannelHeader icon="✈️" name="Telegram" configured={cfg.telegram_configured} />
+      <div className="settings-row">
+        <label className="settings-label">Enable</label>
+        <input type="checkbox" checked={tgEnabled} onChange={e => setTgEnabled(e.target.checked)} />
+      </div>
+      <div className="settings-row">
+        <label className="settings-label">
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            Bot token
+            <InfoTip text="Token from @BotFather. Leave blank to keep the saved/env token." />
+          </span>
+        </label>
+        <input className="settings-input" type={showTgToken ? 'text' : 'password'} value={tgToken}
+               onChange={e => setTgToken(e.target.value)}
+               placeholder={tgTokenSet ? '•••••• saved — leave blank to keep' : '123456789:AAF...'}
+               style={{ width: 240 }} />
+        <button className="btn-secondary btn-sm" type="button" onClick={() => setShowTgToken(s => !s)}
+                style={{ marginLeft: 6 }}>{showTgToken ? 'Hide' : 'Show'}</button>
+      </div>
+      <div className="settings-row">
+        <label className="settings-label">Chat ID</label>
+        <input className="settings-input" type="text" value={tgChatId}
+               onChange={e => setTgChatId(e.target.value)} placeholder="123456789" style={{ width: 240 }} />
+        <button className="btn-secondary btn-sm" type="button" style={{ marginLeft: 6 }}
+                onClick={() => { setTgEnabled(env.tgEnabled ?? false); setTgChatId(env.tgChatId ?? ''); setTgToken('') }}>
+          Load env
+        </button>
+      </div>
+      <SaveRow status={tgStatus} errMsg={tgErr} onSave={saveTelegram} />
+
+      {/* email */}
+      <ChannelHeader icon="✉️" name="Email (SMTP)" configured={cfg.email_configured} />
+      <div className="settings-row">
+        <label className="settings-label">Enable</label>
+        <input type="checkbox" checked={emEnabled} onChange={e => setEmEnabled(e.target.checked)} />
+      </div>
+      <div className="settings-row">
+        <label className="settings-label">SMTP host</label>
+        <input className="settings-input" type="text" value={emHost}
+               onChange={e => setEmHost(e.target.value)} placeholder="smtp.gmail.com" style={{ width: 200 }} />
+        <span className="text-dim" style={{ fontSize: 11, margin: '0 6px 0 10px' }}>Port</span>
+        <input className="settings-input" type="number" value={emPort}
+               onChange={e => setEmPort(e.target.value)} style={{ width: 80 }} />
+      </div>
+      <div className="settings-row">
+        <label className="settings-label">Username</label>
+        <input className="settings-input" type="text" value={emUser}
+               onChange={e => setEmUser(e.target.value)} placeholder="you@gmail.com" style={{ width: 240 }} />
+      </div>
+      <div className="settings-row">
+        <label className="settings-label">
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            App password
+            <InfoTip text="Gmail App Password (not your account password). Leave blank to keep the saved/env value." />
+          </span>
+        </label>
+        <input className="settings-input" type={showEmPass ? 'text' : 'password'} value={emPass}
+               onChange={e => setEmPass(e.target.value)}
+               placeholder={emPassSet ? '•••••• saved — leave blank to keep' : '16-char app password'}
+               style={{ width: 240 }} />
+        <button className="btn-secondary btn-sm" type="button" onClick={() => setShowEmPass(s => !s)}
+                style={{ marginLeft: 6 }}>{showEmPass ? 'Hide' : 'Show'}</button>
+      </div>
+      <div className="settings-row">
+        <label className="settings-label">From</label>
+        <input className="settings-input" type="text" value={emFrom}
+               onChange={e => setEmFrom(e.target.value)} placeholder="you@gmail.com" style={{ width: 240 }} />
+      </div>
+      <div className="settings-row">
+        <label className="settings-label">To</label>
+        <input className="settings-input" type="text" value={emTo}
+               onChange={e => setEmTo(e.target.value)} placeholder="recipient@example.com" style={{ width: 240 }} />
+      </div>
+      <SaveRow status={emStatus} errMsg={emErr} onSave={saveEmail} />
+
+      {/* test all */}
+      <div style={{ borderTop: '1px solid var(--border)', margin: '18px 0 12px', opacity: 0.4 }} />
+      <div className="settings-row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <button className="btn-primary btn-sm" type="button" onClick={sendTest}
+                disabled={testStatus === 'testing'}>
+          {testStatus === 'testing' ? 'Sending…' : '🔔 Send test to all enabled channels'}
+        </button>
+        {testStatus === 'ok'    && <span className="settings-ok">✓ {testMsg}</span>}
+        {testStatus === 'error' && <span className="settings-err">✗ {testMsg}</span>}
+      </div>
+      </>)}
+    </SettingSection>
+  )
+}
+
 function SaveRow({ status, errMsg, onSave, label = 'Save' }) {
   return (
     <div className="settings-save-row">
@@ -240,9 +556,20 @@ function SaveRow({ status, errMsg, onSave, label = 'Save' }) {
 }
 
 export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, initialSection = null, onInitialSectionConsumed }) {
+  // Left-nav category groups — all collapsed by default when Settings opens.
+  const [openGroups, setOpenGroups] = useState(new Set())
+  const toggleGroup = (label) => setOpenGroups(prev => {
+    const next = new Set(prev)
+    next.has(label) ? next.delete(label) : next.add(label)
+    return next
+  })
+
   // Scroll to a specific section when opened from another page (e.g. Trending → Discovery)
   useEffect(() => {
     if (!initialSection) return
+    // Auto-expand the group that contains the deep-linked section.
+    const grp = SETTINGS_GROUPS.find(g => g.children.some(c => c.id === initialSection))
+    if (grp) setOpenGroups(new Set([grp.label]))
     const el = document.getElementById(initialSection)
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
     onInitialSectionConsumed?.()
@@ -414,10 +741,6 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
   const [schedStatus,       setSchedStatus]       = useState(null)
   const [schedErr,          setSchedErr]          = useState('')
 
-  // ── Alerts ──────────────────────────────────────────────────────────────────
-  const [alertsOn,     setAlertsOn]     = useState(true)
-  const [alertsStatus, setAlertsStatus] = useState(null)
-
   // ── Data reset ──────────────────────────────────────────────────────────────
   const [resetStatus,      setResetStatus]      = useState(null)
   const [clearSelected,    setClearSelected]    = useState(new Set())
@@ -544,7 +867,6 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
       // Other
       setScanInterval(String(cfg.scan_interval_minutes ?? 15))
       setSchedulerRunning(cfg.scheduler_running ?? true)
-      setAlertsOn(cfg.alerts_enabled ?? true)
       setSignalLlmEnabled(cfg.signal_scan_llm_enabled ?? true)
       // Paper trading
       setPaperProfileName(cfg.paper_profile_name || cfg.alpaca_profile_name_env || '')
@@ -657,19 +979,6 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
     } catch (e) { setSchedulerRunning(!next) }      // revert on network error
   }
 
-  const toggleAlerts = async () => {
-    const next = !alertsOn
-    try {
-      await fetch(`${API}/settings/alerts`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        body: JSON.stringify({ enabled: next }),
-      })
-      setAlertsOn(next)
-      setAlertsStatus('ok')
-      setTimeout(() => setAlertsStatus(null), 2000)
-    } catch (e) { /* best-effort */ }
-  }
-
   const resetData = async () => {
     if (!window.confirm('Clear ALL signals and analysis history? App settings (watchlist, model, interval) will be preserved. This cannot be undone.')) return
     setResetStatus('clearing')
@@ -687,15 +996,37 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
       {/* ── Sticky TOC sidebar ─────────────────────────────────────────────── */}
       <nav className="settings-toc">
         <div className="settings-toc-title">Settings</div>
-        {SETTINGS_SECTIONS.map(s => (
-          <button
-            key={s.id}
-            className="settings-toc-link"
-            onClick={() => document.getElementById(s.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
-          >
-            {s.icon} {s.label}
-          </button>
-        ))}
+        {SETTINGS_GROUPS.map(group => {
+          const open = openGroups.has(group.label)
+          return (
+            <div key={group.label} className="settings-toc-group">
+              <button
+                type="button"
+                className="settings-toc-group-header"
+                onClick={() => toggleGroup(group.label)}
+                aria-expanded={open}
+                style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  width: '100%', background: 'none', border: 'none', cursor: 'pointer',
+                  padding: '8px 10px', color: 'var(--text)', fontWeight: 600, fontSize: 13,
+                }}
+              >
+                <span>{group.icon} {group.label}</span>
+                <span style={{ fontSize: 10, opacity: 0.6 }}>{open ? '▾' : '▸'}</span>
+              </button>
+              {open && group.children.map(s => (
+                <button
+                  key={s.id}
+                  className="settings-toc-link"
+                  style={{ paddingLeft: 26 }}
+                  onClick={() => document.getElementById(s.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                >
+                  {s.icon} {s.label}
+                </button>
+              ))}
+            </div>
+          )
+        })}
       </nav>
 
       <div className="settings-page">
@@ -746,30 +1077,6 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
           </div>
         </div>
         <SaveRow status={schedStatus} errMsg={schedErr} onSave={saveScheduler} label="Apply interval" />
-
-        <div style={{ borderTop: '1px solid var(--border)', margin: '18px 0', opacity: 0.4 }} />
-
-        {/* ─ Alerts ─ */}
-        <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
-                      letterSpacing: '0.09em', marginBottom: 10 }}>🔔 Alerts</div>
-
-        <div className="settings-row">
-          <div className="settings-row-label">
-            <span>Alert dispatch</span>
-            <span className="text-dim" style={{ fontSize: 12 }}>
-              {alertsOn ? 'Enabled — alerts sent on actionable signals (email / Slack / Telegram)' : 'Suppressed — all alert channels silenced'}
-            </span>
-          </div>
-          <button
-            className={`settings-toggle ${alertsOn ? 'on' : 'off'}`}
-            onClick={toggleAlerts}
-          >
-            <span className="settings-toggle-knob" />
-          </button>
-        </div>
-        {alertsStatus === 'ok' && (
-          <div className="settings-ok" style={{ marginTop: 8 }}>✓ Updated</div>
-        )}
 
         <div style={{ borderTop: '1px solid var(--border)', margin: '18px 0', opacity: 0.4 }} />
 
@@ -1352,6 +1659,9 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
 
       {/* ── Discovery ────────────────────────────────────────────────────── */}
       <DiscoverySettingsSection />
+
+      {/* ── Notifications (all channels) ─────────────────────────────────── */}
+      <NotificationsSection />
 
       <SettingSection id="settings-cache" title="Data Cache" icon="💾">
         <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
