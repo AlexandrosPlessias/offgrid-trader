@@ -162,9 +162,9 @@ See [observability.md](observability.md) for the full span hierarchy and how to 
 
 ---
 
-## Paper Trading (Alpaca)
+## Order Trading (Alpaca)
 
-> **Settings → 📈 Paper Trading** — connect to Alpaca's free paper-trading environment and auto-place bracket orders for every actionable signal.
+> **Settings → 📈 Order Trading** — connect to Alpaca's free paper-trading environment and auto-place bracket orders for every actionable signal.
 
 Credentials can be set via `.env` **or** pasted directly in the Settings page. The Settings page takes precedence over `.env`; click **Load .env defaults** to revert to env-var values.
 
@@ -180,6 +180,29 @@ Credentials can be set via `.env` **or** pasted directly in the Settings page. T
 **Test Connection** — the Settings page shows a **Save & Test Connection** button that verifies credentials against `GET /v2/account` before saving, and displays account equity on success.
 
 **Market data** — live prices use `data.alpaca.markets` (separate host, same credentials). No paid subscription required — Alpaca's free tier covers both paper trading and snapshots.
+
+---
+
+## 🪙 Live / Fractional Trading
+
+> **Settings → 🪙 Live / Fractional** — a **second Alpaca profile** (separate key/secret/host) that places **notional fractional buys** for a small real-money budget, cashing out on each signal's stop/target via an app-side poller. See [Fractional Trading](paper-trading.md#fractional-trading-real-money) for the full model.
+
+Point this profile at **paper** keys to monitor, then switch its host to **live** and paste live keys to trade real money. The Order Trading account above is untouched.
+
+| Variable | Default | Runtime-mutable | Description |
+|---|---|---|---|
+| `FRAC_PROFILE_NAME` | `offgrid-trader-frac` | ✓ (Settings page) | Display label for the fractional profile. |
+| `FRAC_ALPACA_URL` | `https://paper-api.alpaca.markets/v2` | ✓ (Paper ↔ Live selector) | Fractional profile host. `api.alpaca.markets` = **real money**. |
+| `FRAC_ALPACA_KEY_ID` | *(unset)* | ✓ (Settings page) | Fractional profile Key ID (set-only). |
+| `FRAC_ALPACA_SECRET_KEY` | *(unset)* | ✓ (Settings page) | Fractional profile Secret — masked, never returned. |
+| `frac_trading_enabled` (DB only) | `false` | ✓ (Settings toggle) | Master switch for the **automated** `FracTradeSkill` (not the manual 🪙 Frac buttons). |
+| `FRAC_POSITION_SIZE` | `15` | ✓ (Settings page) | Notional (account currency) per fractional buy. |
+| `FRAC_BUDGET` | `100` | ✓ (Settings page) | Cap on total deployed notional across open fractional positions. |
+| `frac_min_confidence` (DB only) | *(none)* | ✓ (Settings page) | Optional confidence floor for the automated engine. |
+| `FRAC_POLL_SECONDS` | `60` | ✓ (Settings page) | Exit-poller cadence (min 30 s). |
+| `frac_eod_close` (DB only) | `false` | ✓ (Settings toggle) | Sell open fractional positions near the market close. |
+
+**Long-only** (Alpaca can't short fractional shares) and **budget-capped**. Enabling live with the host set to `api.alpaca.markets` uses real money — the UI confirms before arming.
 
 ---
 

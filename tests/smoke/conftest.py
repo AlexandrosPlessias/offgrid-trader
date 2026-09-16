@@ -23,6 +23,9 @@ _TMP_DB = os.path.join(tempfile.gettempdir(), "offgrid_smoke.db")
 os.environ["DATABASE_PATH"] = _TMP_DB
 os.environ["EMAIL_ENABLED"] = "false"
 os.environ["NTFY_ENABLED"] = "false"
+# Neutralise any local .env ADMIN_TOKEN so the auth middleware is a no-op in tests
+# (otherwise non-exempt routes like /watchlist return 401 on machines with a token).
+os.environ["ADMIN_TOKEN"] = ""  # noqa: S105
 
 # --------------------------------------------------------------------------- #
 # Section 1 — Import all backend modules; fail fast if any is missing.

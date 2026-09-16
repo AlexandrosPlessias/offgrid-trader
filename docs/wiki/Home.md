@@ -11,7 +11,7 @@ Runs locally with **Ollama** (default) or via free cloud inference (**Groq**) �
 
 ## What does it do?
 
-For each ticker in your watchlist (or on demand), a **TickerAgent** runs six sequential skills:
+For each ticker in your watchlist (or on demand), a **TickerAgent** runs seven sequential skills:
 
 ```
 MemoryLayer       → load prior scan context (signal history, RSI streak, price trend)
@@ -23,7 +23,8 @@ OpportunityDetect → 5 rule checks (RSI, MACD, volume, valuation, AI signal)
                     + macro regime confidence filter → scored, confidence-filtered signals
 PersistSkill      → save analysis log + signals to SQLite
 PaperTradeSkill   → places Alpaca bracket orders for actionable signals (optional)
-AlertSkill        → optional Gmail SMTP · Telegram bot
+FracTradeSkill    → places fractional notional buys on a 2nd Alpaca profile (optional, long-only)
+AlertSkill        → optional Telegram · ntfy push
 MemoryLayer       → update ticker_memory for next scan
 ```
 
@@ -65,6 +66,10 @@ After each scan, the scheduler syncs open Alpaca paper orders (status, fill pric
 | Trading page — orders table | Signal card with order status |
 |---|---|
 | ![Orders table](../screenshots/14-trading-orders.png) | ![Signal card](../screenshots/15-signal-card-order.png) |
+
+| Fractional Trading tab | Live / Fractional settings |
+|---|---|
+| ![Fractional Trading](../screenshots/13b-fractional-trading.png) | ![Live / Fractional settings](../screenshots/19-settings-fractional.png) |
 
 ### Explorer — section walkthrough (AAPL)
 

@@ -25,12 +25,14 @@
  *   03-learn.png
  *   04-learn-expanded.png
  *   05-settings.png
- *   13-trading-page.png        ← NEW: Trading tab (account + charts)
- *   14-trading-orders.png      ← NEW: Orders table (expanded row)
- *   15-signal-card-order.png   ← NEW: Signal card with order status badge
- *   16-discovery.png             ← NEW: Trending Discovery tab with scored candidates
- *   17-discovery-settings.png    ← NEW: Discovery settings — source pill toggles
- *   18-mobile-hamburger.png      ← NEW: Mobile 375px — hamburger nav drawer open
+ *   13-trading-page.png        ← Trading tab → Order Trading (account + charts)
+ *   13b-fractional-trading.png ← Trading tab → Fractional Trading (tiles + positions)
+ *   14-trading-orders.png      ← Orders table (expanded row)
+ *   15-signal-card-order.png   ← Signal card with order status badge + 🪙 Frac button
+ *   16-discovery.png             ← Trending Discovery tab with scored candidates
+ *   17-discovery-settings.png    ← Discovery settings — source pill toggles
+ *   18-mobile-hamburger.png      ← Mobile 375px — hamburger nav drawer open
+ *   19-settings-fractional.png   ← Settings → Live / Fractional profile
  *
  * Explorer — per-section (10), requires a saved analysis in history:
  *   explorer-01-pipeline.png  …  explorer-10-signals.png
@@ -348,10 +350,29 @@ await shot(page, '12-settings-paper-trading.png', async () => {
   await goto(page, BASE);
   await page.locator('button[title="Settings"]').click();
   await page.waitForTimeout(600);
-  try { await page.locator('text=Paper Trading').first().click(); await page.waitForTimeout(800); } catch { console.warn('⚠  Paper Trading nav item not found'); }
+  try { await page.locator('text=Order Trading').first().click(); await page.waitForTimeout(800); } catch { console.warn('⚠  Order Trading nav item not found'); }
+});
+
+// ── 7. Fractional Trading tab + settings ─────────────────────────────────────
+
+await shot(page, '13b-fractional-trading.png', async () => {
+  await goto(page, BASE);
+  await page.click('text=Trading');
+  await page.waitForTimeout(1000);
+  try {
+    await page.locator('button:has-text("Fractional Trading")').first().click();
+    await page.waitForTimeout(2500); // let account tiles + positions render
+  } catch { console.warn('⚠  Fractional Trading tab not found'); }
+});
+
+await shot(page, '19-settings-fractional.png', async () => {
+  await goto(page, BASE);
+  await page.locator('button[title="Settings"]').click();
+  await page.waitForTimeout(600);
+  try { await page.locator('text=Live / Fractional').first().click(); await page.waitForTimeout(800); } catch { console.warn('⚠  Live / Fractional nav item not found'); }
 });
 
 await browser.close();
-console.log('\n✅ 28 screenshots saved to:', OUT);
+console.log('\n✅ 30 screenshots saved to:', OUT);
 console.log('\nTo run against production:');
 console.log('  SCREENSHOT_BASE_URL=https://offgrid-trader.vercel.app ADMIN_TOKEN=<token> node capture.mjs');

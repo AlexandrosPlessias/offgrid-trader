@@ -1,12 +1,22 @@
-# Paper Trading — Alpaca
+# Trading — Alpaca
 
-MarketSage connects to **Alpaca's free paper-trading environment** so every
-actionable signal can automatically place a real bracket order on a virtual $100 k
-account. No real money is involved — it is a free simulation that uses the same
-REST API and market data as a live account.
+MarketSage connects to **Alpaca** and offers two independent trading engines,
+shown as tabs on the **Trading** page:
+
+- **📈 Order Trading** — whole-share **bracket** orders (entry + stop + take-profit)
+  on the primary Alpaca **paper** account. This is the original simulation engine
+  documented in most of this page.
+- **🪙 Fractional Trading** — **notional** fractional buys (e.g. $15 of a stock) on a
+  **second, separately-credentialed** Alpaca profile. Designed for a small
+  **real-money** budget: monitor on paper, then flip that profile's host to live.
+  See [Fractional Trading](#fractional-trading-real-money) below.
+
+No real money is involved in Order Trading — it is a free simulation that uses the
+same REST API and market data as a live account.
 
 > ⚠️ **Not financial advice.** For educational and research use only.
-> Paper trading results do not guarantee identical live results.
+> Paper trading results do not guarantee identical live results. Fractional Trading
+> can place **real-money** orders once you point its profile at the live host.
 
 ---
 
@@ -134,8 +144,10 @@ Returns `{"placed": true, "alpaca_order_id": "...", "status": "accepted"}` or
 
 ## Trading page
 
-The dedicated **Trading** tab (top navigation bar) is the primary paper-trading
-dashboard. It shows:
+The dedicated **Trading** tab (top navigation bar) has two sub-tabs:
+**📈 Order Trading** (this section) and **🪙 Fractional Trading**
+(see [Fractional Trading](#fractional-trading-real-money)). The Order Trading tab
+is the primary paper-trading dashboard. It shows:
 
 ### Account metrics
 
@@ -260,6 +272,119 @@ SQLite and take precedence.
 | `GET` | `/paper/market/snapshots` | Live price snapshots for watchlist tickers |
 | `POST` | `/settings/alpaca` | Save credentials + settings |
 | `POST` | `/settings/alpaca/test` | Test credentials without saving |
+
+---
+
+## Fractional Trading (real money)
+
+The **🪙 Fractional Trading** tab runs a separate engine designed for a small
+real-money budget (e.g. €/$100). Instead of whole-share bracket orders it places
+**notional fractional buys** — "$15 of AAPL" → ~0.07 shares — because Alpaca
+rejects fractional bracket orders.
+
+### Two named profiles
+
+Fractional trading uses a **second Alpaca profile** with its **own** API key,
+secret and host, completely separate from the Order Trading account:
+
+| | Order Trading | Fractional Trading |
+|---|---|---|
+| DB keys | `alpaca_key_id` / `alpaca_secret_key` / `alpaca_paper_url` | `frac_alpaca_key_id` / `frac_alpaca_secret_key` / `frac_alpaca_url` |
+| Host | paper | **paper → live** (you swap it) |
+| Orders | whole-share bracket | notional fractional buy + app-side exit |
+
+**Going live is a one-field swap:** during the monitoring period point the
+fractional profile at your **paper** keys + `paper-api.alpaca.markets`. When the
+paper track record looks good, edit the profile — switch its host to
+`api.alpaca.markets` and paste your **live** keys. Nothing else changes. (Alpaca
+paper and live are different accounts with different keys — the same key cannot do
+both.)
+
+### Entry, exit and criteria
+
+Fractional orders **cannot carry a broker-side stop/target bracket**, so exits are
+enforced by the app:
+
+```
+long signal → FracTradeSkill → notional market BUY (frac profile)
+                             → save frac_positions row (stop, target, mode)
+
+every ~60s (MonitorScheduler exit poller):
+    monitor_frac_positions()
+        read live price for each open position
+        price ≥ take_profit_price  → market SELL the held fraction   (reason: target)
+        price ≤ stop_price         → market SELL the held fraction   (reason: stop)
+        (optional) near market close + frac_eod_close → SELL          (reason: eod)
+```
+
+The stop/target come from the **same signal criteria** as Order Trading (the
+ATR-based levels from `detect_opportunities`). A dedicated ~60 s poller (separate
+from the slower scan interval) enforces them so stop-losses are honoured promptly.
+
+- **Long-only.** Alpaca cannot short fractional shares, so short signals are skipped
+  by this engine.
+- **Budget cap.** New position size + total open notional must stay ≤ `frac_budget`;
+  otherwise the buy is skipped.
+- **Dedup.** One open fractional position per ticker.
+
+### Placing fractional orders manually — 🪙 Frac buttons
+
+A **🪙 Frac** action sits next to the existing paper-order button on:
+
+- **Discovery** (Trending) — beside the 📈 Trade button on each candidate row.
+- **Explorer** — Section 7 (Signals detected), beside 📈 Place (long rows only).
+- **Signals** cards — beside 📈 Place Paper Order (long signals only).
+
+Clicking it places a fractional buy on the frac profile and creates a
+`frac_positions` row the poller then manages. When the profile host is **live**,
+the UI asks for an explicit real-money confirmation before sending.
+
+### Fractional tab dashboard
+
+The **🪙 Fractional Trading** tab shows a **Paper/Live** mode badge (with a
+real-money banner when live), account tiles, a **readiness readout** (closed
+trades / win rate / realized P&L on paper), an **open positions** table with a
+**💵 Cash out** button, and a **closed trades** table (with exit reason + realized
+P&L).
+
+### Settings — Live / Fractional Trading
+
+| Setting | `.env` key | Default | Description |
+|---|---|---|---|
+| Profile name | `FRAC_PROFILE_NAME` | `offgrid-trader-frac` | Display label for the profile. |
+| Account host | `FRAC_ALPACA_URL` | `https://paper-api.alpaca.markets/v2` | Paper ↔ Live selector; live = real money. |
+| API Key ID | `FRAC_ALPACA_KEY_ID` | *(unset)* | Fractional profile key (set-only from the UI). |
+| API Secret Key | `FRAC_ALPACA_SECRET_KEY` | *(unset)* | Fractional profile secret — never returned. |
+| Fractional trading enabled | DB only | `false` | Master toggle for the **automated** `FracTradeSkill` (not the manual 🪙 buttons). |
+| Per-trade size | `FRAC_POSITION_SIZE` | `15` | Notional (account currency) invested per fractional buy. |
+| Total budget | `FRAC_BUDGET` | `100` | Cap on total deployed notional across open positions. |
+| Min confidence | DB only | *(none)* | Optional confidence floor for the automated engine. |
+| Exit poll seconds | `FRAC_POLL_SECONDS` | `60` | How often the exit poller checks prices (min 30 s). |
+| End-of-day close | DB only | `false` | Sell open fractional positions near the market close. |
+
+### Fractional API endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/frac/settings` | Save the fractional profile + engine params |
+| `GET` | `/frac/account` | Fractional profile Alpaca account summary |
+| `GET` | `/frac/history` | Fractional profile equity curve (for the Portfolio Equity chart) |
+| `GET` | `/frac/positions` | Fractional positions (open enriched with live P&L) |
+| `GET` | `/frac/readiness` | Paper track record + current mode |
+| `POST` | `/frac/order` | Manual fractional buy (long-only; `confirm_live` for live host) |
+| `POST` | `/frac/positions/{ticker}/close` | Cash out a fractional position |
+| `POST` | `/frac/connection-test` | Validate frac credentials without saving |
+
+### Caveats
+
+- **Currency.** Alpaca US accounts are **USD**-denominated — a "€100" budget maps
+  to the account's USD balance; the budget number is in account currency. Confirm
+  fractional support + currency for your Alpaca entity before funding.
+- **Uptime.** Fractional positions have **no broker-side stop** — exits depend on
+  the app + poller running during market hours. If the app is down, open positions
+  are unmanaged until it restarts.
+- **Market hours.** Fractional orders are `day`-only (Alpaca does not allow `gtc`
+  for fractional), so they trade during regular US hours only.
 
 ---
 

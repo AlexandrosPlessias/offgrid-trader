@@ -175,6 +175,14 @@ The Trade button is state-driven and reflects asset tradability retrieved from t
 | Done | ✅ | Order placed successfully | — |
 | Failed | ❌ | Order failed | Hover tooltip shows error reason |
 
+#### 🪙 Frac button
+
+Next to the Trade button, a **🪙 Frac** button places a **fractional** buy on the
+[Fractional Trading](paper-trading.md#fractional-trading-real-money) profile
+(long-only). It derives the same −5% / +10% stop/target as the Trade button so the
+exit poller manages the cashout, and asks for confirmation when the fractional
+profile is pointed at the live (real-money) host.
+
 ### Price enrichment
 
 Alpaca `most_actives` returns only symbol + volume. After fetching, a single batch `yf.download` call fills in `price` and `percent_change` for all rows missing them before scoring and caching.

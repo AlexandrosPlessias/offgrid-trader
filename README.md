@@ -29,9 +29,10 @@ nav drawer. Code split into focused modules: 9 backend route files, 31 frontend 
 - **Recent news headlines** — last 7 days via Finnhub (optional; requires free `FINNHUB_API_KEY`)
 - **LLM reasoning** — all of the above is assembled into a structured prompt; every call is traced end-to-end in Aspire with input/output token counts and time-to-first-token (TTFT)
 
-### Paper trading (Alpaca)
+### Trading (Alpaca)
 
-- **Auto-placement** — every actionable signal automatically places a market bracket order (stop-loss + take-profit) on Alpaca's free paper account
+- **Order Trading** — every actionable signal automatically places a market bracket order (stop-loss + take-profit) on Alpaca's free paper account
+- **Fractional Trading** — an optional second engine on a separately-credentialed Alpaca profile places **notional fractional buys** (e.g. $15 of a stock) for a small **real-money** budget, cashing out on the signal's stop/target via an app-side poller. Monitor on paper, then flip the profile's host to live. Long-only. See [docs/wiki/paper-trading.md](docs/wiki/paper-trading.md#fractional-trading-real-money)
 - **Live watchlist prices** — Dashboard watchlist shows Price, Day Chg%, VWAP, Volume, H/L updated every 30 s during market hours via Alpaca market data API; polling stops when market is closed
 - **Paper Orders panel** — collapsible sidebar shows account equity, day P&L, open positions, and recent orders with cancel support
 - **Market clock** — header chip shows live market status (open/closed); scheduler and price polling are both market-hours gated
