@@ -38,6 +38,7 @@ The same content is available in-app on the **Learn** tab.
 | **Fee stress pass** | Whether the average R-multiple exceeds the estimated round-trip transaction cost (0.05 R — commissions + spread). A strategy that passes fee stress is viable net of realistic costs; one that fails is only profitable on paper. |
 | **Filled Average Price** | If your order executes in more than one batch (e.g. 6 shares at $10.00 then 4 shares at $10.05), this is the weighted average of what you actually paid — not the price you originally requested. Plain English: "the real price you ended up with across all the partial fills." |
 | **Forward P/E** | Price ÷ consensus analyst EPS estimate for the next 12 months. Lower than trailing P/E implies expected earnings growth. |
+| **Fractional trading** | Buying a *fraction* of a share by dollar amount (e.g. $15 of a $200 stock → 0.075 shares) instead of whole shares. MarketSage's Fractional engine uses this for a small real-money budget; because Alpaca can't attach a bracket to a fractional order, exits are enforced by an app-side poller and it is long-only. See [paper-trading.md](paper-trading.md#fractional-trading-real-money). |
 | **Golden Cross** | EMA 50 crossing above EMA 200 — a widely-watched long-term bullish signal. |
 | **In-sample (IS)** | A backtest run on the same date window used to select or tune parameters. Metrics are optimistic — the system implicitly "fit" its settings to this data. Use in-sample runs for exploration only; mark them with the toggle OFF. |
 | **Long** | Buying a security expecting its price to rise. Profit = exit price − entry price. |
@@ -45,6 +46,7 @@ The same content is available in-app on the **Learn** tab.
 | **Macro regime** | A qualitative label for the macro environment relative to equities. "Tailwind": low rates, low inflation, positive yield curve. "Headwind": inverted yield curve, high inflation, restrictive Fed. The system applies a confidence-score adjustment based on yield curve, CAPE, and CPI. |
 | **Max drawdown** | In the context of backtesting: the worst peak-to-trough decline of the cumulative R-multiple curve. Reported in R-multiples (not dollars). A max drawdown of 5 R means the system was at one point 5 risk-units below its previous high. |
 | **Max hold days** | The maximum number of trading days a backtest trade can stay open. If neither the stop nor the target is hit within this period, the trade closes at the market price on the final day. Default: 10 days. |
+| **Notional order** | An order specified by *dollar amount* (e.g. "$15 of AAPL") rather than a share count. Alpaca fills it as a fractional quantity at the market price. MarketSage's Fractional engine places notional buys; the round-trip stop/target is then managed app-side. |
 | **OHLCV** | Open, High, Low, Close, Volume — the five values stored for each candle/bar. |
 | **Overbought** | Price has risen so fast that buying momentum may be exhausted; a pullback is possible. RSI > 70. |
 | **Oversold** | Price has fallen so fast that selling momentum may be exhausted; a bounce is possible. RSI < 30. |

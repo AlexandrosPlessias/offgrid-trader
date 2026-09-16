@@ -10,7 +10,8 @@ const SETTINGS_GROUPS = [
     { id: 'settings-discovery',     icon: '🔥', label: 'Discovery' },
   ]},
   { label: 'Trading', icon: '📈', children: [
-    { id: 'settings-paper',         icon: '📈', label: 'Paper Trading' },
+    { id: 'settings-paper',         icon: '📈', label: 'Order Trading' },
+    { id: 'settings-frac',          icon: '🪙', label: 'Live / Fractional' },
   ]},
   { label: 'AI', icon: '🧠', children: [
     { id: 'settings-ai-provider',   icon: '🧠', label: 'AI Provider' },
@@ -236,6 +237,325 @@ function DiscoverySettingsSection() {
   )
 }
 
+function FracSettingsSection() {
+  const [fetchErr,     setFetchErr]     = useState(false)
+  const [profileName,  setProfileName]  = useState('')
+  const [url,          setUrl]          = useState('https://paper-api.alpaca.markets/v2')
+  const [keyId,        setKeyId]        = useState('')
+  const [keyIdSet,     setKeyIdSet]     = useState(false)
+  const [showKey,      setShowKey]      = useState(false)
+  const [secret,       setSecret]       = useState('')
+  const [secretSet,    setSecretSet]    = useState(false)
+  const [showSecret,   setShowSecret]   = useState(false)
+  const [enabled,      setEnabled]      = useState(false)
+  const [positionSize, setPositionSize] = useState(15)
+  const [budget,       setBudget]       = useState(100)
+  const [minConf,      setMinConf]      = useState(0)
+  const [pollSeconds,  setPollSeconds]  = useState(60)
+  const [eodClose,     setEodClose]     = useState(false)
+  const [readiness,    setReadiness]    = useState(null)
+  const [saveStatus,   setSaveStatus]   = useState(null)
+  const [saveErr,      setSaveErr]      = useState('')
+  const [testStatus,   setTestStatus]   = useState(null)   // null|'testing'|'ok'|'error'
+  const [testResult,   setTestResult]   = useState(null)
+  const [useEnv,       setUseEnv]       = useState(false)
+  const [keyIdEnvSet,  setKeyIdEnvSet]  = useState(false)
+  const [secretEnvSet, setSecretEnvSet] = useState(false)
+  const [env,          setEnv]          = useState({})     // raw .env default values
+
+  const isLive = url.includes('://api.alpaca.markets')
+
+  const hydrate = () => {
+    fetch(`${API}/settings`, { headers: getAuthHeaders() })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => {
+        setProfileName(d.frac_profile_name ?? '')
+        setUrl(d.frac_alpaca_url ?? 'https://paper-api.alpaca.markets/v2')
+        setKeyId(d.frac_alpaca_key_id ?? '')  // pre-fill; Key ID is not secret
+        setKeyIdSet(d.frac_alpaca_key_id_set ?? false)
+        setSecretSet(d.frac_alpaca_secret_set ?? false)
+        setEnabled(d.frac_trading_enabled ?? false)
+        setPositionSize(d.frac_position_size ?? 15)
+        setBudget(d.frac_budget ?? 100)
+        setMinConf(d.frac_min_confidence ?? 0)
+        setPollSeconds(d.frac_poll_seconds ?? 60)
+        setEodClose(d.frac_eod_close ?? false)
+        setKeyIdEnvSet(d.frac_alpaca_key_id_env_set ?? false)
+        setSecretEnvSet(d.frac_alpaca_secret_env_set ?? false)
+        setEnv({
+          keyId: d.frac_alpaca_key_id_env,
+          profileName: d.frac_profile_name_env,
+          url: d.frac_alpaca_url_env,
+          positionSize: d.frac_position_size_env,
+          budget: d.frac_budget_env,
+          pollSeconds: d.frac_poll_seconds_env,
+        })
+      })
+      .catch(() => setFetchErr(true))
+    fetch(`${API}/frac/readiness`, { headers: getAuthHeaders() })
+      .then(r => r.ok ? r.json() : null).then(setReadiness).catch(() => {})
+  }
+  useEffect(hydrate, [])
+
+  const save = async () => {
+    if (enabled && isLive &&
+        !window.confirm('⚠ Enabling live fractional trading uses REAL money. Continue?')) return
+    setSaveStatus('saving'); setSaveErr('')
+    const body = {
+      url, profile_name: profileName,
+      position_size: Number(positionSize), budget: Number(budget),
+      poll_seconds: Number(pollSeconds), eod_close: eodClose, enabled,
+      use_env: useEnv,
+    }
+    if (Number(minConf) > 0) body.min_confidence = Number(minConf)
+    if (!useEnv && keyId)  body.key_id = keyId
+    if (!useEnv && secret) body.secret_key = secret
+    try {
+      const r = await fetch(`${API}/frac/settings`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify(body),
+      })
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || 'Save failed') }
+      setKeyIdSet(keyIdSet || !!keyId); setSecretSet(secretSet || !!secret)
+      setKeyId(''); setSecret(''); setShowKey(false); setShowSecret(false)
+      setSaveStatus('ok'); setTimeout(() => setSaveStatus(null), 3000)
+      hydrate()
+    } catch (e) {
+      setSaveErr(e.message); setSaveStatus('error'); setTimeout(() => setSaveStatus(null), 4000)
+    }
+  }
+
+  const test = async () => {
+    setTestStatus('testing'); setTestResult(null)
+    try {
+      const r = await fetch(`${API}/frac/connection-test`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ url, key_id: keyId || undefined, secret_key: secret || undefined }),
+      })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok) { setTestStatus('error'); return }
+      setTestStatus('ok'); setTestResult(d.account ?? null)
+    } catch { setTestStatus('error') }
+  }
+
+  const hostBtn = (live, label, sub) => (
+    <button
+      type="button"
+      onClick={() => setUrl(live ? 'https://api.alpaca.markets/v2' : 'https://paper-api.alpaca.markets/v2')}
+      style={{
+        display: 'inline-flex', flexDirection: 'column', gap: 2, padding: '6px 14px', borderRadius: 8,
+        border: `1px solid ${isLive === live ? (live ? 'var(--red)' : 'var(--green)') : 'var(--border)'}`,
+        background: isLive === live ? (live ? 'rgba(239,68,68,.12)' : 'rgba(34,197,94,.12)') : 'transparent',
+        color: isLive === live ? (live ? 'var(--red)' : 'var(--green)') : 'var(--text-dim)',
+        fontWeight: isLive === live ? 700 : 400, cursor: 'pointer', textAlign: 'left',
+      }}
+    >
+      <span>{label}{isLive === live ? ' ✓' : ''}</span>
+      <span style={{ fontSize: 10, opacity: 0.75, fontWeight: 400 }}>{sub}</span>
+    </button>
+  )
+
+  return (
+    <SettingSection id="settings-frac" title="Live / Fractional Trading" icon="🪙">
+      <p className="text-dim" style={{ fontSize: 13, marginBottom: 16 }}>
+        A <strong>second Alpaca profile</strong> that buys <strong>fractional</strong> shares (e.g. $15 of a
+        stock) and cashes out on each signal's stop/target — designed for a small real-money budget.
+        Point it at <strong>paper</strong> keys to monitor, then switch the host to <strong>live</strong> and
+        paste live keys when you're ready. Long-only (Alpaca can't short fractional shares).
+      </p>
+      {fetchErr && (
+        <p style={{ fontSize: 13, color: 'var(--red)', marginBottom: 12 }}>
+          ⚠ Could not load settings — reload to retry.
+        </p>
+      )}
+
+      {/* Profile name */}
+      <div className="settings-field" style={{ marginBottom: 16 }}>
+        <label className="settings-label">Profile name
+          <span className="text-dim" style={{ fontWeight: 400, marginLeft: 6 }}>(e.g. "frac-live-100")</span>
+        </label>
+        <input type="text" value={profileName} onChange={e => setProfileName(e.target.value)}
+               className="settings-select" placeholder="offgrid-trader-frac" maxLength={80}
+               style={{ marginTop: 4, maxWidth: 320 }} />
+      </div>
+
+      {/* Host selector */}
+      <div className="settings-field" style={{ marginBottom: 16 }}>
+        <label className="settings-label">Account host</label>
+        <div style={{ display: 'flex', gap: 10, marginTop: 6 }}>
+          {hostBtn(false, '🟢 Paper', 'paper-api.alpaca.markets')}
+          {hostBtn(true,  '🔴 Live',  'api.alpaca.markets — real money')}
+        </div>
+      </div>
+
+      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                    letterSpacing: '0.09em', marginBottom: 12 }}>🔑 Fractional profile keys</div>
+
+      <button
+        type="button"
+        className={`settings-env-btn${useEnv ? ' active' : ''}`}
+        onClick={() => {
+          setUseEnv(v => {
+            const next = !v
+            if (next) {
+              // Pre-fill non-secret fields from .env defaults; keys come from env.
+              if (env.profileName) setProfileName(env.profileName)
+              if (env.url) setUrl(env.url)
+              if (env.positionSize != null) setPositionSize(env.positionSize)
+              if (env.budget != null) setBudget(env.budget)
+              if (env.pollSeconds != null) setPollSeconds(env.pollSeconds)
+            }
+            return next
+          })
+          setSecret(''); setShowKey(false); setShowSecret(false)
+        }}
+      >
+        {useEnv ? '✓ Using environment defaults' : '↩ Load Environment Default Values'}
+        <span className="settings-env-btn-sub">
+          {useEnv
+            ? '(click to clear and enter values manually)'
+            : '(if set in .env — FRAC_ALPACA_KEY_ID / FRAC_ALPACA_SECRET_KEY)'}
+        </span>
+      </button>
+
+      <div className="settings-field" style={{ marginBottom: 12, marginTop: 12 }}>
+        <label className="settings-label">API Key ID</label>
+        <div className="settings-secret-field" style={{ marginTop: 4 }}>
+          <input type={showKey ? 'text' : 'password'}
+                 value={useEnv ? (env.keyId ?? '') : keyId}
+                 onChange={e => setKeyId(e.target.value)} className="settings-select"
+                 autoComplete="new-password" disabled={useEnv}
+                 placeholder={
+                   useEnv
+                     ? (keyIdEnvSet ? '' : 'No Key ID set in .env')
+                     : (keyIdSet ? 'Key saved — focus to replace' : 'PKxxxxxxxxxxxxxxxxxxxx')
+                 } />
+          <button type="button" className="settings-secret-toggle" disabled={useEnv}
+                  onClick={() => setShowKey(v => !v)}>
+            {showKey ? 'Hide' : 'Show'}
+          </button>
+        </div>
+      </div>
+
+      <div className="settings-field" style={{ marginBottom: 16 }}>
+        <label className="settings-label">API Secret Key</label>
+        <div className="settings-secret-field" style={{ marginTop: 4 }}>
+          <input type={showSecret ? 'text' : 'password'}
+                 value={useEnv ? '' : (secret || (secretSet && !showSecret ? '••••••••••••' : ''))}
+                 onFocus={() => { if (!secret && secretSet) setSecret('') }}
+                 onChange={e => setSecret(e.target.value)} className="settings-select"
+                 disabled={useEnv}
+                 placeholder={
+                   useEnv
+                     ? (secretEnvSet ? 'Using Secret from .env' : 'No Secret set in .env')
+                     : (secretSet ? 'Secret saved — focus to replace' : 'xxxxxxxxxxxxxxxxxxxxxxxx')
+                 } />
+          <button type="button" className="settings-secret-toggle" disabled={useEnv}
+                  onClick={() => setShowSecret(v => !v)}>
+            {showSecret ? 'Hide' : 'Show'}
+          </button>
+        </div>
+      </div>
+
+      {/* Enable toggle */}
+      <div className="settings-row" style={{ marginBottom: 18 }}>
+        <div className="settings-row-label">
+          <span style={{ fontWeight: 600, color: enabled && isLive ? 'var(--red)' : undefined }}>
+            {enabled ? (isLive ? '🔴 LIVE — real money active' : '🟢 Fractional trading active (paper)') : 'Fractional trading disabled'}
+          </span>
+          <span className="text-dim" style={{ fontSize: 12 }}>
+            Auto-buys fractional shares on each actionable long signal (budget-capped)
+          </span>
+        </div>
+        <button className={`settings-toggle ${enabled ? 'on' : 'off'}`} onClick={() => setEnabled(v => !v)}>
+          <span className="settings-toggle-knob" />
+        </button>
+      </div>
+
+      <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0 16px', opacity: 0.4 }} />
+      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                    letterSpacing: '0.09em', marginBottom: 12 }}>💵 Sizing & exits</div>
+
+      <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 16 }}>
+        <div className="settings-field">
+          <label className="settings-label">Per-trade size</label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+            <span style={{ color: 'var(--dim)', fontSize: 13 }}>$</span>
+            <input type="number" min={1} step={1} value={positionSize}
+                   onChange={e => setPositionSize(e.target.value)} className="settings-num-input" style={{ width: 90 }} />
+          </div>
+        </div>
+        <div className="settings-field">
+          <label className="settings-label">Total budget</label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+            <span style={{ color: 'var(--dim)', fontSize: 13 }}>$</span>
+            <input type="number" min={1} step={10} value={budget}
+                   onChange={e => setBudget(e.target.value)} className="settings-num-input" style={{ width: 90 }} />
+          </div>
+        </div>
+        <div className="settings-field">
+          <label className="settings-label">Exit poll (s)
+            <InfoTip text="How often the app checks live prices to enforce stop/target on fractional positions." />
+          </label>
+          <input type="number" min={30} max={3600} step={30} value={pollSeconds}
+                 onChange={e => setPollSeconds(e.target.value)} className="settings-num-input" style={{ width: 90, marginTop: 4 }} />
+        </div>
+        <div className="settings-field" style={{ minWidth: 200 }}>
+          <label className="settings-label">Min confidence: <strong>{minConf}%</strong></label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+            <input type="range" min={0} max={100} step={5} value={minConf}
+                   onChange={e => setMinConf(Number(e.target.value))} className="filter-range" style={{ flex: 1 }} />
+            <span className="filter-val">{minConf}%</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="settings-row" style={{ marginBottom: 16 }}>
+        <div className="settings-row-label">
+          <span style={{ fontWeight: 600 }}>Close positions at end of day</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>Sell any open fractional positions near the market close</span>
+        </div>
+        <button className={`settings-toggle ${eodClose ? 'on' : 'off'}`} onClick={() => setEodClose(v => !v)}>
+          <span className="settings-toggle-knob" />
+        </button>
+      </div>
+
+      {/* Readiness readout */}
+      {readiness && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, padding: '10px 14px', marginBottom: 16,
+                      borderRadius: 8, background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 13 }}>
+          <span className="text-dim">Paper track record:</span>
+          <span><strong>{readiness.trades ?? 0}</strong> trades</span>
+          <span><strong>{Math.round((readiness.win_rate ?? 0) * 100)}%</strong> win rate</span>
+          <span style={{ color: (readiness.realized_pnl ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
+            <strong>${Number(readiness.realized_pnl ?? 0).toFixed(2)}</strong> realized
+          </span>
+        </div>
+      )}
+
+      {/* Save + Test */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10 }}>
+        <button className="btn-primary btn-sm" onClick={save} disabled={saveStatus === 'saving'}>
+          {saveStatus === 'saving' ? 'Saving…' : 'Save'}
+        </button>
+        <button className="btn-secondary btn-sm" onClick={test} disabled={testStatus === 'testing'}>
+          {testStatus === 'testing' ? 'Testing…' : 'Test Connection'}
+        </button>
+        {saveStatus === 'ok'    && <span className="settings-ok">✓ Saved</span>}
+        {saveStatus === 'error' && <span className="settings-err">✗ {saveErr || 'Save failed'}</span>}
+        {testStatus === 'ok' && (
+          <span className="settings-ok" style={{ fontSize: 12 }}>
+            ✓ Connected{testResult ? ` · Equity $${parseFloat(testResult.equity ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : ''}
+          </span>
+        )}
+        {testStatus === 'error' && (
+          <span className="settings-err" style={{ fontSize: 12 }}>✗ Connection failed — check credentials/host</span>
+        )}
+      </div>
+    </SettingSection>
+  )
+}
+
 function ChannelHeader({ icon, name, configured }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '18px 0 10px' }}>
@@ -255,6 +575,9 @@ function NotificationsSection() {
   // global alert dispatch
   const [alertsOn,     setAlertsOn]     = useState(true)
   const [alertsStatus, setAlertsStatus] = useState(null)
+  // per-order/fractional placement notifications
+  const [orderNotif,       setOrderNotif]       = useState(true)
+  const [orderNotifStatus, setOrderNotifStatus] = useState(null)
 
   // ntfy
   const [ntfyEnabled, setNtfyEnabled] = useState(false)
@@ -290,6 +613,7 @@ function NotificationsSection() {
   // test-all
   const [testStatus, setTestStatus] = useState(null)
   const [testMsg,    setTestMsg]    = useState('')
+  const [roundtrip,  setRoundtrip]  = useState(null)   // null|'waiting'|'confirmed'|'timeout'
 
   const applyCfg = (d) => {
     setCfg(d)
@@ -339,6 +663,26 @@ function NotificationsSection() {
     } catch { flash(setAlertsStatus, 'error', 3000) }
   }
 
+  // Hydrate the order-notification toggle from /settings (separate from channel config).
+  useEffect(() => {
+    fetch(`${API}/settings`, { headers: getAuthHeaders() })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setOrderNotif(d.order_notifications_enabled ?? true) })
+      .catch(() => {})
+  }, [])
+
+  const toggleOrderNotif = async () => {
+    const next = !orderNotif
+    try {
+      await fetch(`${API}/settings/order-notifications`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ enabled: next }),
+      })
+      setOrderNotif(next); flash(setOrderNotifStatus, 'ok', 2000)
+    } catch { flash(setOrderNotifStatus, 'error', 3000) }
+  }
+
   const saveChannel = async (url, body, setStatus, setErr) => {
     setStatus('saving'); setErr('')
     try {
@@ -372,8 +716,23 @@ function NotificationsSection() {
     saveChannel('/settings/notifications/email', body, setEmStatus, setEmErr)
   }
 
+  const pollRoundtrip = async (token) => {
+    setRoundtrip('waiting')
+    const deadline = Date.now() + 60_000
+    while (Date.now() < deadline) {
+      await new Promise(res => setTimeout(res, 2000))
+      try {
+        const r = await fetch(`${API}/notifications/test/status?token=${token}`, { headers: getAuthHeaders() })
+        const d = await r.json().catch(() => ({}))
+        if (d.status === 'confirmed') { setRoundtrip('confirmed'); return }
+        if (d.status === 'expired') break
+      } catch { /* keep polling until deadline */ }
+    }
+    setRoundtrip('timeout')
+  }
+
   const sendTest = async () => {
-    setTestStatus('testing'); setTestMsg('')
+    setTestStatus('testing'); setTestMsg(''); setRoundtrip(null)
     try {
       const r = await fetch(`${API}/notifications/test`, {
         method: 'POST',
@@ -383,7 +742,9 @@ function NotificationsSection() {
       const d = await r.json().catch(() => ({}))
       if (!r.ok) throw new Error(d.detail || 'Test failed')
       const summary = Object.entries(d.results || {}).map(([k, v]) => `${k}: ${v}`).join(' · ')
-      setTestStatus('ok'); setTestMsg(summary || 'Sent'); setTimeout(() => setTestStatus(null), 7000)
+      setTestStatus('ok'); setTestMsg(summary || 'Sent')
+      // Begin the round-trip wait — resolved when the user taps "Confirm receipt".
+      if (d.token) pollRoundtrip(d.token)
     } catch (e) {
       setTestStatus('error'); setTestMsg(e.message || 'Test failed'); setTimeout(() => setTestStatus(null), 7000)
     }
@@ -420,6 +781,23 @@ function NotificationsSection() {
         </button>
         {alertsStatus === 'ok'    && <span className="settings-ok" style={{ marginLeft: 8 }}>✓</span>}
         {alertsStatus === 'error' && <span className="settings-err" style={{ marginLeft: 8 }}>✗</span>}
+      </div>
+
+      {/* Order / fractional placement notifications */}
+      <div className="settings-row">
+        <div className="settings-row-label">
+          <span>Order &amp; fractional notifications</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>
+            {orderNotif
+              ? 'Enabled — a push fires each time an order or fractional buy is placed'
+              : 'Off — no notification when orders / fractional buys are placed'}
+          </span>
+        </div>
+        <button className={`settings-toggle ${orderNotif ? 'on' : 'off'}`} onClick={toggleOrderNotif}>
+          <span className="settings-toggle-knob" />
+        </button>
+        {orderNotifStatus === 'ok'    && <span className="settings-ok" style={{ marginLeft: 8 }}>✓</span>}
+        {orderNotifStatus === 'error' && <span className="settings-err" style={{ marginLeft: 8 }}>✗</span>}
       </div>
 
       {/* ntfy */}
@@ -545,6 +923,20 @@ function NotificationsSection() {
         {testStatus === 'ok'    && <span className="settings-ok">✓ {testMsg}</span>}
         {testStatus === 'error' && <span className="settings-err">✗ {testMsg}</span>}
       </div>
+      {/* Round-trip confirmation — resolved when the user taps the channel action */}
+      {roundtrip && (
+        <div style={{ fontSize: 12, marginTop: 4, paddingLeft: 2 }}>
+          {roundtrip === 'waiting' && (
+            <span className="text-dim">⏳ Waiting for confirmation… tap “✅ Confirm receipt” in the notification (60&nbsp;s).</span>
+          )}
+          {roundtrip === 'confirmed' && (
+            <span style={{ color: 'var(--green)', fontWeight: 600 }}>✅ Round-trip confirmed — delivery, action routing and feedback all work.</span>
+          )}
+          {roundtrip === 'timeout' && (
+            <span style={{ color: '#fbbf24' }}>⚠ No response received — the action link wasn’t tapped, or the backend URL isn’t reachable from your device.</span>
+          )}
+        </div>
+      )}
       </>)}
     </SettingSection>
   )
@@ -1301,6 +1693,9 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
           )}
         </div>
       </SettingSection>
+
+      {/* ── Live / Fractional Trading ─────────────────────────────────────── */}
+      <FracSettingsSection />
 
       {/* ── AI Provider ───────────────────────────────────────────────────── */}
       <SettingSection id="settings-ai-provider" title="AI Provider" icon="🧠">

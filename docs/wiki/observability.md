@@ -49,6 +49,10 @@ POST /analyze  (root — FastAPI middleware)
     │
     ├── skill.persist                 ← PersistSkill.run()
     │
+    ├── skill.paper_trade             ← PaperTradeSkill.run()   (bracket orders, optional)
+    │
+    ├── skill.frac_trade              ← FracTradeSkill.run()    (fractional buys, optional)
+    │
     └── skill.alert                   ← AlertSkill.run()
 ```
 

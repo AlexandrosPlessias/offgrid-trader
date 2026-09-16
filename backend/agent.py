@@ -36,6 +36,7 @@ from backend.skills import AgentContext, Skill, SkillResult
 from backend.skills.ai_analysis import AIAnalysisSkill
 from backend.skills.alert import AlertSkill
 from backend.skills.fetch_data import FetchDataSkill
+from backend.skills.frac_trade import FracTradeSkill
 from backend.skills.opportunity_detect import OpportunityDetectSkill
 from backend.skills.paper_trade import PaperTradeSkill
 from backend.skills.persist import PersistSkill
@@ -84,6 +85,7 @@ DEFAULT_SKILL_CLASSES: list[type[Skill]] = [
     OpportunityDetectSkill,
     PersistSkill,
     PaperTradeSkill,  # after persist (needs saved_signal_ids), before alerts
+    FracTradeSkill,  # fractional buys on the 2nd (frac) Alpaca profile
     AlertSkill,
 ]
 

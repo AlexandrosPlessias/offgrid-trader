@@ -256,6 +256,38 @@ CREATE TABLE IF NOT EXISTS watchlist_groups (
     tickers    TEXT    NOT NULL DEFAULT '[]',   -- JSON array
     created_at TEXT    NOT NULL
 );
+
+-- Fractional-trading positions: one row per fractional buy on the *frac*
+-- Alpaca profile (a second account, paper during monitoring then live).
+-- Unlike paper_orders (bracket orders), fractional orders carry no broker-side
+-- stop/target — the scheduler's exit poller closes them when price crosses
+-- stop_price/take_profit_price.  ``mode`` records paper vs live at open time.
+CREATE TABLE IF NOT EXISTS frac_positions (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id           INTEGER REFERENCES signals(id) ON DELETE SET NULL,
+    ticker              TEXT    NOT NULL,
+    side                TEXT    NOT NULL DEFAULT 'buy',  -- long-only for now
+    notional            REAL,              -- $ amount invested at entry
+    qty                 REAL,              -- fractional shares held (from Alpaca)
+    entry_price         REAL,              -- fill price (backfilled by poller)
+    stop_price          REAL,
+    take_profit_price   REAL,
+    status              TEXT    NOT NULL DEFAULT 'open',  -- open|closed|error
+    alpaca_buy_order_id  TEXT   UNIQUE,
+    alpaca_sell_order_id TEXT,
+    exit_price          REAL,
+    exit_reason         TEXT,              -- stop|target|manual|eod
+    realized_pnl        REAL,
+    mode                TEXT,              -- 'paper' | 'live' at open time
+    -- Denormalised signal fields (survive parent signal deletion).
+    signal_confidence   REAL,
+    signal_source       TEXT,
+    signal_timestamp    TEXT,
+    opened_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    closed_at           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_frac_positions_ticker ON frac_positions(ticker);
+CREATE INDEX IF NOT EXISTS idx_frac_positions_status ON frac_positions(status);
 """
 
 
@@ -1540,6 +1572,157 @@ def get_paper_order_by_alpaca_id(alpaca_order_id: str, db_path: str | None = Non
             (alpaca_order_id,),
         ).fetchone()
     return dict(row) if row else None
+
+
+# --------------------------------------------------------------------------- #
+# Fractional trading helpers
+# --------------------------------------------------------------------------- #
+def save_frac_position(pos: dict, db_path: str | None = None) -> int:
+    """Insert a new fractional position row and return its id."""
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO frac_positions
+                (signal_id, ticker, side, notional, qty, entry_price,
+                 stop_price, take_profit_price, status, alpaca_buy_order_id,
+                 mode, signal_confidence, signal_source, signal_timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                pos.get("signal_id"),
+                pos["ticker"],
+                pos.get("side", "buy"),
+                pos.get("notional"),
+                pos.get("qty"),
+                pos.get("entry_price"),
+                pos.get("stop_price"),
+                pos.get("take_profit_price"),
+                pos.get("status", "open"),
+                pos.get("alpaca_buy_order_id"),
+                pos.get("mode"),
+                pos.get("signal_confidence"),
+                pos.get("signal_source"),
+                pos.get("signal_timestamp"),
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid or 0
+
+
+def get_frac_positions(
+    status: str | None = None, limit: int = 200, db_path: str | None = None
+) -> list[dict]:
+    """Return fractional positions (most recent first), optionally by status."""
+    with _connect(db_path) as conn:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM frac_positions WHERE status = ? ORDER BY opened_at DESC LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM frac_positions ORDER BY opened_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_open_frac_position_by_ticker(ticker: str, db_path: str | None = None) -> dict | None:
+    """Return the open fractional position for a ticker, or None.
+
+    Used to prevent duplicate fractional positions in the same ticker.
+    """
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM frac_positions WHERE ticker = ? AND status = 'open' LIMIT 1",
+            (ticker,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_frac_position(position_id: int, updates: dict, db_path: str | None = None) -> None:
+    """Update mutable fields of a fractional position identified by its row id."""
+    allowed = {
+        "status",
+        "notional",
+        "qty",
+        "entry_price",
+        "stop_price",
+        "take_profit_price",
+        "exit_price",
+        "exit_reason",
+        "realized_pnl",
+        "alpaca_sell_order_id",
+        "closed_at",
+    }
+    fields = {k: v for k, v in updates.items() if k in allowed and v is not None}
+    if not fields:
+        return
+    # Keys are validated against the allowlist above — no injection risk.
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = [*fields.values(), position_id]
+    with _connect(db_path) as conn:
+        conn.execute(
+            f"UPDATE frac_positions SET {set_clause} WHERE id = ?",  # noqa: S608
+            values,
+        )
+        conn.commit()
+
+
+def get_open_frac_notional(mode: str | None = None, db_path: str | None = None) -> float:
+    """Return total notional currently deployed in open fractional positions.
+
+    Used by the budget cap: new position size + this sum must stay <= budget.
+    """
+    with _connect(db_path) as conn:
+        if mode:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(notional), 0) FROM frac_positions"
+                " WHERE status = 'open' AND mode = ?",
+                (mode,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(notional), 0) FROM frac_positions WHERE status = 'open'",
+            ).fetchone()
+    return float(row[0] or 0)
+
+
+def get_frac_readiness_stats(mode: str = "paper", db_path: str | None = None) -> dict:
+    """Return a track-record summary for the fractional engine in ``mode``.
+
+    Drives the "readiness" readout the user watches before flipping to live.
+    """
+    with _connect(db_path) as conn:
+        closed = conn.execute(
+            """
+            SELECT
+                COUNT(*)                                        AS trades,
+                COALESCE(SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END), 0) AS wins,
+                COALESCE(SUM(realized_pnl), 0)                  AS realized_pnl,
+                MIN(opened_at)                                  AS first_at,
+                MAX(closed_at)                                  AS last_at
+            FROM frac_positions
+            WHERE status = 'closed' AND mode = ?
+            """,
+            (mode,),
+        ).fetchone()
+        open_count = conn.execute(
+            "SELECT COUNT(*) FROM frac_positions WHERE status = 'open' AND mode = ?",
+            (mode,),
+        ).fetchone()[0]
+    trades = int(closed["trades"] or 0)
+    wins = int(closed["wins"] or 0)
+    return {
+        "mode": mode,
+        "trades": trades,
+        "wins": wins,
+        "win_rate": round(wins / trades, 4) if trades else 0.0,
+        "realized_pnl": round(float(closed["realized_pnl"] or 0), 4),
+        "open_positions": int(open_count or 0),
+        "first_at": closed["first_at"],
+        "last_at": closed["last_at"],
+    }
 
 
 # --------------------------------------------------------------------------- #

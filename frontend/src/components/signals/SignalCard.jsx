@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { API, getAuthHeaders } from '../../utils/api'
+import { API, getAuthHeaders, placeFracOrder } from '../../utils/api'
 import { fmtN, fmtTime } from '../../utils/fmt'
 import { SOURCE_LABEL } from '../../utils/colors'
 import LLMReasoning from '../analysis/LLMReasoning'
@@ -54,6 +54,25 @@ export default function SignalCard({ r, expanded, onToggle, onDelete, existingOr
   const conf     = r.confidence ?? 0
   const modelTag = r.llm_model || null
   const [orderState, setOrderState] = useState(null) // null | 'placing' | 'placed' | 'exists' | string(error)
+  const [fracState, setFracState] = useState(null)   // null | 'placing' | 'placed' | string(error)
+
+  const placeFrac = async (e) => {
+    e.stopPropagation()
+    setFracState('placing')
+    const { ok, cancelled, data } = await placeFracOrder({
+      ticker:            r.ticker,
+      entry:             r.entry ?? r.price,
+      stop:              r.stop,
+      target:            r.target,
+      side:              'buy',
+      signal_id:         r.id,
+      signal_confidence: r.confidence ?? null,
+      signal_source:     r.source ?? (r.sources ? r.sources.join('+') : null),
+      signal_timestamp:  r.timestamp ?? null,
+    })
+    if (cancelled) { setFracState(null); return }
+    setFracState(ok ? 'placed' : (data.detail ?? 'Error'))
+  }
 
   const placeOrder = async (e) => {
     e.stopPropagation()
@@ -283,6 +302,31 @@ export default function SignalCard({ r, expanded, onToggle, onDelete, existingOr
               )}
             </>
           )}
+          <>
+            {fracState !== 'placed' && (
+              <button
+                onClick={placeFrac}
+                disabled={fracState === 'placing' || !isLong}
+                title={isLong
+                  ? "Place a fractional buy — cashes out on this signal's stop/target"
+                  : 'Fractional is long-only — Alpaca can’t short fractional shares'}
+                style={{
+                  fontSize: 11, padding: '3px 12px', borderRadius: 5,
+                  cursor: !isLong ? 'not-allowed' : fracState === 'placing' ? 'wait' : 'pointer',
+                  opacity: isLong ? 1 : 0.4,
+                  background: 'color-mix(in srgb, #d4a017 15%, transparent)',
+                  border: '1px solid color-mix(in srgb, #d4a017 35%, transparent)',
+                  color: '#d4a017', fontWeight: 600,
+                }}
+              >
+                {fracState === 'placing' ? '⏳ Placing…' : '🪙 Frac'}
+              </button>
+            )}
+            {fracState === 'placed' && <span style={{ fontSize: 11, color: 'var(--green)' }}>✓ Frac placed</span>}
+            {fracState && !['placing','placed'].includes(fracState) && (
+              <span style={{ fontSize: 11, color: 'var(--red)' }}>✗ {fracState}</span>
+            )}
+          </>
         </div>
       )}
 

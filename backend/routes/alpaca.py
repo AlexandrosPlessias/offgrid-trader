@@ -253,6 +253,16 @@ def place_paper_order_manual(req: ManualOrderRequest) -> dict[str, Any]:
             "signal_timestamp": req.signal_timestamp,
         }
     )
+    from backend.alerts import send_order_notification
+
+    send_order_notification(
+        kind="order",
+        ticker=req.ticker,
+        side=req.side,
+        amount=notional,
+        mode="paper",
+        detail=f"stop {req.stop} / target {req.target}",
+    )
     return {
         "placed": True,
         "alpaca_order_id": alpaca_order_id,

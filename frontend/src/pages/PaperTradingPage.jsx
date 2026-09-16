@@ -162,7 +162,7 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
       {/* Header row */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-          <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>📈 Paper Trading</h2>
+          <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>📈 Order Trading</h2>
           {profileName && (
             <span style={{
               fontSize: 12, fontWeight: 600, color: 'var(--accent)',
@@ -172,6 +172,13 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
               {profileName}
             </span>
           )}
+          <span style={{
+            fontSize: 12, fontWeight: 700, color: 'var(--green)',
+            background: 'rgba(34,197,94,0.14)', border: '1px solid rgba(34,197,94,0.4)',
+            borderRadius: 20, padding: '2px 10px',
+          }}>
+            PAPER
+          </span>
         </div>
         <button className="btn-ghost" onClick={load} disabled={loading} style={{ fontSize: 12 }}>
           {loading ? '↻ Loading…' : '↻ Refresh'}

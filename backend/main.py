@@ -168,7 +168,7 @@ app.add_middleware(
 # /health and /auth/verify are always open (health probe + login endpoint).
 # When ADMIN_TOKEN is not set the middleware is a no-op (local / dev mode).
 # --------------------------------------------------------------------------- #
-_UNPROTECTED_PATHS = {"/health", "/auth/verify"}
+_UNPROTECTED_PATHS = {"/health", "/auth/verify", "/notifications/test/confirm"}
 
 
 class _AdminTokenMiddleware(BaseHTTPMiddleware):

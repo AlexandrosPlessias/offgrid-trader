@@ -97,10 +97,9 @@ run "Flake8" "$VENV/bin/flake8" backend/ tests/ \
 run "Black" "$VENV/bin/black" --check --diff --line-length 100 backend/ tests/
 
 # ── 6. Smoke tests ────────────────────────────────────────────────────────────
-# smoke_test.py uses sys.exit() directly (not pytest fixtures) so we run it
-# as a plain Python script. All backend runtime deps must be in the venv
-# (included via -r ../../requirements/backend.txt in requirements.dev.txt).
-run "Smoke tests" "$PY" tests/smoke/smoke_test.py
+# The smoke suite is a pytest tree under tests/smoke/ (fixtures in conftest.py).
+# All backend runtime deps must be in the venv (via requirements.dev.txt).
+run "Smoke tests" "$PY" -m pytest tests/smoke/ -q -p no:warnings
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""

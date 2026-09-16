@@ -11,7 +11,7 @@ enabled:
 |---|---|---|---|
 | **ntfy** (recommended) | Push notification (mobile + browser) | None — topic name is the only secret | Self-hosted on your own infrastructure |
 | **Telegram** | Bot message with inline buttons | BotFather token + chat ID | Sent via Telegram's servers |
-| **Email** | Gmail SMTP | App Password | Sent via Gmail |
+| ~~**Email**~~ | *Descoped* | — | No longer wired into the send path — ntfy/Telegram cover the same cases |
 
 > ⚠️ **Not financial advice.** Signals are for educational/research purposes only.
 > Action buttons place orders on your **paper trading** account, not real money.
@@ -64,10 +64,34 @@ Add a subscription pointing at **your** server (not the default ntfy.sh):
 
 ### 3. Enable via the Settings page (recommended)
 
-All three channels live in one place: **Settings** (⚙) → **Notifications**. Each row
+Both active channels (ntfy, Telegram) live in one place: **Settings** (⚙) → **Notifications**. Each row
 shows a **● configured / ○ not configured** chip, has its own **Save**, a **Load env**
 button (pulls the `.env`/secret defaults into the form), and there's a single
 **🔔 Send test to all enabled channels** button at the bottom.
+
+### Round-trip test confirmation
+
+The **Send test** message includes a **✅ Confirm receipt** action (an ntfy action
+button and a Telegram inline button). Tapping it proves the *whole* loop —
+credentials → delivery → action routing → frontend feedback — in one click:
+
+1. The test carries a **single-use token** (TTL 60 s).
+2. Tapping the button calls `POST/GET /notifications/test/confirm?token=<uuid>`
+   (no auth — the token is the proof; ntfy uses POST, a Telegram URL button opens
+   a browser GET).
+3. Settings polls `/notifications/test/status?token=` and updates inline:
+   **⏳ Waiting for confirmation…** → **✅ Round-trip confirmed** (or, after 60 s,
+   **⚠ No response received**).
+
+> The confirm link points at `BACKEND_PUBLIC_URL`, so the round-trip only completes
+> when your backend is reachable from the device that taps the button (a public URL,
+> not `localhost`). Delivery still works locally; only the confirm hop needs reachability.
+
+### Order & fractional placement notifications
+
+A separate toggle — **Order & fractional notifications** (default **on**) — pushes a
+short message to your channels each time an order or fractional buy is placed
+(e.g. `🪙 Fractional buy placed: BUY AAPL — $15 · LIVE 💰`).
 
 For ntfy:
 1. Toggle **Enable** on.
@@ -239,7 +263,13 @@ fly secrets set TELEGRAM_WEBHOOK_SECRET=<your-secret>
 
 ---
 
-## Email — Gmail SMTP
+## Email — Gmail SMTP (descoped)
+
+> ⚠️ **Email is descoped.** It is no longer wired into the notification send path
+> — signals, order/fractional placements, and the round-trip test all go via ntfy
+> and Telegram only. The SMTP code and config below are retained but inert; the
+> Settings UI section is commented out. The steps remain for reference if you
+> re-enable `send_email()` in `backend/alerts.py`.
 
 ### Setup
 

@@ -99,6 +99,13 @@ def set_signal_scan_llm(request: SignalScanLlmRequest) -> dict[str, Any]:
     return {"signal_scan_llm_enabled": request.enabled}
 
 
+@router.post("/settings/order-notifications")
+def set_order_notifications(request: SignalScanLlmRequest) -> dict[str, Any]:
+    """Enable/disable the notification sent when an order or fractional buy is placed."""
+    set_setting("order_notifications_enabled", "true" if request.enabled else "false")
+    return {"order_notifications_enabled": request.enabled}
+
+
 @router.get("/settings")
 def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
     """Return current effective settings (env defaults overridden by DB values)."""
@@ -139,6 +146,8 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
         "scheduler_running": scheduler.status()["running"],
         # Signal-scan LLM switch — default True (enabled) if never explicitly set.
         "signal_scan_llm_enabled": get_setting("signal_scan_llm_enabled", "true") != "false",
+        # Notify configured channels whenever an order / fractional position is placed.
+        "order_notifications_enabled": get_setting("order_notifications_enabled", "true") == "true",
         # Alpaca paper trading
         "alpaca_paper_url": (get_setting("alpaca_paper_url", "") or cfg.alpaca.paper_url),
         # Key ID is not secret (analogous to a username) — safe to return in plain text
@@ -159,6 +168,43 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
             else None
         ),
         "paper_profile_name": get_setting("paper_profile_name", ""),
+        # Fractional trading — second Alpaca profile (paper during monitoring, live later).
+        "frac_alpaca_url": (get_setting("frac_alpaca_url", "") or cfg.frac.url),
+        "frac_alpaca_key_id": (get_setting("frac_alpaca_key_id", "") or cfg.frac.key_id),
+        "frac_alpaca_key_id_set": bool(get_setting("frac_alpaca_key_id", "") or cfg.frac.key_id),
+        "frac_alpaca_secret_set": bool(
+            get_setting("frac_alpaca_secret_key", "") or cfg.frac.secret_key
+        ),
+        "frac_profile_name": (get_setting("frac_profile_name", "") or cfg.frac.profile_name),
+        "frac_trading_enabled": get_setting("frac_trading_enabled", "false") == "true",
+        "frac_position_size": float(
+            get_setting("frac_position_size", "") or cfg.frac.position_size
+        ),
+        "frac_budget": float(get_setting("frac_budget", "") or cfg.frac.budget),
+        "frac_min_confidence": (
+            float(get_setting("frac_min_confidence", ""))
+            if get_setting("frac_min_confidence", "")
+            else None
+        ),
+        "frac_poll_seconds": int(get_setting("frac_poll_seconds", "") or cfg.frac.poll_seconds),
+        "frac_eod_close": get_setting("frac_eod_close", "false") == "true",
+        "frac_mode": (
+            "live"
+            if "://api.alpaca.markets" in (get_setting("frac_alpaca_url", "") or cfg.frac.url)
+            else "paper"
+        ),
+        # Env-only flags/values — True/raw when the .env var is set (DB ignored).
+        # Powers the "Load Environment Default Values" button in the frac UI.
+        "frac_alpaca_key_id_env_set": bool(cfg.frac.key_id),
+        "frac_alpaca_secret_env_set": bool(cfg.frac.secret_key),
+        # Key ID is non-secret (username-like) — return the raw env value so the
+        # UI can show the actual key when "Load Environment Default Values" is on.
+        "frac_alpaca_key_id_env": cfg.frac.key_id,
+        "frac_profile_name_env": cfg.frac.profile_name,
+        "frac_alpaca_url_env": cfg.frac.url,
+        "frac_position_size_env": cfg.frac.position_size,
+        "frac_budget_env": cfg.frac.budget,
+        "frac_poll_seconds_env": cfg.frac.poll_seconds,
     }
 
 
@@ -518,11 +564,23 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
     ntfy accepts optional topic/server overrides so the user can test what's typed
     in the form before saving; Telegram and Email use their saved/effective config.
     """
-    from backend.alerts import send_email, send_telegram
+    from backend.alerts import send_telegram
     from backend.notifications.ntfy import post_ntfy, resolve_server, resolve_topic
+    from backend.routes.notifications import new_roundtrip_token
+
+    # Round-trip token: the confirm action tapped in the channel proves the full
+    # loop (credentials → delivery → action routing → frontend feedback) works.
+    token = new_roundtrip_token()
+    base = get_settings().backend_public_url.rstrip("/")
+    confirm_url = f"{base}/notifications/test/confirm?token={token}"
 
     subject = "MarketSage — test notification"
-    body = "If you can read this, your notification channel is wired up correctly. ✅"
+    body = (
+        "If you can read this, your notification channel is wired up correctly. ✅\n"
+        "Tap “✅ Confirm receipt” to complete the round-trip test."
+    )
+    actions = [{"label": "✅ Confirm receipt", "url": confirm_url, "method": "POST"}]
+    tg_markup = {"inline_keyboard": [[{"text": "✅ Confirm receipt", "url": confirm_url}]]}
     results: dict[str, str] = {}
 
     # ntfy (with optional unsaved overrides)
@@ -530,13 +588,16 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
     server = (request.server or "").strip() or resolve_server()
     if topic:
         results["ntfy"] = (
-            "sent" if post_ntfy(server, topic, subject, body, priority="default") else "failed"
+            "sent"
+            if post_ntfy(server, topic, subject, body, priority="default", actions=actions)
+            else "failed"
         )
     else:
         results["ntfy"] = "skipped (not configured)"
 
-    results["telegram"] = "sent" if send_telegram(subject, body) else "skipped or failed"
-    results["email"] = "sent" if send_email(subject, body) else "skipped or failed"
+    results["telegram"] = (
+        "sent" if send_telegram(subject, body, reply_markup=tg_markup) else "skipped or failed"
+    )
 
     any_sent = any(v == "sent" for v in results.values())
     if not any_sent:
@@ -544,4 +605,4 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
             status_code=502,
             detail="No channel accepted the test. Enable and configure at least one channel.",
         )
-    return {"ok": True, "results": results}
+    return {"ok": True, "results": results, "token": token, "ttl": 60}

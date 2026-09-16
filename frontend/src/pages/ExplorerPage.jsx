@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useAnalyzeStream } from '../hooks/useAnalyzeStream'
-import { API, getAuthHeaders } from '../utils/api'
+import { API, getAuthHeaders, placeFracOrder } from '../utils/api'
 import { fmtN, fmtTime, fmtMarketCap, fmtNewsDate } from '../utils/fmt'
 import { INIT_STEPS } from '../components/analysis/AnalysisStepper'
 import AnalysisStepper from '../components/analysis/AnalysisStepper'
@@ -46,6 +46,7 @@ export default function ExplorerPage({ initialResult, onBack, modelName, onOpenI
   const [historyExpanded, setHistoryExpanded] = useState(false)
   // Section 7 place-order state — must live here, not inside the render IIFE
   const [sec7Orders, setSec7Orders] = useState({})
+  const [sec7Frac, setSec7Frac] = useState({})
 
   // Use streamed result if available, otherwise show pre-loaded result from dashboard
   const result    = streamResult ?? initialResult
@@ -1011,6 +1012,21 @@ export default function ExplorerPage({ initialResult, onBack, modelName, onOpenI
                     else setSec7Orders(s => ({ ...s, [idx]: data.placed ? 'placed' : 'exists' }))
                   } catch { setSec7Orders(s => ({ ...s, [idx]: 'Error' })) }
                 }
+                const placeFracFromSec7 = async (opp, idx) => {
+                  setSec7Frac(s => ({ ...s, [idx]: 'placing' }))
+                  const { ok, cancelled, data } = await placeFracOrder({
+                    ticker:            result.ticker,
+                    side:              'buy',
+                    entry:             opp.entry ?? opp.price,
+                    stop:              opp.stop,
+                    target:            opp.target,
+                    signal_confidence: opp.confidence ?? null,
+                    signal_source:     opp.source ?? (opp.sources ? opp.sources.join('+') : null),
+                    signal_timestamp:  opp.timestamp ?? null,
+                  })
+                  if (cancelled) { setSec7Frac(s => ({ ...s, [idx]: undefined })); return }
+                  setSec7Frac(s => ({ ...s, [idx]: ok ? 'placed' : (data.detail ?? 'Error') }))
+                }
                 const sorted = [...opps].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))
                 return (
                   <div className="table-wrap">
@@ -1093,6 +1109,31 @@ export default function ExplorerPage({ initialResult, onBack, modelName, onOpenI
                                 {os && !['placing','placed','exists'].includes(os) && (
                                   <span style={{ fontSize: 10, color: 'var(--red)' }} title={os}>✗ Error</span>
                                 )}
+                                {canPlace && (() => {
+                                  const fo = sec7Frac[i]
+                                  const isShort = opp.type !== 'long'
+                                  if (fo === 'placed') return <span style={{ fontSize: 10, color: 'var(--green)', marginLeft: 6 }}>✓ Frac</span>
+                                  if (fo && fo !== 'placing') return <span style={{ fontSize: 10, color: 'var(--red)', marginLeft: 6 }} title={fo}>✗ Frac</span>
+                                  return (
+                                    <button
+                                      onClick={() => { if (!isShort) placeFracFromSec7(opp, i) }}
+                                      disabled={fo === 'placing' || isShort}
+                                      title={isShort
+                                        ? 'Fractional is long-only — Alpaca can’t short fractional shares'
+                                        : "Place a fractional buy — cashes out on this signal's stop/target"}
+                                      style={{
+                                        fontSize: 10, padding: '2px 7px', borderRadius: 4, marginLeft: 6,
+                                        cursor: isShort ? 'not-allowed' : fo === 'placing' ? 'wait' : 'pointer',
+                                        opacity: isShort ? 0.4 : 1,
+                                        background: 'color-mix(in srgb, #d4a017 14%, transparent)',
+                                        border: '1px solid color-mix(in srgb, #d4a017 35%, transparent)',
+                                        color: '#d4a017', fontWeight: 600, whiteSpace: 'nowrap',
+                                      }}
+                                    >
+                                      {fo === 'placing' ? '⏳' : '🪙 Frac'}
+                                    </button>
+                                  )
+                                })()}
                               </td>
                             </tr>
                           )

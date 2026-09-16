@@ -145,6 +145,16 @@ class PaperTradeSkill(Skill):
                     opp["ticker"],
                     alpaca_order_id,
                 )
+                from backend.alerts import send_order_notification
+
+                send_order_notification(
+                    kind="order",
+                    ticker=opp["ticker"],
+                    side=side,
+                    amount=notional,
+                    mode="paper",
+                    detail=f"stop {stop} / target {target}",
+                )
             except AlpacaError as exc:
                 _log.warning("paper_trade: order failed for %s: %s", opp["ticker"], exc)
 

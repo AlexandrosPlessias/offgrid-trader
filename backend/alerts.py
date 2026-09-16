@@ -146,8 +146,12 @@ def send_email(subject: str, body: str) -> bool:
     #     return False
 
 
-def send_telegram(subject: str, body: str) -> bool:
-    """Send *subject* + *body* via Telegram Bot API. Returns success."""
+def send_telegram(subject: str, body: str, reply_markup: dict | None = None) -> bool:
+    """Send *subject* + *body* via Telegram Bot API. Returns success.
+
+    ``reply_markup`` (optional) is an inline-keyboard dict, e.g. a URL button:
+    ``{"inline_keyboard": [[{"text": "✅ Confirm", "url": "https://…"}]]}``.
+    """
 
     import httpx  # already in requirements; local import to avoid top-level dep
 
@@ -157,19 +161,31 @@ def send_telegram(subject: str, body: str) -> bool:
 
     text = f"*{subject}*\n\n{body}"
     url = f"https://api.telegram.org/bot{tg['bot_token']}/sendMessage"
+    payload: dict[str, Any] = {
+        "chat_id": tg["chat_id"],
+        "text": text,
+        "parse_mode": "Markdown",
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
-        r = httpx.post(
-            url,
-            json={
-                "chat_id": tg["chat_id"],
-                "text": text,
-                "parse_mode": "Markdown",
-            },
-            timeout=10.0,
-        )
+        r = httpx.post(url, json=payload, timeout=10.0)
         r.raise_for_status()
         return True
     except Exception as exc:  # pragma: no cover - network dependent
+        # Telegram rejects the whole message when an inline button URL is invalid
+        # (e.g. a localhost BACKEND_PUBLIC_URL → BUTTON_URL_INVALID). Retry without
+        # the button so plain delivery still succeeds.
+        if reply_markup:
+            try:
+                payload.pop("reply_markup", None)
+                r = httpx.post(url, json=payload, timeout=10.0)
+                r.raise_for_status()
+                _log.info("telegram: sent without inline button (button URL rejected)")
+                return True
+            except Exception as exc2:  # pragma: no cover - network dependent
+                _log.warning("telegram send failed: %s", exc2)
+                return False
         _log.warning("telegram send failed: %s", exc)
         return False
 
@@ -217,9 +233,6 @@ def send_alert(
     cfg = get_settings()
     channels: list[str] = []
 
-    if send_email(message["subject"], message["text"]):
-        channels.append("email")
-
     if send_telegram(message["subject"], message["text"]):
         channels.append("telegram")
 
@@ -251,6 +264,37 @@ def send_alert(
         "channels": channels,
         "subject": message["subject"],
     }
+
+
+def send_order_notification(
+    *,
+    kind: str,  # "order" (bracket) | "fractional"
+    ticker: str,
+    side: str,
+    amount: float,
+    mode: str = "paper",
+    detail: str = "",
+) -> None:
+    """Notify configured channels that an order / fractional position was placed.
+
+    Gated by the ``order_notifications_enabled`` setting (default on). Reuses
+    :func:`send_system_event` so it respects each channel's own config. Never
+    raises — placement must never fail because a notification failed.
+    """
+    try:
+        from .database import get_setting
+
+        if get_setting("order_notifications_enabled", "true") != "true":
+            return
+        icon = "📈" if kind == "order" else "🪙"
+        label = "Order" if kind == "order" else "Fractional buy"
+        mode_tag = " · LIVE 💰" if mode == "live" else ""
+        msg = f"{icon} {label} placed: {side.upper()} {ticker} — ${amount:.2f}{mode_tag}"
+        if detail:
+            msg += f"\n{detail}"
+        send_system_event(msg)
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("order notification failed: %s", exc)
 
 
 def send_system_event(message: str) -> dict[str, bool]:

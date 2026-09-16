@@ -80,7 +80,7 @@ curl -X POST http://localhost:8010/analyze \
 ### `POST /analyze/stream`
 
 Same pipeline as `/analyze`, delivered as a **Server-Sent Events** stream.
-Each event is a `data: <json>\n\n` line. The **TickerAgent** runs five skills
+Each event is a `data: <json>\n\n` line. The **TickerAgent** runs seven skills
 and emits events as each one starts and finishes.
 
 **Request body** — same as `/analyze`
