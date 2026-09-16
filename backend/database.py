@@ -368,28 +368,50 @@ def save_signal(
     llm_model: str | None = None,
     db_path: str | None = None,
 ) -> int:
-    """Persist a single opportunity dict to ``signals``; return the new row id."""
+    """Persist a single opportunity dict to ``signals``; return the row id.
 
-    reasons = opportunity.get("reasons")
-    reasons_json = json.dumps(reasons) if reasons is not None else None
-    row = (
-        opportunity.get("ticker"),
-        opportunity.get("type"),
-        float(opportunity.get("confidence") or 0.0),
-        opportunity.get("source") or "+".join(opportunity.get("sources", []) or []),
-        opportunity.get("entry"),
-        opportunity.get("stop"),
-        opportunity.get("target"),
-        opportunity.get("price"),
-        opportunity.get("week52_high"),
-        opportunity.get("week52_low"),
-        reasons_json,
-        llm_provider,
-        llm_model,
-        opportunity.get("timestamp") or _now_iso(),
-        _now_iso(),
-    )
+    Deduplicates within the same UTC calendar day: if a signal with the same
+    ticker + type already exists for today, the existing id is returned and no
+    new row is written.  This prevents the scheduler from accumulating dozens
+    of identical rows across repeated scan cycles.
+    """
+    ticker = opportunity.get("ticker")
+    sig_type = opportunity.get("type")
+
     with _connect(db_path) as conn:
+        # Dedup: one signal per ticker+type per UTC day.
+        existing = conn.execute(
+            """
+            SELECT id FROM signals
+            WHERE ticker = ? AND type = ?
+              AND date(created_at) = date('now')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (ticker, sig_type),
+        ).fetchone()
+        if existing:
+            return existing[0]
+
+        reasons = opportunity.get("reasons")
+        reasons_json = json.dumps(reasons) if reasons is not None else None
+        row = (
+            ticker,
+            sig_type,
+            float(opportunity.get("confidence") or 0.0),
+            opportunity.get("source") or "+".join(opportunity.get("sources", []) or []),
+            opportunity.get("entry"),
+            opportunity.get("stop"),
+            opportunity.get("target"),
+            opportunity.get("price"),
+            opportunity.get("week52_high"),
+            opportunity.get("week52_low"),
+            reasons_json,
+            llm_provider,
+            llm_model,
+            opportunity.get("timestamp") or _now_iso(),
+            _now_iso(),
+        )
         cur = conn.execute(
             """
             INSERT INTO signals
@@ -683,9 +705,9 @@ def get_recent_signals(
     params_filter: list[Any] = [ticker.upper()] if ticker else []
 
     with _connect(db_path) as conn:
-        total: int = conn.execute(
-            f"SELECT COUNT(*) FROM signals{where}", params_filter
-        ).fetchone()[0]
+        total: int = conn.execute(f"SELECT COUNT(*) FROM signals{where}", params_filter).fetchone()[
+            0
+        ]
         rows = conn.execute(
             f"SELECT * FROM signals{where} ORDER BY id DESC LIMIT ? OFFSET ?",
             params_filter + [int(limit), int(offset)],
@@ -931,14 +953,14 @@ def get_cache_stats(db_path: str | None = None) -> dict:
 
 
 _CLEAR_CATEGORY_LABELS: dict[str, str] = {
-    "signals":             "signals",
-    "analysis_log":        "analysis_log",
-    "paper_orders":        "paper_orders",
-    "discovery_runs":      "discovery_runs",          # candidates cascade
+    "signals": "signals",
+    "analysis_log": "analysis_log",
+    "paper_orders": "paper_orders",
+    "discovery_runs": "discovery_runs",  # candidates cascade
     "watchlist_overrides": "watchlist_added/removed",  # app_settings keys
-    "ticker_memory":       "ticker_memory",
-    "data_cache":          "data_cache",
-    "backtest_runs":       "backtest_runs",            # trades/floor_suggests/compares cascade
+    "ticker_memory": "ticker_memory",
+    "data_cache": "data_cache",
+    "backtest_runs": "backtest_runs",  # trades/floor_suggests/compares cascade
 }
 
 CLEAR_CATEGORIES = set(_CLEAR_CATEGORY_LABELS.keys())
