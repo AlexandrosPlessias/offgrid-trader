@@ -299,6 +299,7 @@ function NotificationsSection() {
     setNtfyTopic(d.ntfy_topic ?? '')
     setTgEnabled(d.telegram_enabled ?? false)
     setTgChatId(d.telegram_chat_id ?? '')
+    setTgToken(d.telegram_bot_token ?? '')
     setTgTokenSet(d.telegram_bot_token_set ?? false)
     setEmEnabled(d.email_enabled ?? false)
     setEmHost(d.email_smtp_host ?? 'smtp.gmail.com')
@@ -306,11 +307,12 @@ function NotificationsSection() {
     setEmUser(d.email_username ?? '')
     setEmFrom(d.email_from ?? '')
     setEmTo(d.email_to ?? '')
+    setEmPass(d.email_password ?? '')
     setEmPassSet(d.email_password_set ?? false)
     setEnv({
       ntfyEnabled: d.ntfy_enabled_env, ntfyServer: d.ntfy_server_env, ntfyTopic: d.ntfy_topic_env,
-      tgEnabled: d.telegram_enabled_env, tgChatId: d.telegram_chat_id_env,
-      emEnabled: d.email_enabled_env,
+      tgEnabled: d.telegram_enabled_env, tgChatId: d.telegram_chat_id_env, tgToken: d.telegram_bot_token_env,
+      emEnabled: d.email_enabled_env, emPass: d.email_password_env,
     })
   }
 
@@ -359,7 +361,7 @@ function NotificationsSection() {
   const saveTelegram = () => {
     const body = { enabled: tgEnabled, chat_id: tgChatId }
     if (tgToken.trim()) body.bot_token = tgToken.trim()
-    saveChannel('/settings/notifications/telegram', body, setTgStatus, setTgErr).then(() => setTgToken(''))
+    saveChannel('/settings/notifications/telegram', body, setTgStatus, setTgErr)
   }
   const saveEmail = () => {
     const body = {
@@ -367,7 +369,7 @@ function NotificationsSection() {
       username: emUser, email_from: emFrom, email_to: emTo,
     }
     if (emPass.trim()) body.password = emPass.trim()
-    saveChannel('/settings/notifications/email', body, setEmStatus, setEmErr).then(() => setEmPass(''))
+    saveChannel('/settings/notifications/email', body, setEmStatus, setEmErr)
   }
 
   const sendTest = async () => {
@@ -408,7 +410,9 @@ function NotificationsSection() {
         <div className="settings-row-label">
           <span>Alert dispatch</span>
           <span className="text-dim" style={{ fontSize: 12 }}>
-            {alertsOn ? 'Enabled — alerts sent on actionable signals' : 'Suppressed — email silenced'}
+            {alertsOn
+              ? 'Enabled — actionable signals fire the channels below'
+              : 'Off — master kill-switch: all channels silenced (ntfy, Telegram)'}
           </span>
         </div>
         <button className={`settings-toggle ${alertsOn ? 'on' : 'off'}`} onClick={toggleAlerts}>
@@ -477,13 +481,15 @@ function NotificationsSection() {
         <input className="settings-input" type="text" value={tgChatId}
                onChange={e => setTgChatId(e.target.value)} placeholder="123456789" style={{ width: 240 }} />
         <button className="btn-secondary btn-sm" type="button" style={{ marginLeft: 6 }}
-                onClick={() => { setTgEnabled(env.tgEnabled ?? false); setTgChatId(env.tgChatId ?? ''); setTgToken('') }}>
+                onClick={() => { setTgEnabled(env.tgEnabled ?? false); setTgChatId(env.tgChatId ?? ''); setTgToken(env.tgToken ?? '') }}>
           Load env
         </button>
       </div>
       <SaveRow status={tgStatus} errMsg={tgErr} onSave={saveTelegram} />
 
-      {/* email */}
+      {/* Email/SMTP — descoped in favor of ntfy (simpler, more interactive UX; covers the
+          same use cases). Untested; uncomment this block AND send_email() in
+          backend/alerts.py to re-enable.
       <ChannelHeader icon="✉️" name="Email (SMTP)" configured={cfg.email_configured} />
       <div className="settings-row">
         <label className="settings-label">Enable</label>
@@ -527,6 +533,7 @@ function NotificationsSection() {
                onChange={e => setEmTo(e.target.value)} placeholder="recipient@example.com" style={{ width: 240 }} />
       </div>
       <SaveRow status={emStatus} errMsg={emErr} onSave={saveEmail} />
+      */}
 
       {/* test all */}
       <div style={{ borderTop: '1px solid var(--border)', margin: '18px 0 12px', opacity: 0.4 }} />
