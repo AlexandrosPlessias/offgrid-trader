@@ -14,6 +14,28 @@ export function signal401() {
   window.dispatchEvent(new CustomEvent('auth-expired'))
 }
 
+// ─── Fractional order helper ──────────────────────────────────────────────────
+// Places a fractional buy on the frac Alpaca profile. When the profile host is
+// live, the backend replies 428 — we then confirm the real-money action once
+// and retry with confirm_live=true. Returns { ok, status, cancelled, data }.
+export async function placeFracOrder(body) {
+  const doPost = (b) =>
+    fetch(`${API}/frac/order`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      body: JSON.stringify(b),
+    })
+  let res = await doPost(body)
+  if (res.status === 428) {
+    if (!window.confirm('⚠ This places a REAL-MONEY live fractional order. Continue?')) {
+      return { ok: false, cancelled: true, data: {} }
+    }
+    res = await doPost({ ...body, confirm_live: true })
+  }
+  const data = await res.json().catch(() => ({}))
+  return { ok: res.ok, status: res.status, data }
+}
+
 // ─── SSE stream reader ────────────────────────────────────────────────────────
 // Reads a POST SSE stream and yields parsed JSON payloads.
 // EventSource only supports GET, so we use fetch + ReadableStream.

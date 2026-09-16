@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import { ResponsiveContainer, BarChart, Bar, Cell, XAxis, YAxis, Tooltip } from 'recharts'
-import { API, getAuthHeaders } from '../utils/api'
+import { API, getAuthHeaders, placeFracOrder } from '../utils/api'
 
 export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplorer }) {
   const [candidates, setCandidates]   = useState([])
@@ -11,6 +11,7 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
   const [error,      setError]        = useState(null)
   const [addStatus,       setAddStatus]       = useState({}) // ticker → 'adding'|'done'|'removing'
   const [tradeStatus,     setTradeStatus]     = useState({}) // ticker → 'trading'|'done'|'error:<msg>'
+  const [fracStatus,      setFracStatus]      = useState({}) // ticker → 'trading'|'done'|'error:<msg>'
   const [assetInfo,       setAssetInfo]       = useState({}) // ticker → 'loading'|null|{tradable,status,...}
   const [hideRestricted,  setHideRestricted]  = useState(false)
   const [hideOTC,         setHideOTC]         = useState(false)
@@ -205,6 +206,28 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
     }
   }
 
+  // Place a fractional buy on the frac Alpaca profile (long-only). Derives the
+  // same −5% / +10% stop/target so the exit poller manages the cashout.
+  const handleFracTrade = async (c) => {
+    setFracStatus(s => ({ ...s, [c.ticker]: 'trading' }))
+    const entry  = parseFloat(c.price) || 0
+    const { ok, cancelled, data } = await placeFracOrder({
+      ticker:            c.ticker,
+      entry,
+      side:              'buy',
+      signal_confidence: c.score ?? null,
+      signal_source:     c.source ?? 'discovery',
+    })
+    if (cancelled) { setFracStatus(s => ({ ...s, [c.ticker]: undefined })); return }
+    if (ok) {
+      // Show success briefly, then re-enable so repeat buys can accumulate.
+      setFracStatus(s => ({ ...s, [c.ticker]: 'done' }))
+      setTimeout(() => setFracStatus(s => ({ ...s, [c.ticker]: undefined })), 2000)
+    } else {
+      setFracStatus(s => ({ ...s, [c.ticker]: `error:${data.detail || 'failed'}` }))
+    }
+  }
+
   const fmtPct  = (v) => v == null ? '—' : `${v >= 0 ? '+' : ''}${parseFloat(v).toFixed(2)}%`
   const fmtVol  = (v) => v == null ? '—' : (v >= 1_000_000 ? `${(v/1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v/1_000).toFixed(0)}K` : String(v))
   const fmtPrice = (v) => v == null ? '—' : `$${parseFloat(v).toFixed(2)}`
@@ -349,7 +372,7 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
           </div>
 
           <div className="card" style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, tableLayout: 'fixed', minWidth: 680 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, tableLayout: 'fixed', minWidth: 740 }}>
             <colgroup>
               <col style={{ width: '7%'  }} />{/* Ticker  */}
               <col style={{ width: '9%'  }} />{/* Price   */}
@@ -358,7 +381,8 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
               <col style={{ width: '11%' }} />{/* Score   */}
               <col />{/* Reasons — takes remaining space */}
               <col style={{ width: '9%'  }} />{/* Source  */}
-              <col style={{ width: '7%'  }} />{/* Action  */}
+              <col style={{ width: '6%'  }} />{/* Watch   */}
+              <col style={{ width: '9%'  }} />{/* Action  */}
             </colgroup>
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border)' }}>
@@ -369,6 +393,7 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                 <th style={{ textAlign: 'right',  padding: '8px 10px', whiteSpace: 'nowrap' }}>Score</th>
                 <th style={{ textAlign: 'left',   padding: '8px 10px' }}>Reasons</th>
                 <th style={{ textAlign: 'center', padding: '8px 10px', whiteSpace: 'nowrap' }}>Source</th>
+                <th style={{ textAlign: 'center', padding: '8px 10px', whiteSpace: 'nowrap' }}>Watch</th>
                 <th style={{ textAlign: 'center', padding: '8px 10px', whiteSpace: 'nowrap' }}>Action</th>
               </tr>
             </thead>
@@ -473,34 +498,54 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                           )
                         })()}
                       </td>
+                      {/* Watch column */}
+                      <td style={{ ...cell, textAlign: 'center' }}>
+                        {(() => {
+                          const iconBtn = {
+                            fontSize: 15, lineHeight: 1,
+                            padding: '3px 6px', minWidth: 30, minHeight: 26,
+                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                            cursor: 'pointer',
+                          }
+                          const watchIcon = removing ? '⏳' : adding ? '⏳' : added ? '✓' : '👁'
+                          const watchTitle =
+                            removing ? `Removing ${c.ticker} from watchlist…` :
+                            adding   ? 'Adding to watchlist…' :
+                            added    ? `${c.ticker} is in your watchlist — click to remove` :
+                            `Add ${c.ticker} to watchlist`
+                          return (
+                            <button
+                              className="btn-secondary btn-sm"
+                              onClick={() => added ? handleUnwatch(c.ticker) : handleAdd(c.ticker)}
+                              disabled={adding || removing}
+                              title={watchTitle}
+                              aria-label={watchTitle}
+                              style={{ ...iconBtn, opacity: removing ? 0.45 : 1 }}
+                            >
+                              {watchIcon}
+                            </button>
+                          )
+                        })()}
+                      </td>
+
+                      {/* Action column — 📈 Trade (bracket) + 🪙 Frac (fractional) */}
                       <td style={{ ...cell, textAlign: 'center' }}>
                         {(() => {
                           const ts = tradeStatus[c.ticker]
                           const trading  = ts === 'trading'
                           const traded   = ts === 'done'
                           const tradeErr = ts?.startsWith('error:') ? ts.slice(6) : null
-                          // blocked = confirmed non-tradable; isChecking = in-flight
                           const blocked  = Boolean(notTradable)
+                          // Alpaca 'fractionable' flag — unknown/loading → allow attempt.
+                          const notFractionable =
+                            asset && asset !== 'loading' ? asset.fractionable === false : false
 
-                          // Button label priority: result states > in-flight > checking > default
-                          const tradeLabel =
-                            traded      ? '✓ Traded' :
-                            trading     ? '⟳' :
-                            tradeErr    ? '✗ Failed' :
-                            blocked     ? '🚫 Blocked' :
-                            isChecking  ? '… Checking' :
-                            '📈 Trade'
-
-                          // Icon-only buttons — full label lives in the tooltip
-                          const watchIcon =
-                            removing ? '⏳' :
-                            adding   ? '⏳' :
-                            added    ? '✓'  : '👁'
-                          const watchTitle =
-                            removing ? `Removing ${c.ticker} from watchlist…` :
-                            adding   ? 'Adding to watchlist…' :
-                            added    ? `${c.ticker} is in your watchlist — click to remove` :
-                            `Add ${c.ticker} to watchlist`
+                          const iconBtn = {
+                            fontSize: 15, lineHeight: 1,
+                            padding: '3px 6px', minWidth: 30, minHeight: 26,
+                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                            cursor: 'pointer',
+                          }
 
                           const tradeIcon =
                             traded          ? '✅' :
@@ -510,7 +555,6 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                             isChecking      ? '🔍' :
                             (isOTC || hasRestrictions) ? '⚠' :
                             '📈'
-
                           const tradeTitle =
                             isChecking      ? 'Checking if this ticker can be traded on Alpaca…' :
                             tradeErr        ? `Error: ${tradeErr}` :
@@ -521,28 +565,22 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                             trading         ? 'Placing order…' :
                             `Place paper buy order for ${c.ticker} (stop −5% / target +10%, notional $500)`
 
-                          const iconBtn = {
-                            fontSize: 15, lineHeight: 1,
-                            padding: '3px 6px', minWidth: 30, minHeight: 26,
-                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                            cursor: 'pointer',
-                          }
+                          const fs      = fracStatus[c.ticker]
+                          const fTrad   = fs === 'trading'
+                          const fDone   = fs === 'done'
+                          const fErr    = fs?.startsWith('error:') ? fs.slice(6) : null
+                          const fIcon   =
+                            fDone ? '✅' : fTrad ? '⏳' : fErr ? '❌' : notFractionable ? '🚫' : '🪙'
+                          const fTitle  =
+                            notFractionable ? `${c.ticker} is not fractionable on Alpaca — use 📈 Trade instead` :
+                            fErr  ? `Fractional error: ${fErr}` :
+                            fDone ? `${c.ticker} fractional order placed` :
+                            fTrad ? 'Placing fractional order…' :
+                            `Place a fractional buy for ${c.ticker} (cashes out on −5% / +10%)`
 
                           return (
                             <div style={{ display: 'flex', gap: 6, justifyContent: 'center', alignItems: 'center' }}>
-                              {/* Watch / Unwatch toggle button */}
-                              <button
-                                className="btn-secondary btn-sm"
-                                onClick={() => added ? handleUnwatch(c.ticker) : handleAdd(c.ticker)}
-                                disabled={adding || removing}
-                                title={watchTitle}
-                                aria-label={watchTitle}
-                                style={{ ...iconBtn, opacity: removing ? 0.45 : 1 }}
-                              >
-                                {watchIcon}
-                              </button>
-
-                              {/* Trade icon button — colour shifts per state */}
+                              {/* Trade icon button — bracket order (whole shares) */}
                               <button
                                 className="btn-primary btn-sm"
                                 onClick={() => handleTrade(c)}
@@ -561,6 +599,22 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                               >
                                 {tradeIcon}
                               </button>
+
+                              {/* Frac icon button — fractional buy (long-only, needs fractionable) */}
+                              <button
+                                className="btn-secondary btn-sm"
+                                onClick={() => handleFracTrade(c)}
+                                disabled={fTrad || fDone || blocked || isChecking || notFractionable}
+                                title={fTitle}
+                                aria-label={fTitle}
+                                style={{
+                                  ...iconBtn,
+                                  opacity: (fDone || blocked || isChecking || notFractionable) ? 0.45 : 1,
+                                  background: fErr ? 'var(--red, #ef4444)' : fDone ? 'var(--green, #22c55e)' : undefined,
+                                }}
+                              >
+                                {fIcon}
+                              </button>
                             </div>
                           )
                         })()}
@@ -570,7 +624,7 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                     {/* ── Score breakdown detail row ──────────────────────── */}
                     {isOpen && (
                       <tr style={{ borderBottom: '1px solid var(--border-subtle, rgba(255,255,255,.06))' }}>
-                        <td colSpan={8} style={{ padding: '0 10px 12px 10px', background: 'rgba(255,255,255,.02)' }}>
+                        <td colSpan={9} style={{ padding: '0 10px 12px 10px', background: 'rgba(255,255,255,.02)' }}>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 10 }}>
 
                             {/* Component bars with inline reason captions */}

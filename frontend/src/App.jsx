@@ -9,7 +9,7 @@ import ExplorerPage from './pages/ExplorerPage'
 import EducationPage from './pages/EducationPage'
 import SettingsPage from './pages/SettingsPage'
 import TrendingPage from './pages/TrendingPage'
-import PaperTradingPage from './pages/PaperTradingPage'
+import TradingPage from './pages/TradingPage'
 import BacktestPage from './pages/BacktestPage'
 
 export default function App() {
@@ -176,7 +176,7 @@ export default function App() {
           <TrendingPage onViewChange={setActiveView} onOpenSettings={openSettings} onOpenExplorer={openExplorer} />
         </div>
         <div style={{ display: activeView === 'paper' ? '' : 'none' }}>
-          <PaperTradingPage
+          <TradingPage
             initialExpandedOrder={tradingExpandOrder}
             onExpandedOrderConsumed={() => setTradingExpandOrder(null)}
           />

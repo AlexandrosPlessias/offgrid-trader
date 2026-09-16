@@ -6,6 +6,8 @@ export default function PaperOrdersPanel({ open, onToggle, onOrderClick }) {
   const [clock,        setClock]        = useState(null)
   const [orders,       setOrders]       = useState([])
   const [positions,    setPositions]    = useState([])
+  const [fracPos,      setFracPos]      = useState([])     // open fractional positions
+  const [fracMode,     setFracMode]     = useState('paper')
   const [paperEnabled, setPaperEnabled] = useState(null)   // null = unknown, true/false = known
   const [loading,      setLoading]      = useState(false)
   const [error,        setError]        = useState(null)
@@ -16,18 +18,24 @@ export default function PaperOrdersPanel({ open, onToggle, onOrderClick }) {
     setLoading(true)
     setError(null)
     try {
-      const [accRes, clkRes, ordRes, posRes, cfgRes] = await Promise.all([
+      const [accRes, clkRes, ordRes, posRes, cfgRes, fracRes] = await Promise.all([
         fetch(`${API}/paper/account`,    { headers: getAuthHeaders() }),
         fetch(`${API}/paper/clock`,      { headers: getAuthHeaders() }),
         fetch(`${API}/paper/orders`,     { headers: getAuthHeaders() }),
         fetch(`${API}/paper/positions`,  { headers: getAuthHeaders() }),
         fetch(`${API}/settings`,         { headers: getAuthHeaders() }),
+        fetch(`${API}/frac/positions?limit=50`, { headers: getAuthHeaders() }),
       ])
       if (accRes.ok) { const d = await accRes.json(); setAccount(d.account ?? null) }
       if (clkRes.ok) setClock(await clkRes.json())
       if (ordRes.ok)  setOrders((await ordRes.json()).orders ?? [])
       if (posRes.ok)  setPositions((await posRes.json()).positions ?? [])
       if (cfgRes.ok) { const d = await cfgRes.json(); setPaperEnabled(d.paper_trading_enabled ?? false) }
+      if (fracRes.ok) {
+        const d = await fracRes.json()
+        setFracPos((d.positions ?? []).filter(p => p.status === 'open'))
+        setFracMode(d.mode ?? 'paper')
+      }
     } catch (e) {
       setError('Failed to load paper data')
     } finally {
@@ -203,7 +211,10 @@ export default function PaperOrdersPanel({ open, onToggle, onOrderClick }) {
       {/* Open positions */}
       {positions.length > 0 && (
         <div>
-          <div style={{ color: '#888', fontSize: 10, textTransform: 'uppercase', marginBottom: 6, letterSpacing: 1 }}>Open Positions</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: '#888', fontSize: 10, textTransform: 'uppercase', marginBottom: 6, letterSpacing: 1 }}>
+            <span>📈 Open Positions ({positions.length})</span>
+            <span style={{ color: '#8aa0ff' }}>ORDER</span>
+          </div>
           {positions.map((p, i) => {
             const pnl = parseFloat(p.unrealized_pl ?? 0)
             const pnlPct = parseFloat(p.unrealized_plpc ?? 0) * 100
@@ -221,6 +232,37 @@ export default function PaperOrdersPanel({ open, onToggle, onOrderClick }) {
                   <span style={{ color: pnl >= 0 ? '#69db7c' : '#fc9a9a', fontSize: 11, fontWeight: 600 }}>
                     {pnl >= 0 ? '+' : ''}{fmtMoney(pnl)} ({fmtPct(pnlPct)})
                   </span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Fractional positions */}
+      {fracPos.length > 0 && (
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: '#888', fontSize: 10, textTransform: 'uppercase', marginBottom: 6, letterSpacing: 1 }}>
+            <span>🪙 Fractional ({fracPos.length})</span>
+            <span style={{ color: fracMode === 'live' ? '#fc9a9a' : '#69db7c' }}>{fracMode === 'live' ? 'LIVE' : 'PAPER'}</span>
+          </div>
+          {fracPos.map((p, i) => {
+            const pnl = parseFloat(p.unrealized_pl ?? 0)
+            const pnlPct = parseFloat(p.unrealized_plpc ?? 0) * 100
+            const qty = p.qty == null ? '—' : String(+Number(p.qty).toFixed(4))
+            return (
+              <div key={i} style={{ padding: '6px 8px', borderRadius: 6, background: '#1a1a2a', marginBottom: 4, fontSize: 12 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
+                  <span style={{ fontWeight: 700 }}>{p.ticker}</span>
+                  <span style={{ color: '#aaa', fontSize: 11 }}>{qty} sh · {fmtMoney(p.notional, 0)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#888', fontSize: 11 }}>@ {fmtMoney(p.current_price)}</span>
+                  {p.unrealized_pl != null && (
+                    <span style={{ color: pnl >= 0 ? '#69db7c' : '#fc9a9a', fontSize: 11, fontWeight: 600 }}>
+                      {pnl >= 0 ? '+' : ''}{fmtMoney(pnl)} ({fmtPct(pnlPct)})
+                    </span>
+                  )}
                 </div>
               </div>
             )
