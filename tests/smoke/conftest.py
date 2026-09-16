@@ -29,13 +29,13 @@ os.environ["NTFY_ENABLED"] = "false"
 # --------------------------------------------------------------------------- #
 try:
     from backend import (  # noqa: E402, F401
-        alerts,      # noqa: F401  — import-existence check; not referenced directly
-        analysis,    # noqa: F401
-        config,      # noqa: F401
-        data,        # noqa: F401
+        alerts,  # noqa: F401  — import-existence check; not referenced directly
+        analysis,  # noqa: F401
+        config,  # noqa: F401
+        data,  # noqa: F401
         database,
         opportunities,
-        scheduler,   # noqa: F401
+        scheduler,  # noqa: F401
     )
     from backend.main import app  # noqa: E402
 except Exception as exc:  # pragma: no cover

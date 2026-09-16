@@ -368,9 +368,10 @@ def clear_selected_data(req: ClearDataRequest) -> dict[str, Any]:
     if unknown:
         raise HTTPException(status_code=422, detail=f"Unknown categories: {sorted(unknown)}")
 
-    _logging.getLogger(__name__).warning(
-        "clear_selected_data called — categories: %s", req.categories
-    )
+    # Sanitize before logging — categories are validated against CLEAR_CATEGORIES allowlist
+    # above, so newline-strip is belt-and-suspenders against log injection.
+    safe_cats = [c.replace("\n", "").replace("\r", "") for c in sorted(req.categories)]
+    _logging.getLogger(__name__).warning("clear_selected_data called — categories: %s", safe_cats)
     result = _clear(req.categories)
     return {"cleared": True, **result}
 

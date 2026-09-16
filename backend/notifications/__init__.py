@@ -4,6 +4,7 @@ Add a new channel by:
 1. Creating backend/notifications/<channel>.py that implements NotificationChannel.
 2. Importing and appending an instance to REGISTRY in register_channels() below.
 """
+
 from __future__ import annotations
 
 import logging
@@ -19,9 +20,11 @@ class NotificationChannel(Protocol):
     name: str
 
     @property
-    def is_configured(self) -> bool: ...
+    def is_configured(self) -> bool:
+        pass  # Protocol stub — implemented by each channel class
 
-    def send(self, subject: str, body: str, *, actions: list[dict] | None = None) -> bool: ...
+    def send(self, subject: str, body: str, *, actions: list[dict] | None = None) -> bool:
+        pass  # Protocol stub — implemented by each channel class
 
 
 _REGISTRY: list[NotificationChannel] = []

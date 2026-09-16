@@ -271,9 +271,7 @@ class NtfyConfig:
     # Defaults to the public ntfy.sh only as a fallback; the recommended paths are:
     #   Local Docker:  NTFY_SERVER=http://ntfy:80
     #   Fly.io:        NTFY_SERVER=http://localhost:18880
-    server: str = field(
-        default_factory=lambda: _env_str("NTFY_SERVER", "http://localhost:18880")
-    )
+    server: str = field(default_factory=lambda: _env_str("NTFY_SERVER", "http://localhost:18880"))
 
     @property
     def is_configured(self) -> bool:

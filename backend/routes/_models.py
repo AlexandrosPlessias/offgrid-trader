@@ -1,4 +1,5 @@
 """Shared helpers used by multiple route modules."""
+
 from __future__ import annotations
 
 import json
@@ -6,7 +7,6 @@ import re
 from typing import Any
 
 from fastapi import HTTPException
-
 
 _TICKER_RE = re.compile(r"^[A-Z0-9.\-]{1,15}$")
 
@@ -33,8 +33,8 @@ def _sse_frame(payload: dict[str, Any]) -> str:
 
 
 def _alerts_enabled() -> bool:
-    from backend.database import get_setting
     from backend.config import get_settings
+    from backend.database import get_setting
 
     db_val = get_setting("alerts_enabled", "")
     if db_val:

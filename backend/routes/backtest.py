@@ -1,4 +1,5 @@
 """Backtest routes: /backtest*."""
+
 from __future__ import annotations
 
 import asyncio
@@ -242,7 +243,12 @@ async def backtest_compare(
     ``llm_value_add``, per-run ``strengths``/``weaknesses``, and ``recommendation``.
     Persisted to ``backtest_compares`` for full historicity.
     """
-    from backend.analysis import LLMError, _repair_llm_json, _validate_llm_json, call_llm
+    from backend.analysis import (
+        LLMError,
+        _repair_llm_json,
+        _validate_llm_json,
+        call_llm,
+    )
     from backend.database import get_backtest_run, save_backtest_compare
 
     # Load every requested run; 404 on any missing.
@@ -388,7 +394,12 @@ async def backtest_experiment_advisor(run_id: int) -> dict[str, Any]:
     ``model_used``, ``prompt_tokens``, ``completion_tokens``.
     Persisted to ``backtest_floor_suggests`` for full historicity.
     """
-    from backend.analysis import LLMError, _repair_llm_json, _validate_llm_json, call_llm
+    from backend.analysis import (
+        LLMError,
+        _repair_llm_json,
+        _validate_llm_json,
+        call_llm,
+    )
     from backend.backtest import generate_experiment_candidates
     from backend.database import get_backtest_run, save_backtest_floor_suggest
 
@@ -593,7 +604,12 @@ async def backtest_review(run_id: int) -> dict[str, Any]:
     ``strengths``, ``weaknesses``, ``blocking_issues``, ``next_action``,
     ``model_used``, ``prompt_tokens``, ``completion_tokens``.
     """
-    from backend.analysis import LLMError, _repair_llm_json, _validate_llm_json, call_llm
+    from backend.analysis import (
+        LLMError,
+        _repair_llm_json,
+        _validate_llm_json,
+        call_llm,
+    )
     from backend.database import (
         get_backtest_run,
         save_backtest_review_tokens,

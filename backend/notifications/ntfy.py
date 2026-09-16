@@ -5,6 +5,7 @@ Delivers a batched scan-cycle summary to a self-hosted ntfy server
 buttons so the user can place a paper trade directly from the phone
 without a separate callback endpoint.
 """
+
 from __future__ import annotations
 
 import logging
@@ -24,7 +25,15 @@ def _ascii_header(value: str) -> str:
     make httpx raise. Replace common punctuation, drop anything else. Emoji and
     unicode belong in the message *body* (UTF-8), not headers.
     """
-    replacements = {"—": "-", "–": "-", "’": "'", "‘": "'", "“": '"', "”": '"', "…": "..."}
+    replacements = {
+        "—": "-",
+        "–": "-",
+        "’": "'",
+        "‘": "'",
+        "“": '"',
+        "”": '"',
+        "…": "...",
+    }
     for uni, ascii_ in replacements.items():
         value = value.replace(uni, ascii_)
     return value.encode("ascii", "ignore").decode("ascii").strip()
@@ -36,6 +45,16 @@ def resolve_topic() -> str:
 
 def resolve_server() -> str:
     return get_setting("ntfy_server", "") or get_settings().ntfy.server
+
+
+def _validate_server(server: str) -> str:
+    """Reject non-http/https server URLs to prevent SSRF via a misconfigured DB value."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(server)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"ntfy server must use http or https scheme, got: {parsed.scheme!r}")
+    return server
 
 
 def post_ntfy(
@@ -52,7 +71,7 @@ def post_ntfy(
     actions is an optional list of {"label", "url", "method", "body"} dicts
     rendered as ntfy `http` action buttons.
     """
-    url = f"{server.rstrip('/')}/{topic}"
+    url = f"{_validate_server(server).rstrip('/')}/{topic}"
     headers: dict[str, str] = {
         "Title": _ascii_header(subject) or "MarketSage",
         "Tags": "chart_with_upwards_trend,bell",
@@ -74,7 +93,10 @@ def post_ntfy(
     try:
         r = httpx.post(url, content=body.encode(), headers=headers, timeout=10.0)
         r.raise_for_status()
-        _log.info("ntfy notification sent to %s/%s", server, topic)
+        # Sanitize before logging — strip newlines to prevent log-injection.
+        safe_server = server[:50].replace("\n", "").replace("\r", "")
+        safe_topic = topic[:50].replace("\n", "").replace("\r", "")
+        _log.info("ntfy notification sent (server=%r, topic=%r)", safe_server, safe_topic)
         return True
     except Exception as exc:  # pragma: no cover - network dependent
         _log.warning("ntfy send failed: %s", exc)

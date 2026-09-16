@@ -1,4 +1,5 @@
 """Watchlist routes: /watchlist*, /watchlist/groups*."""
+
 from __future__ import annotations
 
 import json
@@ -16,8 +17,8 @@ from backend.database import (
     save_watchlist_group,
     set_setting,
 )
-from backend.scheduler import scheduler
 from backend.routes._models import _alerts_enabled, _clean_ticker
+from backend.scheduler import scheduler
 
 router = APIRouter()
 

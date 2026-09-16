@@ -1,7 +1,7 @@
 """Notification routes: Telegram callback webhook."""
+
 from __future__ import annotations
 
-import hashlib
 import hmac
 import logging
 from typing import Any
@@ -87,8 +87,8 @@ async def telegram_callback(
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 await client.post(answer_url, json={"callback_query_id": callback_id, "text": text})
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - answerCallbackQuery is best-effort; failure is silent
+            _log.debug("answerCallbackQuery failed after order placement", exc_info=True)
 
         return {"ok": True, "action": "paper_order", "ticker": ticker, "side": side}
 
@@ -96,7 +96,7 @@ async def telegram_callback(
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             await client.post(answer_url, json={"callback_query_id": callback_id})
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 - best-effort acknowledgement; Telegram retries handle failure
+        _log.debug("answerCallbackQuery failed for unknown action", exc_info=True)
 
     return {"ok": True}
