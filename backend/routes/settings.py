@@ -564,11 +564,23 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
     ntfy accepts optional topic/server overrides so the user can test what's typed
     in the form before saving; Telegram and Email use their saved/effective config.
     """
-    from backend.alerts import send_email, send_telegram
+    from backend.alerts import send_telegram
     from backend.notifications.ntfy import post_ntfy, resolve_server, resolve_topic
+    from backend.routes.notifications import new_roundtrip_token
+
+    # Round-trip token: the confirm action tapped in the channel proves the full
+    # loop (credentials → delivery → action routing → frontend feedback) works.
+    token = new_roundtrip_token()
+    base = get_settings().backend_public_url.rstrip("/")
+    confirm_url = f"{base}/notifications/test/confirm?token={token}"
 
     subject = "MarketSage — test notification"
-    body = "If you can read this, your notification channel is wired up correctly. ✅"
+    body = (
+        "If you can read this, your notification channel is wired up correctly. ✅\n"
+        "Tap “✅ Confirm receipt” to complete the round-trip test."
+    )
+    actions = [{"label": "✅ Confirm receipt", "url": confirm_url, "method": "POST"}]
+    tg_markup = {"inline_keyboard": [[{"text": "✅ Confirm receipt", "url": confirm_url}]]}
     results: dict[str, str] = {}
 
     # ntfy (with optional unsaved overrides)
@@ -576,13 +588,16 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
     server = (request.server or "").strip() or resolve_server()
     if topic:
         results["ntfy"] = (
-            "sent" if post_ntfy(server, topic, subject, body, priority="default") else "failed"
+            "sent"
+            if post_ntfy(server, topic, subject, body, priority="default", actions=actions)
+            else "failed"
         )
     else:
         results["ntfy"] = "skipped (not configured)"
 
-    results["telegram"] = "sent" if send_telegram(subject, body) else "skipped or failed"
-    results["email"] = "sent" if send_email(subject, body) else "skipped or failed"
+    results["telegram"] = (
+        "sent" if send_telegram(subject, body, reply_markup=tg_markup) else "skipped or failed"
+    )
 
     any_sent = any(v == "sent" for v in results.values())
     if not any_sent:
@@ -590,4 +605,4 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
             status_code=502,
             detail="No channel accepted the test. Enable and configure at least one channel.",
         )
-    return {"ok": True, "results": results}
+    return {"ok": True, "results": results, "token": token, "ttl": 60}
