@@ -99,6 +99,13 @@ def set_signal_scan_llm(request: SignalScanLlmRequest) -> dict[str, Any]:
     return {"signal_scan_llm_enabled": request.enabled}
 
 
+@router.post("/settings/order-notifications")
+def set_order_notifications(request: SignalScanLlmRequest) -> dict[str, Any]:
+    """Enable/disable the notification sent when an order or fractional buy is placed."""
+    set_setting("order_notifications_enabled", "true" if request.enabled else "false")
+    return {"order_notifications_enabled": request.enabled}
+
+
 @router.get("/settings")
 def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
     """Return current effective settings (env defaults overridden by DB values)."""
@@ -139,6 +146,8 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
         "scheduler_running": scheduler.status()["running"],
         # Signal-scan LLM switch — default True (enabled) if never explicitly set.
         "signal_scan_llm_enabled": get_setting("signal_scan_llm_enabled", "true") != "false",
+        # Notify configured channels whenever an order / fractional position is placed.
+        "order_notifications_enabled": get_setting("order_notifications_enabled", "true") == "true",
         # Alpaca paper trading
         "alpaca_paper_url": (get_setting("alpaca_paper_url", "") or cfg.alpaca.paper_url),
         # Key ID is not secret (analogous to a username) — safe to return in plain text
