@@ -1,4 +1,5 @@
 """Settings routes: /settings* (non-alpaca, non-discovery)."""
+
 from __future__ import annotations
 
 import logging
@@ -9,8 +10,8 @@ from pydantic import BaseModel, Field
 
 from backend.config import get_settings
 from backend.database import get_setting, set_setting
-from backend.scheduler import scheduler
 from backend.routes._models import _alerts_enabled
+from backend.scheduler import scheduler
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -359,13 +360,17 @@ def clear_selected_data(req: ClearDataRequest) -> dict[str, Any]:
     watchlist_overrides, ticker_memory, data_cache, backtest_runs.
     """
     import logging as _logging
-    from backend.database import clear_selected_data as _clear, CLEAR_CATEGORIES
+
+    from backend.database import CLEAR_CATEGORIES
+    from backend.database import clear_selected_data as _clear
 
     unknown = set(req.categories) - CLEAR_CATEGORIES
     if unknown:
         raise HTTPException(status_code=422, detail=f"Unknown categories: {sorted(unknown)}")
 
-    _logging.getLogger(__name__).warning("clear_selected_data called — categories: %s", req.categories)
+    _logging.getLogger(__name__).warning(
+        "clear_selected_data called — categories: %s", req.categories
+    )
     result = _clear(req.categories)
     return {"cleared": True, **result}
 
@@ -432,12 +437,14 @@ def get_notification_settings() -> dict[str, Any]:
         "ntfy_topic_env": cfg.ntfy.topic,
         "ntfy_topic_env_set": bool(cfg.ntfy.topic),
         "ntfy_server_env": cfg.ntfy.server,
-        # telegram
+        # telegram (bot token returned so the form can show it — admin-gated, own config)
         "telegram_enabled": tg["enabled"],
+        "telegram_bot_token": tg["bot_token"],
         "telegram_bot_token_set": bool(tg["bot_token"]),
         "telegram_chat_id": tg["chat_id"],
         "telegram_configured": bool(tg["bot_token"] and tg["chat_id"]),
         "telegram_enabled_env": cfg.telegram.enabled,
+        "telegram_bot_token_env": cfg.telegram.bot_token,
         "telegram_bot_token_env_set": bool(cfg.telegram.bot_token),
         "telegram_chat_id_env": cfg.telegram.chat_id,
         # email
@@ -445,11 +452,13 @@ def get_notification_settings() -> dict[str, Any]:
         "email_smtp_host": em["smtp_host"],
         "email_smtp_port": em["smtp_port"],
         "email_username": em["username"],
+        "email_password": em["password"],
         "email_password_set": bool(em["password"]),
         "email_from": em["sender"],
         "email_to": em["recipient"],
         "email_configured": bool(em["username"] and em["password"] and em["recipient"]),
         "email_enabled_env": cfg.email.enabled,
+        "email_password_env": cfg.email.password,
         "email_password_env_set": bool(cfg.email.password),
     }
 
@@ -519,8 +528,9 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
     topic = (request.topic or "").strip() or resolve_topic()
     server = (request.server or "").strip() or resolve_server()
     if topic:
-        results["ntfy"] = "sent" if post_ntfy(server, topic, subject, body, priority="default") \
-            else "failed"
+        results["ntfy"] = (
+            "sent" if post_ntfy(server, topic, subject, body, priority="default") else "failed"
+        )
     else:
         results["ntfy"] = "skipped (not configured)"
 

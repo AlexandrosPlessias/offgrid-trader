@@ -23,8 +23,8 @@ from starlette.requests import Request as StarletteRequest
 from . import __version__
 from .config import get_settings
 from .database import get_setting, init_db, reset_stale_discovery_runs
-from .scheduler import scheduler
 from .routes import all_routers
+from .scheduler import scheduler
 
 _log = logging.getLogger(__name__)
 
@@ -95,6 +95,24 @@ def _setup_otel(app: FastAPI) -> None:
 # --------------------------------------------------------------------------- #
 # App + lifespan
 # --------------------------------------------------------------------------- #
+async def _fire_system_event(prefix: str) -> None:
+    """Fire a startup/shutdown notification via the existing alert channels.
+
+    Runs the (sync) send off the event loop and never raises, so a slow or failing
+    channel can't block startup or shutdown. Only configured+enabled channels fire.
+    """
+    import asyncio
+    from datetime import datetime, timezone
+
+    try:
+        from backend.alerts import send_system_event
+
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        await asyncio.to_thread(send_system_event, f"{prefix} — {ts}")
+    except Exception:  # noqa: BLE001,S110 - must never block startup/shutdown
+        _log.debug("system event suppressed during lifecycle", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialise the DB and start/stop the background scheduler.
@@ -107,6 +125,7 @@ async def lifespan(app: FastAPI):
     init_db()
     reset_stale_discovery_runs()  # clean up 'running' rows orphaned by prior restarts
     from backend.notifications import register_channels
+
     register_channels()
     # Start the scheduler if the DB setting says "true" (user has toggled it
     # at runtime), or if no DB override exists yet and SCHEDULER_AUTO_START=true
@@ -115,9 +134,13 @@ async def lifespan(app: FastAPI):
     env_auto = get_settings().scheduler_auto_start
     if db_sched == "true" or (db_sched == "" and env_auto):
         scheduler.start()
+
+    await _fire_system_event("🚀 MarketSage is live")
+
     try:
         yield
     finally:
+        await _fire_system_event("🛑 MarketSage is shutting down")
         await scheduler.stop()
 
 
@@ -137,7 +160,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
     max_age=60,  # browser caches CORS preflight for only 60 s (default 600)
-                 # keeps bad cached responses from persisting after machine restarts
+    # keeps bad cached responses from persisting after machine restarts
 )
 
 # --------------------------------------------------------------------------- #

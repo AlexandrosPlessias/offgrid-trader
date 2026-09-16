@@ -15,12 +15,13 @@ Run standalone to send a test alert through whatever channels are configured::
 from __future__ import annotations
 
 import logging
-import smtplib
-import ssl
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from typing import Any
 
+# Email/SMTP descoped in favor of ntfy — untested; uncomment to re-enable send_email().
+# import smtplib
+# import ssl
+# from email.mime.multipart import MIMEMultipart
+# from email.mime.text import MIMEText
 from .config import get_settings
 from .database import get_setting
 
@@ -109,32 +110,40 @@ def resolve_telegram() -> dict[str, Any]:
 
 
 def send_email(subject: str, body: str) -> bool:
-    """Send *body* via Gmail SMTP using an App Password. Returns success."""
+    """SMTP email — DESCOPED in favor of ntfy (untested; no-op).
 
-    email = resolve_email()
-    if not (email["enabled"] and email["username"] and email["password"] and email["recipient"]):
-        return False
+    ntfy covers the same alerting use cases with a simpler, more interactive UX.
+    To re-enable: uncomment the SMTP imports at the top of this module and the
+    body below, and uncomment the Email/SMTP section in the Settings UI
+    (frontend/src/pages/SettingsPage.jsx). The config plumbing (resolve_email,
+    GET/POST /settings/notifications/email) is left intact.
+    """
+    return False
 
-    message = MIMEMultipart()
-    message["From"] = email["sender"] or email["username"]
-    message["To"] = email["recipient"]
-    message["Subject"] = subject
-    message.attach(MIMEText(body, "plain"))
-
-    try:
-        context = ssl.create_default_context()
-        with smtplib.SMTP(email["smtp_host"], email["smtp_port"], timeout=20) as server:
-            server.starttls(context=context)
-            server.login(email["username"], email["password"])
-            server.sendmail(
-                email["sender"] or email["username"],
-                [email["recipient"]],
-                message.as_string(),
-            )
-        return True
-    except Exception as exc:  # pragma: no cover - network/credential dependent
-        _log.warning("email send failed: %s", exc)
-        return False
+    # email = resolve_email()
+    # if not (email["enabled"] and email["username"] and email["password"] and email["recipient"]):
+    #     return False
+    #
+    # message = MIMEMultipart()
+    # message["From"] = email["sender"] or email["username"]
+    # message["To"] = email["recipient"]
+    # message["Subject"] = subject
+    # message.attach(MIMEText(body, "plain"))
+    #
+    # try:
+    #     context = ssl.create_default_context()
+    #     with smtplib.SMTP(email["smtp_host"], email["smtp_port"], timeout=20) as server:
+    #         server.starttls(context=context)
+    #         server.login(email["username"], email["password"])
+    #         server.sendmail(
+    #             email["sender"] or email["username"],
+    #             [email["recipient"]],
+    #             message.as_string(),
+    #         )
+    #     return True
+    # except Exception as exc:  # pragma: no cover - network/credential dependent
+    #     _log.warning("email send failed: %s", exc)
+    #     return False
 
 
 def send_telegram(subject: str, body: str) -> bool:
@@ -188,17 +197,28 @@ def send_alert(
             "channels": [],
         }
 
+    message = format_alert(opportunity)
+
+    # Master kill-switch: when "Alert dispatch" is off, suppress every channel
+    # (email, Telegram, ntfy). Per-channel Enable flags only matter when this is on.
+    # Manual tests via POST /notifications/test bypass this switch.
+    if not _is_alerts_enabled():
+        _log.info("alert dispatch disabled — suppressing all channels")
+        return {
+            "sent": False,
+            "skipped": True,
+            "reason": "alert dispatch disabled",
+            "channels": [],
+            "subject": message["subject"],
+        }
+
     from .notifications import dispatch as _notify_dispatch
 
     cfg = get_settings()
-    message = format_alert(opportunity)
     channels: list[str] = []
 
-    if _is_alerts_enabled():
-        if send_email(message["subject"], message["text"]):
-            channels.append("email")
-    else:
-        _log.info("alerts disabled — skipping email")
+    if send_email(message["subject"], message["text"]):
+        channels.append("email")
 
     if send_telegram(message["subject"], message["text"]):
         channels.append("telegram")
@@ -231,6 +251,31 @@ def send_alert(
         "channels": channels,
         "subject": message["subject"],
     }
+
+
+def send_system_event(message: str) -> dict[str, bool]:
+    """Fire a minimal system notification (e.g. startup/shutdown) via enabled channels.
+
+    Reuses the existing send logic (ntfy dispatch + Telegram). Each channel only
+    fires when it is configured and enabled (their own guards). Never raises —
+    every failure is logged and swallowed so this can't block startup or shutdown.
+
+    The emoji lives in the message body (UTF-8, preserved); the ntfy Title stays
+    a plain ASCII "MarketSage".
+    """
+    results: dict[str, bool] = {}
+    try:
+        from .notifications import dispatch as _notify_dispatch
+
+        results.update(_notify_dispatch("MarketSage", message))
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("system notification via ntfy failed: %s", exc)
+    try:
+        if send_telegram(message, ""):
+            results["telegram"] = True
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("system notification via telegram failed: %s", exc)
+    return results
 
 
 if __name__ == "__main__":
