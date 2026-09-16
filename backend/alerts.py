@@ -233,9 +233,6 @@ def send_alert(
     cfg = get_settings()
     channels: list[str] = []
 
-    if send_email(message["subject"], message["text"]):
-        channels.append("email")
-
     if send_telegram(message["subject"], message["text"]):
         channels.append("telegram")
 
