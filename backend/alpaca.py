@@ -255,6 +255,53 @@ class AlpacaClient:
         )
         return self._post("/v2/orders", body)
 
+    def place_notional_order(
+        self,
+        *,
+        ticker: str,
+        side: str,  # "buy" | "sell"
+        notional: float | None = None,  # $ amount — fractional buy
+        qty: float | None = None,  # share qty — used to sell/close a held fraction
+        time_in_force: str = "day",
+    ) -> dict[str, Any]:
+        """Place a simple (non-bracket) market order supporting fractional shares.
+
+        Alpaca allows fractional trading only on *simple* market/limit orders —
+        never bracket/OTO (``place_bracket_order`` rejects fractional for that
+        reason).  Buys use ``notional`` (a dollar amount, e.g. $15 → 0.07
+        shares); sells/closes use ``qty`` (the exact fractional quantity held).
+        Exactly one of ``notional`` or ``qty`` must be supplied.
+
+        Returns the raw Alpaca order dict.
+        """
+        if not self._key_id or not self._secret_key:
+            raise AlpacaError("Alpaca credentials not configured")
+        if (notional is None) == (qty is None):
+            raise AlpacaError("place_notional_order: provide exactly one of notional or qty")
+
+        body: dict[str, Any] = {
+            "symbol": ticker,
+            "side": side,
+            "type": "market",
+            "time_in_force": time_in_force,
+        }
+        if notional is not None:
+            body["notional"] = str(round(notional, 2))
+        else:
+            body["qty"] = str(qty)
+
+        # Sanitise user-supplied strings before logging (CodeQL py/log-injection).
+        safe_side = side.replace("\r", "").replace("\n", "")
+        safe_ticker = ticker.replace("\r", "").replace("\n", "")
+        _log.info(  # lgtm [py/log-injection]
+            "alpaca: placing fractional %s %s notional=%s qty=%s",
+            safe_side,
+            safe_ticker,
+            body.get("notional"),
+            body.get("qty"),
+        )
+        return self._post("/v2/orders", body)
+
     def get_orders(self, status: str = "all", limit: int = 50) -> list[dict[str, Any]]:
         """Return recent orders from Alpaca (most recent first)."""
         return self._get(
@@ -370,3 +417,37 @@ def get_client() -> AlpacaClient:
         _client_state["client"] = AlpacaClient()
         _client_state["key_id"] = current_key_id
     return _client_state["client"]
+
+
+# --------------------------------------------------------------------------- #
+# Fractional profile — a *second* Alpaca account (paper during monitoring,
+# live once the user swaps its host).  Kept separate from the singleton above
+# so the two accounts never share a client instance.
+# --------------------------------------------------------------------------- #
+_frac_client_state: dict[str, Any] = {"client": None, "cache_key": ""}
+
+
+def frac_mode() -> str:
+    """Return ``'live'`` or ``'paper'`` for the fractional profile's host."""
+    base_url = get_setting("frac_alpaca_url", "") or get_settings().frac.url
+    return "live" if "://api.alpaca.markets" in base_url else "paper"
+
+
+def get_frac_client() -> AlpacaClient:
+    """Return a (possibly cached) :class:`AlpacaClient` for the fractional profile.
+
+    Reads the ``frac_alpaca_*`` DB settings (falling back to ``FracConfig``
+    env defaults).  Re-instantiates when the key **or host** changes, so the
+    paper→live swap from the Settings page takes effect without a restart.
+    """
+    cfg = get_settings().frac
+    key_id = get_setting("frac_alpaca_key_id", "") or cfg.key_id
+    secret_key = get_setting("frac_alpaca_secret_key", "") or cfg.secret_key
+    base_url = get_setting("frac_alpaca_url", "") or cfg.url
+    cache_key = f"{key_id}@{base_url}"
+    if _frac_client_state["client"] is None or cache_key != _frac_client_state["cache_key"]:
+        _frac_client_state["client"] = AlpacaClient(
+            key_id=key_id, secret_key=secret_key, base_url=base_url
+        )
+        _frac_client_state["cache_key"] = cache_key
+    return _frac_client_state["client"]

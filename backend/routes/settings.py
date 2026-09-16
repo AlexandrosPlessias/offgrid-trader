@@ -168,6 +168,43 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
             else None
         ),
         "paper_profile_name": get_setting("paper_profile_name", ""),
+        # Fractional trading — second Alpaca profile (paper during monitoring, live later).
+        "frac_alpaca_url": (get_setting("frac_alpaca_url", "") or cfg.frac.url),
+        "frac_alpaca_key_id": (get_setting("frac_alpaca_key_id", "") or cfg.frac.key_id),
+        "frac_alpaca_key_id_set": bool(get_setting("frac_alpaca_key_id", "") or cfg.frac.key_id),
+        "frac_alpaca_secret_set": bool(
+            get_setting("frac_alpaca_secret_key", "") or cfg.frac.secret_key
+        ),
+        "frac_profile_name": (get_setting("frac_profile_name", "") or cfg.frac.profile_name),
+        "frac_trading_enabled": get_setting("frac_trading_enabled", "false") == "true",
+        "frac_position_size": float(
+            get_setting("frac_position_size", "") or cfg.frac.position_size
+        ),
+        "frac_budget": float(get_setting("frac_budget", "") or cfg.frac.budget),
+        "frac_min_confidence": (
+            float(get_setting("frac_min_confidence", ""))
+            if get_setting("frac_min_confidence", "")
+            else None
+        ),
+        "frac_poll_seconds": int(get_setting("frac_poll_seconds", "") or cfg.frac.poll_seconds),
+        "frac_eod_close": get_setting("frac_eod_close", "false") == "true",
+        "frac_mode": (
+            "live"
+            if "://api.alpaca.markets" in (get_setting("frac_alpaca_url", "") or cfg.frac.url)
+            else "paper"
+        ),
+        # Env-only flags/values — True/raw when the .env var is set (DB ignored).
+        # Powers the "Load Environment Default Values" button in the frac UI.
+        "frac_alpaca_key_id_env_set": bool(cfg.frac.key_id),
+        "frac_alpaca_secret_env_set": bool(cfg.frac.secret_key),
+        # Key ID is non-secret (username-like) — return the raw env value so the
+        # UI can show the actual key when "Load Environment Default Values" is on.
+        "frac_alpaca_key_id_env": cfg.frac.key_id,
+        "frac_profile_name_env": cfg.frac.profile_name,
+        "frac_alpaca_url_env": cfg.frac.url,
+        "frac_position_size_env": cfg.frac.position_size,
+        "frac_budget_env": cfg.frac.budget,
+        "frac_poll_seconds_env": cfg.frac.poll_seconds,
     }
 
 

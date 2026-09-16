@@ -339,6 +339,33 @@ class AlpacaConfig:
 
 
 @dataclass(frozen=True)
+class FracConfig:
+    """Fractional-trading profile — a *second* named Alpaca account.
+
+    A separate credential set from :class:`AlpacaConfig`, driving the
+    fractional engine (notional buys + app-side stop/target exits).  During
+    the monitoring period the host points at the paper API; going live is a
+    one-field swap to ``https://api.alpaca.markets/v2`` with live keys.
+
+    Env-var values are boot-time defaults; the Settings page stores overrides
+    in the DB (keys: frac_alpaca_url, frac_alpaca_key_id, frac_alpaca_secret_key,
+    frac_position_size, frac_budget, frac_poll_seconds) read at call time.
+    """
+
+    profile_name: str = field(
+        default_factory=lambda: _env_str("FRAC_PROFILE_NAME", "offgrid-trader-frac")
+    )
+    url: str = field(
+        default_factory=lambda: _env_str("FRAC_ALPACA_URL", "https://paper-api.alpaca.markets/v2")
+    )
+    key_id: str = field(default_factory=lambda: _env_str("FRAC_ALPACA_KEY_ID", ""))
+    secret_key: str = field(default_factory=lambda: _env_str("FRAC_ALPACA_SECRET_KEY", ""))
+    position_size: float = field(default_factory=lambda: _env_float("FRAC_POSITION_SIZE", 15.0))
+    budget: float = field(default_factory=lambda: _env_float("FRAC_BUDGET", 100.0))
+    poll_seconds: int = field(default_factory=lambda: _env_int("FRAC_POLL_SECONDS", 60))
+
+
+@dataclass(frozen=True)
 class Settings:
     """Top-level settings aggregate."""
 
@@ -428,6 +455,7 @@ class Settings:
     ntfy: NtfyConfig = field(default_factory=NtfyConfig)
     otel: OtelConfig = field(default_factory=OtelConfig)
     alpaca: AlpacaConfig = field(default_factory=AlpacaConfig)
+    frac: FracConfig = field(default_factory=FracConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
 
 

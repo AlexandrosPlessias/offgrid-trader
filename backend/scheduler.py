@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import datetime
 from typing import Any
 
@@ -64,6 +65,26 @@ def is_market_open(
     close_minutes = hours.close_hour * 60 + hours.close_minute
     current_minutes = now.hour * 60 + now.minute
     return open_minutes <= current_minutes < close_minutes
+
+
+def _next_grid_time(ref: datetime, interval_seconds: int) -> datetime:
+    """Return the next grid-aligned datetime strictly after *ref*.
+
+    Anchored to the UTC epoch so sub-day intervals snap to consistent
+    wall-clock marks (e.g. :00/:15/:30/:45 for 15-minute intervals).
+    """
+    epoch = ref.timestamp()
+    next_epoch = (math.floor(epoch / interval_seconds) + 1) * interval_seconds
+    return datetime.fromtimestamp(next_epoch, tz=ref.tzinfo)
+
+
+def _near_market_close(minutes: int = 10) -> bool:
+    """Return True within *minutes* of the regular-session close."""
+    hours = get_settings().market_hours
+    now = datetime.now(hours.tzinfo)
+    close_minutes = hours.close_hour * 60 + hours.close_minute
+    current_minutes = now.hour * 60 + now.minute
+    return 0 <= (close_minutes - current_minutes) <= minutes
 
 
 # --------------------------------------------------------------------------- #
@@ -182,6 +203,118 @@ async def sync_paper_orders() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Fractional position exit poller
+# --------------------------------------------------------------------------- #
+async def monitor_frac_positions() -> None:
+    """Close fractional positions whose price has crossed their stop/target.
+
+    Fractional orders carry no broker-side bracket, so this poller is the only
+    exit path.  For each open ``frac_positions`` row it reads the live price
+    from the frac Alpaca profile and market-sells the held fraction when price
+    ``>= take_profit_price`` (target) or ``<= stop_price`` (stop).  It also
+    backfills fill qty/entry and reconciles positions closed externally.
+
+    Runs on its own fast timer (``MonitorScheduler._exit_loop``), independent
+    of the scan interval, so stop-losses are honoured within ~60s.
+    """
+    if get_setting("frac_trading_enabled", "false") != "true":
+        return
+
+    from .alpaca import AlpacaError, get_frac_client  # local import — avoids startup cost
+    from .database import get_frac_positions, update_frac_position
+
+    open_rows = get_frac_positions(status="open")
+    if not open_rows:
+        return
+
+    try:
+        client = get_frac_client()
+        positions = client.get_positions()
+    except AlpacaError as exc:
+        _log.warning("frac monitor: Alpaca fetch failed: %s", exc)
+        return
+
+    by_symbol = {p.get("symbol"): p for p in positions}
+    now_iso = datetime.now(get_settings().market_hours.tzinfo).isoformat()
+    eod = get_setting("frac_eod_close", "false") == "true" and _near_market_close()
+    closed = 0
+
+    for row in open_rows:
+        ticker = row["ticker"]
+        pos = by_symbol.get(ticker)
+        if pos is None:
+            # No live position for this row. If we had already seen a fill
+            # (qty set) it means the position was closed externally — reconcile.
+            # If qty is still null the buy order is merely pending its fill, so
+            # leave the row open and try again next cycle.
+            if row.get("qty"):
+                update_frac_position(
+                    row["id"],
+                    {"status": "closed", "exit_reason": "reconciled", "closed_at": now_iso},
+                )
+                closed += 1
+            continue
+
+        try:
+            current = float(pos.get("current_price") or 0)
+            held_qty = float(pos.get("qty") or 0)
+            avg_entry = float(pos.get("avg_entry_price") or 0)
+        except (TypeError, ValueError):
+            continue
+        if current <= 0 or held_qty <= 0:
+            continue
+
+        # Sync qty / entry from the (merged) Alpaca position every cycle so the
+        # row stays accurate as repeat buys accumulate into the same symbol.
+        sync: dict[str, Any] = {"qty": held_qty}
+        if avg_entry > 0:
+            sync["entry_price"] = avg_entry
+        update_frac_position(row["id"], sync)
+        row["qty"] = held_qty
+        if avg_entry > 0:
+            row["entry_price"] = avg_entry
+
+        stop = row.get("stop_price")
+        target = row.get("take_profit_price")
+        exit_reason: str | None = None
+        if target is not None and current >= float(target):
+            exit_reason = "target"
+        elif stop is not None and current <= float(stop):
+            exit_reason = "stop"
+        elif eod:
+            exit_reason = "eod"
+        if not exit_reason:
+            continue
+
+        try:
+            sell = client.place_notional_order(ticker=ticker, side="sell", qty=held_qty)
+        except AlpacaError as exc:
+            _log.warning("frac monitor: sell failed for %s: %s", ticker, exc)
+            continue
+
+        entry = float(row.get("entry_price") or avg_entry or current)
+        realized = round((current - entry) * held_qty, 4)
+        update_frac_position(
+            row["id"],
+            {
+                "status": "closed",
+                "exit_price": current,
+                "exit_reason": exit_reason,
+                "realized_pnl": realized,
+                "alpaca_sell_order_id": sell.get("id"),
+                "closed_at": now_iso,
+            },
+        )
+        closed += 1
+        _log.info(
+            "frac monitor: closed %s @ %.2f (%s) pnl=%.2f", ticker, current, exit_reason, realized
+        )
+
+    if closed:
+        _log.info("frac monitor: closed %d position(s)", closed)
+
+
+# --------------------------------------------------------------------------- #
 # Discovery cycle helper
 # --------------------------------------------------------------------------- #
 async def _maybe_run_discovery(sched: MonitorScheduler) -> None:
@@ -204,14 +337,15 @@ async def _maybe_run_discovery(sched: MonitorScheduler) -> None:
     )
     now = datetime.now(_cfg().market_hours.tzinfo)
 
-    # Check if enough time has elapsed since the last discovery run.
+    # Check if the next grid-aligned discovery slot has been reached.
     if sched.last_discovery:
         try:
             last_dt = datetime.fromisoformat(sched.last_discovery)
             if last_dt.tzinfo is None:
                 last_dt = last_dt.replace(tzinfo=_cfg().market_hours.tzinfo)
-            elapsed_min = (now - last_dt).total_seconds() / 60
-            if elapsed_min < interval_min:
+            next_fire = _next_grid_time(last_dt, interval_min * 60)
+            if now < next_fire:
+                sched.next_discovery = next_fire.isoformat()
                 return
         except Exception as _ts_exc:
             _log.debug("discovery: bad last_discovery timestamp, resetting: %s", _ts_exc)
@@ -230,9 +364,7 @@ async def _maybe_run_discovery(sched: MonitorScheduler) -> None:
         await asyncio.to_thread(save_discovery_candidates, run_id, candidates)
         await asyncio.to_thread(update_discovery_run, run_id, "done", len(candidates))
         sched.last_discovery = now.isoformat()
-        from datetime import timedelta
-
-        sched.next_discovery = (now + timedelta(minutes=interval_min)).isoformat()
+        sched.next_discovery = _next_grid_time(now, interval_min * 60).isoformat()
         _log.info("discovery: run %d complete — %d candidate(s)", run_id, len(candidates))
 
         # Auto-scan top-N through the full agent pipeline (no watchlist mutation).
@@ -268,6 +400,7 @@ class MonitorScheduler:
 
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
+        self._exit_task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self.last_run: str | None = None
         self.next_run: str | None = None
@@ -317,18 +450,40 @@ class MonitorScheduler:
                     )
                     * 60,
                 )
-                from datetime import timedelta
-
-                self.next_run = (
-                    datetime.now(settings.market_hours.tzinfo) + timedelta(seconds=interval_seconds)
-                ).isoformat()
+                now = datetime.now(settings.market_hours.tzinfo)
+                next_fire = _next_grid_time(now, interval_seconds)
+                self.next_run = next_fire.isoformat()
+                sleep_for = max(1.0, (next_fire - now).total_seconds())
                 try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=interval_seconds)
+                    await asyncio.wait_for(self._stop.wait(), timeout=sleep_for)
                 except asyncio.TimeoutError:
                     pass
         finally:
             self.running = False
             _log.info("stopped")
+
+    async def _exit_loop(self) -> None:
+        """Fast poller dedicated to fractional stop/target exits.
+
+        Independent of the (slow) scan interval so stop-losses are honoured
+        within ~60s.  ``monitor_frac_positions`` gates itself on market hours
+        (via the caller) and the ``frac_trading_enabled`` setting.
+        """
+        while not self._stop.is_set():
+            if is_market_open():
+                try:
+                    await monitor_frac_positions()
+                except Exception as exc:  # pragma: no cover - defensive
+                    _log.warning("frac monitor error: %s", exc)
+            db_poll = get_setting("frac_poll_seconds", "")
+            poll_seconds = max(
+                30,
+                int(db_poll) if db_poll and db_poll.isdigit() else get_settings().frac.poll_seconds,
+            )
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=poll_seconds)
+            except asyncio.TimeoutError:
+                pass
 
     def start(self) -> None:
         """Start the loop if it is not already running."""
@@ -336,15 +491,17 @@ class MonitorScheduler:
             return
         self._stop.clear()
         self._task = asyncio.create_task(self._loop())
+        self._exit_task = asyncio.create_task(self._exit_loop())
 
     async def stop(self) -> None:
         """Signal the loop to stop and wait for it to finish."""
         self._stop.set()
-        if self._task:
-            try:
-                await self._task
-            except asyncio.CancelledError:  # pragma: no cover
-                pass
+        for task in (self._task, self._exit_task):
+            if task:
+                try:
+                    await task
+                except asyncio.CancelledError:  # pragma: no cover
+                    pass
 
     def status(self) -> dict[str, Any]:
         settings = get_settings()
