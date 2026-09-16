@@ -1,4 +1,5 @@
 """Settings routes: /settings* (non-alpaca, non-discovery)."""
+
 from __future__ import annotations
 
 import logging
@@ -9,8 +10,8 @@ from pydantic import BaseModel, Field
 
 from backend.config import get_settings
 from backend.database import get_setting, set_setting
-from backend.scheduler import scheduler
 from backend.routes._models import _alerts_enabled
+from backend.scheduler import scheduler
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -359,12 +360,188 @@ def clear_selected_data(req: ClearDataRequest) -> dict[str, Any]:
     watchlist_overrides, ticker_memory, data_cache, backtest_runs.
     """
     import logging as _logging
-    from backend.database import clear_selected_data as _clear, CLEAR_CATEGORIES
+
+    from backend.database import CLEAR_CATEGORIES
+    from backend.database import clear_selected_data as _clear
 
     unknown = set(req.categories) - CLEAR_CATEGORIES
     if unknown:
         raise HTTPException(status_code=422, detail=f"Unknown categories: {sorted(unknown)}")
 
-    _logging.getLogger(__name__).warning("clear_selected_data called — categories: %s", req.categories)
+    # Sanitize before logging — categories are validated against CLEAR_CATEGORIES allowlist
+    # above, so newline-strip is belt-and-suspenders against log injection.
+    safe_cats = [c.replace("\n", "").replace("\r", "") for c in sorted(req.categories)]
+    _logging.getLogger(__name__).warning("clear_selected_data called — categories: %s", safe_cats)
     result = _clear(req.categories)
     return {"cleared": True, **result}
+
+
+# --------------------------------------------------------------------------- #
+# Notifications — all channels (global alerts toggle + ntfy + Telegram + Email)
+# --------------------------------------------------------------------------- #
+class NtfySettingRequest(BaseModel):
+    enabled: bool | None = Field(None, description="Enable or disable ntfy notifications")
+    topic: str | None = Field(None, description="ntfy topic (acts as shared secret)")
+    server: str | None = Field(None, description="ntfy server URL (e.g. http://ntfy:80)")
+
+
+class TelegramSettingRequest(BaseModel):
+    enabled: bool | None = Field(None, description="Enable or disable Telegram alerts")
+    bot_token: str | None = Field(None, description="Bot token from BotFather")
+    chat_id: str | None = Field(None, description="Target chat or group ID")
+
+
+class EmailSettingRequest(BaseModel):
+    enabled: bool | None = Field(None, description="Enable or disable email alerts")
+    smtp_host: str | None = Field(None, description="SMTP host, e.g. smtp.gmail.com")
+    smtp_port: int | None = Field(None, ge=1, le=65535, description="SMTP port, e.g. 587")
+    username: str | None = Field(None, description="SMTP username / from address")
+    password: str | None = Field(None, description="SMTP App Password")
+    email_from: str | None = Field(None, description="From address")
+    email_to: str | None = Field(None, description="Recipient address")
+
+
+class NtfyTestRequest(BaseModel):
+    topic: str | None = Field(None, description="Override ntfy topic for the test")
+    server: str | None = Field(None, description="Override ntfy server for the test")
+
+
+@router.get("/settings/notifications")
+def get_notification_settings() -> dict[str, Any]:
+    """Return effective settings for every notification channel.
+
+    Secrets (ntfy topic, bot token, SMTP password) are never returned in plain
+    text — only ``*_set`` booleans. ``*_env`` fields expose what the .env values
+    resolve to (DB ignored) for the "Load environment defaults" buttons.
+    """
+    from backend.alerts import resolve_email, resolve_telegram
+
+    cfg = get_settings()
+    # ntfy
+    topic = get_setting("ntfy_topic", "") or cfg.ntfy.topic
+    ntfy_enabled_raw = get_setting("ntfy_enabled", "")
+    ntfy_enabled = (ntfy_enabled_raw.lower() == "true") if ntfy_enabled_raw else cfg.ntfy.enabled
+    ntfy_server = get_setting("ntfy_server", "") or cfg.ntfy.server
+    # telegram / email (effective, DB-over-env)
+    tg = resolve_telegram()
+    em = resolve_email()
+    return {
+        # global dispatch switch (suppresses email; telegram/ntfy have own flags)
+        "alerts_enabled": _alerts_enabled(),
+        # ntfy
+        "ntfy_enabled": ntfy_enabled,
+        "ntfy_topic": topic,
+        "ntfy_topic_set": bool(topic),
+        "ntfy_server": ntfy_server,
+        "ntfy_configured": bool(topic),
+        "ntfy_enabled_env": cfg.ntfy.enabled,
+        "ntfy_topic_env": cfg.ntfy.topic,
+        "ntfy_topic_env_set": bool(cfg.ntfy.topic),
+        "ntfy_server_env": cfg.ntfy.server,
+        # telegram (bot token returned so the form can show it — admin-gated, own config)
+        "telegram_enabled": tg["enabled"],
+        "telegram_bot_token": tg["bot_token"],
+        "telegram_bot_token_set": bool(tg["bot_token"]),
+        "telegram_chat_id": tg["chat_id"],
+        "telegram_configured": bool(tg["bot_token"] and tg["chat_id"]),
+        "telegram_enabled_env": cfg.telegram.enabled,
+        "telegram_bot_token_env": cfg.telegram.bot_token,
+        "telegram_bot_token_env_set": bool(cfg.telegram.bot_token),
+        "telegram_chat_id_env": cfg.telegram.chat_id,
+        # email
+        "email_enabled": em["enabled"],
+        "email_smtp_host": em["smtp_host"],
+        "email_smtp_port": em["smtp_port"],
+        "email_username": em["username"],
+        "email_password": em["password"],
+        "email_password_set": bool(em["password"]),
+        "email_from": em["sender"],
+        "email_to": em["recipient"],
+        "email_configured": bool(em["username"] and em["password"] and em["recipient"]),
+        "email_enabled_env": cfg.email.enabled,
+        "email_password_env": cfg.email.password,
+        "email_password_env_set": bool(cfg.email.password),
+    }
+
+
+@router.post("/settings/notifications/ntfy")
+def set_ntfy_settings(request: NtfySettingRequest) -> dict[str, Any]:
+    """Persist ntfy settings to the DB (no restart). Re-registers channels."""
+    from backend.notifications import register_channels
+
+    if request.enabled is not None:
+        set_setting("ntfy_enabled", "true" if request.enabled else "false")
+    if request.topic is not None:
+        set_setting("ntfy_topic", request.topic)
+    if request.server is not None:
+        set_setting("ntfy_server", request.server)
+    register_channels()
+    return get_notification_settings()
+
+
+@router.post("/settings/notifications/telegram")
+def set_telegram_settings(request: TelegramSettingRequest) -> dict[str, Any]:
+    """Persist Telegram settings to the DB (no restart)."""
+    if request.enabled is not None:
+        set_setting("telegram_enabled", "true" if request.enabled else "false")
+    if request.bot_token is not None:
+        set_setting("telegram_bot_token", request.bot_token)
+    if request.chat_id is not None:
+        set_setting("telegram_chat_id", request.chat_id)
+    return get_notification_settings()
+
+
+@router.post("/settings/notifications/email")
+def set_email_settings(request: EmailSettingRequest) -> dict[str, Any]:
+    """Persist email settings to the DB (no restart)."""
+    if request.enabled is not None:
+        set_setting("email_enabled", "true" if request.enabled else "false")
+    if request.smtp_host is not None:
+        set_setting("email_smtp_host", request.smtp_host)
+    if request.smtp_port is not None:
+        set_setting("email_smtp_port", str(request.smtp_port))
+    if request.username is not None:
+        set_setting("email_username", request.username)
+    if request.password is not None:
+        set_setting("email_password", request.password)
+    if request.email_from is not None:
+        set_setting("email_from", request.email_from)
+    if request.email_to is not None:
+        set_setting("email_to", request.email_to)
+    return get_notification_settings()
+
+
+@router.post("/notifications/test")
+def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
+    """Fire a test notification through every enabled channel; report per-channel.
+
+    ntfy accepts optional topic/server overrides so the user can test what's typed
+    in the form before saving; Telegram and Email use their saved/effective config.
+    """
+    from backend.alerts import send_email, send_telegram
+    from backend.notifications.ntfy import post_ntfy, resolve_server, resolve_topic
+
+    subject = "MarketSage — test notification"
+    body = "If you can read this, your notification channel is wired up correctly. ✅"
+    results: dict[str, str] = {}
+
+    # ntfy (with optional unsaved overrides)
+    topic = (request.topic or "").strip() or resolve_topic()
+    server = (request.server or "").strip() or resolve_server()
+    if topic:
+        results["ntfy"] = (
+            "sent" if post_ntfy(server, topic, subject, body, priority="default") else "failed"
+        )
+    else:
+        results["ntfy"] = "skipped (not configured)"
+
+    results["telegram"] = "sent" if send_telegram(subject, body) else "skipped or failed"
+    results["email"] = "sent" if send_email(subject, body) else "skipped or failed"
+
+    any_sent = any(v == "sent" for v in results.values())
+    if not any_sent:
+        raise HTTPException(
+            status_code=502,
+            detail="No channel accepted the test. Enable and configure at least one channel.",
+        )
+    return {"ok": True, "results": results}

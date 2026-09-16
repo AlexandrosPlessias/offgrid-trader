@@ -1,4 +1,5 @@
 """Usage and quota routes: /usage, /provider/quota."""
+
 from __future__ import annotations
 
 import asyncio

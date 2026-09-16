@@ -9,18 +9,22 @@ Day-to-day operation of **MarketSage**. First-time install is in
 
 ## 1. Quick start
 
-**First time?** Use the bootstrap script — it handles everything:
+**Cloud deployment (Vercel + Fly.io):** if you deployed to the cloud, the app runs without a
+local machine — open your Vercel URL. See [docs/wiki/cloud-hosting.md](docs/wiki/cloud-hosting.md)
+for the one-time setup.
 
-```bash
-bash scripts/setup_wsl.sh     # WSL2 / Ubuntu
-bash scripts/setup_macos.sh   # macOS
-```
-
-**Subsequent runs** (model already downloaded, images already built):
+**Local Docker (subsequent runs** — model already downloaded, images already built):
 
 ```bash
 make infra    # start Docker (WSL2) + Ollama + Portainer
 make up       # start MarketSage
+```
+
+**First time locally?** Use the bootstrap script — it handles everything:
+
+```bash
+bash scripts/setup_wsl.sh     # WSL2 / Ubuntu
+bash scripts/setup_macos.sh   # macOS
 ```
 
 `make infra` detects WSL2 automatically — it starts the Docker service, waits

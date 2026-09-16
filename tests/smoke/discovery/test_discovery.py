@@ -87,7 +87,9 @@ def test_discovery(check):
         with _mock16.patch("yfinance.screen", return_value=_YF_SCREEN_RESPONSE) as _msc16:
             with _mock16.patch("backend.discovery._fetch_from_alpaca", return_value=([], None)):
                 _c1 = fetch_candidates(sources="alpaca,yfinance", limit=50)
-                _ = fetch_candidates(sources="alpaca,yfinance", limit=50)  # from cache; result unused
+                _ = fetch_candidates(
+                    sources="alpaca,yfinance", limit=50
+                )  # from cache; result unused
         check(
             "16d. fetch_candidates returns non-empty list",
             len(_c1) >= 1,
@@ -157,7 +159,10 @@ def test_discovery(check):
         )
         check(
             "16e. score_candidate component keys present",
-            all(k in _score_result["components"] for k in ("momentum", "volume", "trend", "rsi_macd")),
+            all(
+                k in _score_result["components"]
+                for k in ("momentum", "volume", "trend", "rsi_macd")
+            ),
             detail=str(_score_result["components"]),
         )
 
@@ -391,26 +396,36 @@ def test_discovery_run_candidates_endpoint(check):
             run_id,
             [
                 {
-                    "symbol":         "TSLA",
-                    "ticker":         "TSLA",
-                    "score":          68.5,
-                    "price":          250.0,
+                    "symbol": "TSLA",
+                    "ticker": "TSLA",
+                    "score": 68.5,
+                    "price": 250.0,
                     "percent_change": 4.1,
-                    "volume":         30_000_000,
-                    "source":         "yf_day_gainers",
-                    "reasons":        ["Strong momentum", "Volume spike"],
-                    "components":     {"momentum": 20.0, "volume": 18.5, "trend": 15.0, "rsi_macd": 15.0},
+                    "volume": 30_000_000,
+                    "source": "yf_day_gainers",
+                    "reasons": ["Strong momentum", "Volume spike"],
+                    "components": {
+                        "momentum": 20.0,
+                        "volume": 18.5,
+                        "trend": 15.0,
+                        "rsi_macd": 15.0,
+                    },
                 },
                 {
-                    "symbol":         "AMZN",
-                    "ticker":         "AMZN",
-                    "score":          55.0,
-                    "price":          185.0,
+                    "symbol": "AMZN",
+                    "ticker": "AMZN",
+                    "score": 55.0,
+                    "price": 185.0,
                     "percent_change": 2.3,
-                    "volume":         20_000_000,
-                    "source":         "yf_most_actives",
-                    "reasons":        ["Moderate move"],
-                    "components":     {"momentum": 12.0, "volume": 14.0, "trend": 15.0, "rsi_macd": 14.0},
+                    "volume": 20_000_000,
+                    "source": "yf_most_actives",
+                    "reasons": ["Moderate move"],
+                    "components": {
+                        "momentum": 12.0,
+                        "volume": 14.0,
+                        "trend": 15.0,
+                        "rsi_macd": 14.0,
+                    },
                 },
             ],
             _TMP_DB,
@@ -418,8 +433,9 @@ def test_discovery_run_candidates_endpoint(check):
         update_discovery_run(run_id, "done", 2, db_path=_TMP_DB)
 
         # ── Hit the endpoint via TestClient ───────────────────────────────────
-        with mock.patch.object(scheduler.scheduler, "start", lambda: None), \
-             mock.patch.object(scheduler.scheduler, "stop", mock.AsyncMock()):
+        with mock.patch.object(scheduler.scheduler, "start", lambda: None), mock.patch.object(
+            scheduler.scheduler, "stop", mock.AsyncMock()
+        ):
             with TestClient(app) as client:
 
                 # Happy path ──────────────────────────────────────────────────
@@ -466,7 +482,10 @@ def test_discovery_run_candidates_endpoint(check):
                 )
                 check(
                     "16L. component keys present",
-                    all(k in first["components"] for k in ("momentum", "volume", "trend", "rsi_macd")),
+                    all(
+                        k in first["components"]
+                        for k in ("momentum", "volume", "trend", "rsi_macd")
+                    ),
                     f"components keys={list(first.get('components', {}).keys())}",
                 )
 

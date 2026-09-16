@@ -109,6 +109,17 @@ lint:
 deploy:
 	@bash scripts/cloud-deploy/deploy.sh
 
+## Mirror local .env values (notifications, API keys, watchlist, thresholds…) into
+## Fly secrets. Infra vars Fly/fly.toml owns are excluded. Preview: make fly-secrets DRY=1
+fly-secrets:
+	@bash scripts/cloud-deploy/sync-secrets.sh $(if $(DRY),--dry-run,)
+
+## Full deploy: sync .env → Fly secrets first, then deploy backend + frontend.
+## Use when you've changed .env credentials/config; otherwise `make deploy` is enough.
+deploy-full:
+	@bash scripts/cloud-deploy/sync-secrets.sh
+	@bash scripts/cloud-deploy/deploy.sh
+
 ## Take the app offline: stop all Fly.io machines + remove Vercel production deployment.
 ## Restore with: make deploy
 shutdown:

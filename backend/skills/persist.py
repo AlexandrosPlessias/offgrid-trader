@@ -52,7 +52,7 @@ class PersistSkill(Skill):
             try:
                 signal_id = save_signal(opp, llm_provider=llm_provider, llm_model=llm_model)
                 saved_ids[opp["ticker"]] = signal_id
-                _log.debug("persist: saved signal %d for %s", signal_id, ctx.ticker)
+                _log.debug("persist: signal %d for %s (deduped or new)", signal_id, ctx.ticker)
             except Exception:
                 _log.exception("persist: save_signal failed for %s", ctx.ticker)
                 errors.append("save_signal failed — check server logs")

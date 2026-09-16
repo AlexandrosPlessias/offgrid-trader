@@ -1,4 +1,5 @@
 """Alpaca / paper-trading routes: /settings/alpaca*, /paper/*."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -334,11 +335,11 @@ def close_paper_position(ticker: str) -> dict[str, Any]:
         # Determine close direction:
         #   long  position → sell to close
         #   short position → buy to cover
-        pos_side   = position.get("side", "long")
+        pos_side = position.get("side", "long")
         close_side = "sell" if pos_side == "long" else "buy"
 
         # Entry price and current unrealized P&L (used later to record realized P&L).
-        entry_price   = float(position.get("avg_entry_price") or 0)
+        entry_price = float(position.get("avg_entry_price") or 0)
         unrealized_pl = float(position.get("unrealized_pl") or 0)
 
         # Preserve fractional shares — pass qty exactly as Alpaca reported it.
@@ -348,8 +349,7 @@ def close_paper_position(ticker: str) -> dict[str, Any]:
         qty_str = str(close_qty)
         # Normalise "2.0" → "2" so Alpaca treats it as a whole-share order;
         # leave "1.5" as-is for fractional positions.
-        if qty_str.endswith(".0"):
-            qty_str = qty_str[:-2]
+        qty_str = qty_str.removesuffix(".0")
 
         # Determine whether the market is currently open so we pick the right TIF.
         # "day" fills immediately during market hours.
@@ -367,10 +367,10 @@ def close_paper_position(ticker: str) -> dict[str, Any]:
         order = client._post(
             "/v2/orders",
             {
-                "symbol":        ticker,
-                "qty":           qty_str,
-                "side":          close_side,
-                "type":          "market",
+                "symbol": ticker,
+                "qty": qty_str,
+                "side": close_side,
+                "type": "market",
                 "time_in_force": tif,
             },
         )
@@ -382,32 +382,33 @@ def close_paper_position(ticker: str) -> dict[str, Any]:
         # Estimated P&L = unrealized_pl × (close_qty / total_qty) at current price;
         # sync_paper_orders will overwrite this with the actual fill price later.
         from backend.database import save_paper_order  # local import
+
         partial_ratio = (close_qty / qty_total) if qty_total > 0 else 1.0
         est_pnl = round(unrealized_pl * partial_ratio, 4)
         save_paper_order(
             {
-                "ticker":         ticker,
-                "side":           close_side,
+                "ticker": ticker,
+                "side": close_side,
                 "alpaca_order_id": order.get("id"),
-                "status":         order.get("status", "pending"),
-                "qty":            close_qty,
-                "notional":       None,
-                "entry_price":    entry_price if entry_price > 0 else None,
-                "realized_pnl":   est_pnl if order.get("status") == "filled" else None,
+                "status": order.get("status", "pending"),
+                "qty": close_qty,
+                "notional": None,
+                "entry_price": entry_price if entry_price > 0 else None,
+                "realized_pnl": est_pnl if order.get("status") == "filled" else None,
             }
         )
 
         market_note = None if is_open else "Market is closed — order queued for next open (GTC)."
-        is_partial  = qty_total > close_qty
+        is_partial = qty_total > close_qty
         return {
-            "closed":   True,
-            "ticker":   ticker,
-            "qty":      qty_str,
-            "qty_total": str(int(qty_total)) if qty_total == int(qty_total) else str(qty_total),
-            "partial":  is_partial,
+            "closed": True,
+            "ticker": ticker,
+            "qty": qty_str,
+            "qty_total": (str(int(qty_total)) if qty_total == int(qty_total) else str(qty_total)),
+            "partial": is_partial,
             "order_id": order.get("id"),
-            "status":   order.get("status"),
-            "order":    order,
+            "status": order.get("status"),
+            "order": order,
             **({"note": market_note} if market_note else {}),
         }
     except AlpacaError as exc:
@@ -530,12 +531,12 @@ def assets_tradability(
             safe_ticker = _clean_ticker(ticker)
             asset = client._get(f"/v2/assets/{safe_ticker}")
             result[ticker] = {
-                "tradable":       bool(asset.get("tradable", False)),
-                "status":         asset.get("status", "unknown"),
-                "shortable":      bool(asset.get("shortable", False)),
-                "fractionable":   bool(asset.get("fractionable", False)),
+                "tradable": bool(asset.get("tradable", False)),
+                "status": asset.get("status", "unknown"),
+                "shortable": bool(asset.get("shortable", False)),
+                "fractionable": bool(asset.get("fractionable", False)),
                 "easy_to_borrow": bool(asset.get("easy_to_borrow", False)),
-                "exchange":       asset.get("exchange", ""),
+                "exchange": asset.get("exchange", ""),
             }
         except AlpacaError:
             pass  # ticker not on Alpaca — caller treats missing as 'unknown'

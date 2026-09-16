@@ -59,6 +59,21 @@ services:
     networks:
       - ai-shared
 
+  # ── ntfy (push-notification server) ─────────────────────────────────────────
+  # Receives batched scan-cycle summaries from the backend and delivers them to
+  # the ntfy mobile/web app.  Subscribe to http://<host-ip>:18880/<your-topic>.
+  ntfy:
+    image: binwiederhier/ntfy:latest
+    container_name: ntfy
+    restart: unless-stopped
+    command: serve
+    volumes:
+      - ntfy_data:/var/lib/ntfy
+    ports:
+      - "18880:80"
+    networks:
+      - ai-shared
+
   # ── Portainer CE (shared container management UI) ────────────────────────────
   portainer:
     image: portainer/portainer-ce:2.27.4
@@ -90,3 +105,5 @@ volumes:
     name: ollama_models
   portainer_data:
     name: portainer_data
+  ntfy_data:
+    name: ntfy_data

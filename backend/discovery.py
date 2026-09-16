@@ -261,7 +261,7 @@ def fetch_candidates(
     # allocated below — appending to a single list would starve later sources
     # because _dedupe(raw)[:limit] would only take from whichever filled first.
     alpaca_bucket: list[dict[str, Any]] = []
-    yf_bucket:     list[dict[str, Any]] = []
+    yf_bucket: list[dict[str, Any]] = []
 
     used_yf_fallback = False
     if "alpaca" in source_list:
@@ -457,7 +457,10 @@ def run_discovery(
         progress_callback("fetch", f"Fetching candidates from: {sources}")
 
     raw = fetch_candidates(
-        sources=sources, limit=max_candidates * 2, progress_callback=progress_callback, force=force
+        sources=sources,
+        limit=max_candidates * 2,
+        progress_callback=progress_callback,
+        force=force,
     )
 
     if not raw:

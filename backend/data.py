@@ -1165,7 +1165,11 @@ def score_news_sentiment(news: list[dict[str, Any]]) -> dict[str, Any]:
             "Bullish" if compound > 0.05 else ("Bearish" if compound < -0.05 else "Neutral")
         )
         scored.append(
-            {"headline": item.get("headline", ""), "score": compound, "label": item_label}
+            {
+                "headline": item.get("headline", ""),
+                "score": compound,
+                "label": item_label,
+            }
         )
 
     if not scored:

@@ -1,21 +1,23 @@
 # MarketSage
 
-**Local-first AI stock monitor.** FastAPI + SQLite + Recharts.
-Fetches live market data, runs an LLM for technical analysis, detects
-trading opportunities with transparent rules, stores signals, sends alerts
-via Gmail SMTP and/or Telegram, backtests signals against historical data,
-and **discovers trending tickers automatically** via Alpaca screener and
-yfinance — scored 0-100 by momentum, volume, trend alignment, and
-multi-timeframe RSI/MACD (no LLM quota consumed for discovery).
+> AI-powered stock monitor with live market data, technical analysis, paper trading, and push alerts.
 
-Runs **fully locally** with Ollama (`qwen2.5:14b`) — no cloud APIs required.
-Optionally switch to **Groq, Gemini, or Mistral** free-tier cloud inference
-from the Settings page with no restart needed. Includes **paper trading via
-Alpaca** — actionable signals automatically place bracket orders on a virtual
-$100 k account, with live market prices (price, VWAP, volume, day Δ%)
-updated every 30 s during market hours.
+[![Deploy](https://github.com/AlexandrosPlessias/offgrid-trader/actions/workflows/deploy.yml/badge.svg)](https://github.com/AlexandrosPlessias/offgrid-trader/actions/workflows/deploy.yml)
+[![App](https://github.com/AlexandrosPlessias/offgrid-trader/actions/workflows/app-power.yml/badge.svg)](https://github.com/AlexandrosPlessias/offgrid-trader/actions/workflows/app-power.yml)
+[![CodeQL](https://github.com/AlexandrosPlessias/offgrid-trader/actions/workflows/codeql-push.yml/badge.svg)](https://github.com/AlexandrosPlessias/offgrid-trader/actions/workflows/codeql-push.yml)
+[![Wiki Sync](https://github.com/AlexandrosPlessias/offgrid-trader/actions/workflows/sync-wiki.yml/badge.svg)](https://github.com/AlexandrosPlessias/offgrid-trader/actions/workflows/sync-wiki.yml)
 
-Fully responsive — mobile ≤ 768px shows a hamburger nav drawer. Code split into focused modules: 9 backend route files, 31 frontend components, 16 smoke-test domain files.
+MarketSage fetches live market data, runs a cloud or local LLM for technical analysis,
+detects trading opportunities, and places paper bracket orders via Alpaca — all from a
+free-tier Vercel + Fly.io deployment or a local Docker stack. Runs entirely on free tiers:
+Groq / Gemini / Mistral for inference, yfinance + `ta` for indicators, ntfy for push alerts
+(no paid API required). Optionally run fully offline with local Ollama.
+
+FastAPI + SQLite + Recharts. Discovers trending tickers automatically via Alpaca screener and
+yfinance — scored 0–100 by momentum, volume, trend alignment, and multi-timeframe RSI/MACD
+(no LLM quota consumed for discovery). Fully responsive — mobile ≤ 768 px shows a hamburger
+nav drawer. Code split into focused modules: 9 backend route files, 31 frontend components,
+16 smoke-test domain files.
 
 ### What MarketSage analyses for each ticker
 
@@ -218,12 +220,12 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env      # (Windows: copy .env.example .env)
-# edit .env: watchlist, thresholds, and optional email/Slack credentials
+# edit .env: watchlist, thresholds, and optional alert credentials
 ```
 
-All secrets (SMTP App Password, Slack webhook) live in `.env`, which is
-gitignored. Email and Slack are **disabled by default** — set `EMAIL_ENABLED`
-/ `SLACK_ENABLED` to `true` and fill in credentials to turn them on.
+All secrets (SMTP App Password, Telegram bot token, ntfy topic) live in `.env`, which is
+gitignored. Email, Telegram, and ntfy are **disabled by default** — set the respective
+`*_ENABLED` flag to `true` and fill in credentials to turn them on.
 
 ---
 
@@ -353,6 +355,7 @@ See [docs/wiki/indicators.md](docs/wiki/indicators.md) for a full indicator refe
 | [Backtesting](docs/wiki/backtesting.md) | Parameters, ATR bracket, LLM mode, runs comparator, API + DB schema |
 | [Backtesting explained](docs/wiki/backtesting-explained.md) | Concepts in plain English: R-multiple, Sharpe, confidence-floor tuning |
 | [Cloud LLM setup](docs/wiki/cloud-llm.md) | Step-by-step free-tier setup for Groq, Gemini, and Mistral |
+| [Notifications](docs/wiki/notifications.md) | ntfy, Telegram, and Email — channel setup, action buttons, API reference, troubleshooting |
 | [Indicators](docs/wiki/indicators.md) | RSI, MACD, EMA, BB, Stoch, Volume, Fundamentals, Balance Sheet, Macro |
 | [Settings Reference](docs/wiki/settings.md) | Every `.env` variable, defaults, runtime-mutable column, AI Usage section |
 | [Glossary](docs/wiki/glossary.md) | Alphabetical trading and macro terminology |

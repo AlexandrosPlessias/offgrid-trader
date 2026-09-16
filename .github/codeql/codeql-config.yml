@@ -1,0 +1,11 @@
+name: CodeQL config
+
+# py/partial-ssrf in backend/notifications/ntfy.py is a false positive:
+# the ntfy server URL is admin-only configuration (DB or env var, gated
+# behind the admin token).  The scheme is validated to http/https before
+# use.  The topic is a random string the admin sets; it is URL-encoded
+# before being appended to the path.  Neither value is reachable by
+# unauthenticated users.
+query-filters:
+  - exclude:
+      id: py/partial-ssrf

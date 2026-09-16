@@ -1,11 +1,11 @@
-"""Alerting: format opportunities and deliver via Gmail SMTP, Slack, and/or Telegram.
+"""Alerting: format opportunities and deliver via Gmail SMTP, Telegram, and/or ntfy.
 
 Alerts only fire for opportunities whose confidence meets the configured
 floor. All channels are optional and independently gated by their
 ``*_ENABLED`` env flags and by having complete credentials.
 
-Email and Slack can be suspended globally with ``ALERTS_SEND_ENABLED=false``
-(e.g. during local testing) while keeping Telegram active.
+Email can be suspended globally with ``ALERTS_SEND_ENABLED=false``
+(e.g. during local testing) while keeping Telegram/ntfy active.
 
 Run standalone to send a test alert through whatever channels are configured::
 
@@ -15,14 +15,13 @@ Run standalone to send a test alert through whatever channels are configured::
 from __future__ import annotations
 
 import logging
-import smtplib
-import ssl
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from typing import Any
 
-import requests
-
+# Email/SMTP descoped in favor of ntfy — untested; uncomment to re-enable send_email().
+# import smtplib
+# import ssl
+# from email.mime.multipart import MIMEMultipart
+# from email.mime.text import MIMEText
 from .config import get_settings
 from .database import get_setting
 
@@ -75,52 +74,76 @@ def format_alert(opportunity: dict[str, Any]) -> dict[str, str]:
 # --------------------------------------------------------------------------- #
 # Channels
 # --------------------------------------------------------------------------- #
+# Effective config resolvers — DB override first, env default second, so every
+# channel is configurable at runtime from the Settings page (no restart).
+# --------------------------------------------------------------------------- #
+def _db_or(key: str, env_val: str) -> str:
+    return get_setting(key, "") or env_val
+
+
+def _bool_db_or(key: str, env_val: bool) -> bool:
+    raw = get_setting(key, "")
+    return raw.lower() == "true" if raw else env_val
+
+
+def resolve_email() -> dict[str, Any]:
+    e = get_settings().email
+    port_raw = get_setting("email_smtp_port", "")
+    return {
+        "enabled": _bool_db_or("email_enabled", e.enabled),
+        "smtp_host": _db_or("email_smtp_host", e.smtp_host),
+        "smtp_port": int(port_raw) if port_raw.isdigit() else e.smtp_port,
+        "username": _db_or("email_username", e.username),
+        "password": _db_or("email_password", e.password),
+        "sender": _db_or("email_from", e.sender),
+        "recipient": _db_or("email_to", e.recipient),
+    }
+
+
+def resolve_telegram() -> dict[str, Any]:
+    t = get_settings().telegram
+    return {
+        "enabled": _bool_db_or("telegram_enabled", t.enabled),
+        "bot_token": _db_or("telegram_bot_token", t.bot_token),
+        "chat_id": _db_or("telegram_chat_id", t.chat_id),
+    }
+
+
 def send_email(subject: str, body: str) -> bool:
-    """Send *body* via Gmail SMTP using an App Password. Returns success."""
+    """SMTP email — DESCOPED in favor of ntfy (untested; no-op).
 
-    settings = get_settings()
-    email = settings.email
-    if not email.is_configured:
-        return False
+    ntfy covers the same alerting use cases with a simpler, more interactive UX.
+    To re-enable: uncomment the SMTP imports at the top of this module and the
+    body below, and uncomment the Email/SMTP section in the Settings UI
+    (frontend/src/pages/SettingsPage.jsx). The config plumbing (resolve_email,
+    GET/POST /settings/notifications/email) is left intact.
+    """
+    return False
 
-    message = MIMEMultipart()
-    message["From"] = email.sender or email.username
-    message["To"] = email.recipient
-    message["Subject"] = subject
-    message.attach(MIMEText(body, "plain"))
-
-    try:
-        context = ssl.create_default_context()
-        with smtplib.SMTP(email.smtp_host, email.smtp_port, timeout=20) as server:
-            server.starttls(context=context)
-            server.login(email.username, email.password)
-            server.sendmail(
-                email.sender or email.username,
-                [email.recipient],
-                message.as_string(),
-            )
-        return True
-    except Exception as exc:  # pragma: no cover - network/credential dependent
-        _log.warning("email send failed: %s", exc)
-        return False
-
-
-def send_slack(text: str) -> bool:
-    """Post *text* to the configured Slack Incoming Webhook. Returns success."""
-
-    settings = get_settings()
-    slack = settings.slack
-    if not slack.is_configured:
-        return False
-    try:
-        response = requests.post(slack.webhook_url, json={"text": text}, timeout=15)
-        if response.status_code // 100 == 2:
-            return True
-        _log.warning("slack returned HTTP %s: %s", response.status_code, response.text[:200])
-        return False
-    except Exception as exc:  # pragma: no cover - network dependent
-        _log.warning("slack send failed: %s", exc)
-        return False
+    # email = resolve_email()
+    # if not (email["enabled"] and email["username"] and email["password"] and email["recipient"]):
+    #     return False
+    #
+    # message = MIMEMultipart()
+    # message["From"] = email["sender"] or email["username"]
+    # message["To"] = email["recipient"]
+    # message["Subject"] = subject
+    # message.attach(MIMEText(body, "plain"))
+    #
+    # try:
+    #     context = ssl.create_default_context()
+    #     with smtplib.SMTP(email["smtp_host"], email["smtp_port"], timeout=20) as server:
+    #         server.starttls(context=context)
+    #         server.login(email["username"], email["password"])
+    #         server.sendmail(
+    #             email["sender"] or email["username"],
+    #             [email["recipient"]],
+    #             message.as_string(),
+    #         )
+    #     return True
+    # except Exception as exc:  # pragma: no cover - network/credential dependent
+    #     _log.warning("email send failed: %s", exc)
+    #     return False
 
 
 def send_telegram(subject: str, body: str) -> bool:
@@ -128,18 +151,17 @@ def send_telegram(subject: str, body: str) -> bool:
 
     import httpx  # already in requirements; local import to avoid top-level dep
 
-    settings = get_settings()
-    tg = settings.telegram
-    if not tg.is_configured:
+    tg = resolve_telegram()
+    if not (tg["enabled"] and tg["bot_token"] and tg["chat_id"]):
         return False
 
     text = f"*{subject}*\n\n{body}"
-    url = f"https://api.telegram.org/bot{tg.bot_token}/sendMessage"
+    url = f"https://api.telegram.org/bot{tg['bot_token']}/sendMessage"
     try:
         r = httpx.post(
             url,
             json={
-                "chat_id": tg.chat_id,
+                "chat_id": tg["chat_id"],
                 "text": text,
                 "parse_mode": "Markdown",
             },
@@ -160,7 +182,7 @@ def send_alert(
     """Format and dispatch an alert if it clears the confidence floor.
 
     Returns a result dict describing what happened, e.g.
-    ``{"sent": True, "channels": ["slack"], "skipped": False}``.
+    ``{"sent": True, "channels": ["telegram", "ntfy"], "skipped": False}``.
     """
 
     settings = get_settings()
@@ -176,18 +198,52 @@ def send_alert(
         }
 
     message = format_alert(opportunity)
+
+    # Master kill-switch: when "Alert dispatch" is off, suppress every channel
+    # (email, Telegram, ntfy). Per-channel Enable flags only matter when this is on.
+    # Manual tests via POST /notifications/test bypass this switch.
+    if not _is_alerts_enabled():
+        _log.info("alert dispatch disabled — suppressing all channels")
+        return {
+            "sent": False,
+            "skipped": True,
+            "reason": "alert dispatch disabled",
+            "channels": [],
+            "subject": message["subject"],
+        }
+
+    from .notifications import dispatch as _notify_dispatch
+
+    cfg = get_settings()
     channels: list[str] = []
 
-    if _is_alerts_enabled():
-        if send_email(message["subject"], message["text"]):
-            channels.append("email")
-        if send_slack(message["text"]):
-            channels.append("slack")
-    else:
-        _log.info("alerts disabled — skipping email/Slack")
+    if send_email(message["subject"], message["text"]):
+        channels.append("email")
 
     if send_telegram(message["subject"], message["text"]):
         channels.append("telegram")
+
+    # ntfy and any other registered channels
+    backend_url = get_setting("backend_public_url", "") or cfg.backend_public_url
+    ticker = opportunity.get("ticker", "?")
+    side = str(opportunity.get("type", "buy"))
+    actions: list[dict] | None = None
+    if opportunity.get("ticker"):
+        order_body = (
+            f'{{"ticker": "{ticker}", "side": "{side}",'
+            f' "qty": 1, "order_type": "market", "time_in_force": "day"}}'
+        )
+        actions = [
+            {
+                "label": f"Paper {ticker} {side.upper()}",
+                "url": f"{backend_url}/paper/orders",
+                "method": "POST",
+                "body": order_body,
+            }
+        ]
+
+    ntfy_results = _notify_dispatch(message["subject"], message["text"], actions=actions)
+    channels.extend(k for k, v in ntfy_results.items() if v)
 
     return {
         "sent": bool(channels),
@@ -195,6 +251,31 @@ def send_alert(
         "channels": channels,
         "subject": message["subject"],
     }
+
+
+def send_system_event(message: str) -> dict[str, bool]:
+    """Fire a minimal system notification (e.g. startup/shutdown) via enabled channels.
+
+    Reuses the existing send logic (ntfy dispatch + Telegram). Each channel only
+    fires when it is configured and enabled (their own guards). Never raises —
+    every failure is logged and swallowed so this can't block startup or shutdown.
+
+    The emoji lives in the message body (UTF-8, preserved); the ntfy Title stays
+    a plain ASCII "MarketSage".
+    """
+    results: dict[str, bool] = {}
+    try:
+        from .notifications import dispatch as _notify_dispatch
+
+        results.update(_notify_dispatch("MarketSage", message))
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("system notification via ntfy failed: %s", exc)
+    try:
+        if send_telegram(message, ""):
+            results["telegram"] = True
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("system notification via telegram failed: %s", exc)
+    return results
 
 
 if __name__ == "__main__":

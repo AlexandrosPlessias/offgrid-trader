@@ -100,7 +100,9 @@ def test_backtest_engine(check):
             "stop": None,
             "target": None,
         }
-        _bracketed = synthesize_bracket(_sig_no_bracket, atr_val=2.0, atr_multiple=1.5, reward_risk=2.0)
+        _bracketed = synthesize_bracket(
+            _sig_no_bracket, atr_val=2.0, atr_multiple=1.5, reward_risk=2.0
+        )
         check(
             "synthesize_bracket sets stop for long",
             _bracketed["stop"] < 100.0,
@@ -171,7 +173,9 @@ def test_backtest_engine(check):
             },
             index=_pd2.date_range("2024-01-02", periods=2, freq="B"),
         )
-        _result_loss = evaluate_outcome(_make_signal(100.0, 97.0, 106.0), _fwd_loss, max_hold_days=5)
+        _result_loss = evaluate_outcome(
+            _make_signal(100.0, 97.0, 106.0), _fwd_loss, max_hold_days=5
+        )
         check(
             "evaluate_outcome loss — outcome is 'loss'",
             _result_loss["outcome"] == "loss",

@@ -22,20 +22,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 _TMP_DB = os.path.join(tempfile.gettempdir(), "offgrid_smoke.db")
 os.environ["DATABASE_PATH"] = _TMP_DB
 os.environ["EMAIL_ENABLED"] = "false"
-os.environ["SLACK_ENABLED"] = "false"
+os.environ["NTFY_ENABLED"] = "false"
 
 # --------------------------------------------------------------------------- #
 # Section 1 — Import all backend modules; fail fast if any is missing.
 # --------------------------------------------------------------------------- #
 try:
     from backend import (  # noqa: E402, F401
-        alerts,      # noqa: F401  — import-existence check; not referenced directly
-        analysis,    # noqa: F401
-        config,      # noqa: F401
-        data,        # noqa: F401
+        alerts,  # noqa: F401  — import-existence check; not referenced directly
+        analysis,  # noqa: F401
+        config,  # noqa: F401
+        data,  # noqa: F401
         database,
         opportunities,
-        scheduler,   # noqa: F401
+        scheduler,  # noqa: F401
     )
     from backend.main import app  # noqa: E402
 except Exception as exc:  # pragma: no cover

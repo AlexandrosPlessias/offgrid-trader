@@ -1,5 +1,6 @@
 # offgrid-trader backend image.
 # Single FastAPI service; the LLM runs in the separate `ollama` container.
+# ntfy push-notification server runs as a sidecar (see infra/entrypoint.sh).
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -15,9 +16,16 @@ COPY tests/ tests/
 # Data dir for the SQLite database (mounted as a volume in compose).
 RUN mkdir -p /app/data
 
+# ntfy binary — copied from the official multi-arch image (no download needed).
+# Pin the version here; Docker resolves the correct architecture automatically.
+COPY --from=binwiederhier/ntfy:v2.28.0 /usr/bin/ntfy /usr/local/bin/ntfy
+
+COPY infra/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 ENV PYTHONUNBUFFERED=1 \
     DATABASE_PATH=/app/data/offgrid_trader.db
 
-EXPOSE 8000
+EXPOSE 8000 18880
 
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/entrypoint.sh"]

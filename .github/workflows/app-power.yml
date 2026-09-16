@@ -116,6 +116,16 @@ jobs:
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
+      # Send EoD digest before the app goes offline so notifications can still fire.
+      - name: Send EoD report
+        if: needs.resolve.outputs.action == 'stop'
+        run: |
+          curl -sf -X GET \
+            -H "Authorization: Bearer ${{ secrets.ADMIN_TOKEN }}" \
+            "https://offgrid-trader.fly.dev/reports/eod" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print('EoD sent:', d.get('channels'))" \
+            || echo "EoD report skipped (app may already be offline)."
+
       # min_machines_running = 0 in fly.toml keeps machines from auto-restarting.
       - name: Stop machines
         if: needs.resolve.outputs.action == 'stop'

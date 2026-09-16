@@ -90,7 +90,7 @@ class AlpacaClient:
         raw_url = (base_url or get_setting("alpaca_paper_url", "") or cfg.paper_url).rstrip("/")
         # Normalise: strip /v2 suffix so paths like /v2/account are always appended once.
         # Users sometimes paste the full versioned URL (e.g. https://paper-api.alpaca.markets/v2).
-        normalised = raw_url[:-3] if raw_url.endswith("/v2") else raw_url
+        normalised = raw_url.removesuffix("/v2")
         self._base_url = _validate_url(normalised)
         self._key_id = (
             key_id if key_id is not None else (get_setting("alpaca_key_id", "") or cfg.key_id)

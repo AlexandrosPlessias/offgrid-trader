@@ -1,4 +1,5 @@
 """Health and auth routes: GET /health, POST /auth/verify."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -7,7 +8,7 @@ from fastapi import APIRouter, Body, HTTPException
 
 from backend import __version__
 from backend.config import get_settings
-from backend.database import get_setting
+from backend.database import get_effective_watchlist, get_setting
 from backend.scheduler import scheduler
 
 router = APIRouter()
@@ -29,7 +30,7 @@ def health() -> dict[str, Any]:
         "version": __version__,
         "llm_provider": provider,
         "llm_model": active_model,
-        "watchlist_size": len(settings.watchlist),
+        "watchlist_size": len(get_effective_watchlist()),
         "scheduler": scheduler.status(),
         "disclaimer": "Not financial advice.",
     }

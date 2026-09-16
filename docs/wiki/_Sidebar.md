@@ -13,6 +13,7 @@
 - [Backtesting — Reference](backtesting)
 - [Paper Trading](paper-trading)
 - [Trending Discovery](trending-discovery)
+- [Notifications](notifications)
 - [Glossary](glossary)
 - [Observability](observability)
 - [Development](development)

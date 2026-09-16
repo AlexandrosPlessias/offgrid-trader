@@ -1,4 +1,5 @@
 """Discovery routes: /discovery/*, /settings/discovery*."""
+
 from __future__ import annotations
 
 import asyncio
@@ -266,6 +267,7 @@ async def discovery_refresh() -> StreamingResponse:
             if run_id is not None:
                 try:
                     from backend.database import _connect as _db_conn  # local import
+
                     with _db_conn() as _c:
                         row = _c.execute(
                             "SELECT status FROM discovery_runs WHERE id=?", (run_id,)

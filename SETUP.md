@@ -3,12 +3,14 @@
 First-time setup for **MarketSage**. After this, see
 [USAGE.md](USAGE.md) for day-to-day operation.
 
-The entire stack runs in Docker — no Python venv required.
-On **macOS**, native Ollama is used so inference runs on Apple Metal GPU (Docker containers
-cannot access it). On Windows/Linux, Ollama runs inside Docker.
-It is fully **local and zero-cost**: market data comes from free sources
-(yfinance + ta library for indicators) and the AI runs on a local Ollama
-`qwen2.5:14b` model. No paid or cloud APIs are required.
+**Fastest path:** MarketSage runs for free on Vercel (frontend) + Fly.io (backend)
+with a cloud LLM — Groq free tier, no credit card required. Skip to
+[section 4b](#4b-cloud-ai-quick-start-recommended) to get started in minutes.
+
+For local or offline development, the entire stack runs in Docker — no Python venv required.
+On **macOS**, native Ollama is used so inference runs on Apple Metal GPU. On Windows/Linux,
+Ollama runs inside Docker. Market data comes from free sources (yfinance + ta library for
+indicators). No paid APIs are required for either path.
 
 > ⚠️ **Not financial advice.** For educational/research use only.
 
@@ -157,11 +159,11 @@ table below highlights the values you'll most likely change:
 | `EMAIL_ENABLED` | No | `true` to send Gmail alerts (needs the SMTP vars below) |
 | `SMTP_USERNAME` / `SMTP_APP_PASSWORD` | If email on | Gmail address + **App Password** (not your account password) |
 | `EMAIL_TO` | If email on | Recipient address |
-| `SLACK_ENABLED` | No | `true` to send Slack alerts |
-| `SLACK_WEBHOOK_URL` | If Slack on | Slack Incoming Webhook URL |
 | `TELEGRAM_ENABLED` | No | `true` to send Telegram alerts |
 | `TELEGRAM_BOT_TOKEN` | If Telegram on | Token from BotFather (see below) |
 | `TELEGRAM_CHAT_ID` | If Telegram on | Your chat or group ID (see below) |
+| `NTFY_ENABLED` | No | `true` to send push notifications via ntfy (self-hosted, no sign-up) |
+| `NTFY_TOPIC` | If ntfy on | Random string acting as channel name / shared secret |
 
 > `OLLAMA_HOST` is overridden to `http://ollama:11434` by Compose, so leave the
 > `.env` value as-is — inside Docker the app talks to the `ollama` container.
@@ -173,10 +175,12 @@ table below highlights the values you'll most likely change:
 3. In `.env` set `EMAIL_ENABLED=true`, `SMTP_USERNAME`, `SMTP_APP_PASSWORD`,
    `EMAIL_FROM`, `EMAIL_TO`.
 
-### Optional: Slack alerts
+### Optional: ntfy push alerts
 
-1. Create an Incoming Webhook: https://api.slack.com/messaging/webhooks
-2. In `.env` set `SLACK_ENABLED=true` and `SLACK_WEBHOOK_URL=<url>`.
+1. Set `NTFY_ENABLED=true` and `NTFY_TOPIC=<random-string>` in `.env`.
+2. Subscribe in the ntfy mobile app: `http://<host-ip>:18880/<your-topic>` (local) or
+   `https://<app>.fly.dev:18880/<your-topic>` (Fly.io). The ntfy server starts automatically —
+   no separate setup needed.
 
 ### Optional: Telegram alerts
 
@@ -216,11 +220,7 @@ Trigger a test alert via the React UI or `curl` to confirm delivery.
 
 ---
 
-## 4b. Cloud AI quick-start (no GPU, no credit card)
-
-> **Skip this section** if you plan to run Ollama locally.
-> Use it if your machine is low on RAM/VRAM, or you just want the fastest path to
-> a running system.
+## 4b. Cloud AI quick-start (recommended — no GPU, no credit card)
 
 Groq Cloud provides free inference with no credit card required:
 

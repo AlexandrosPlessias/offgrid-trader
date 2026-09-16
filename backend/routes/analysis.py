@@ -1,4 +1,5 @@
 """Analysis routes: /analyze*, /market-data*, /webhook*, /signals*, /analysis*."""
+
 from __future__ import annotations
 
 import asyncio
@@ -15,13 +16,17 @@ from pydantic import BaseModel, Field
 from backend.data import get_market_data as _get_market_data
 from backend.database import (
     delete_analysis as _delete_analysis,
+)
+from backend.database import (
     delete_signal as _delete_signal_row,
+)
+from backend.database import (
     get_analysis_history,
     get_recent_analyses,
     get_recent_signals,
 )
-from backend.scheduler import scan_ticker_async
 from backend.routes._models import _clean_ticker, _log_safe
+from backend.scheduler import scan_ticker_async
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
