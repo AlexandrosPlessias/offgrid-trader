@@ -408,6 +408,20 @@ def close_paper_position(ticker: str) -> dict[str, Any]:
             }
         )
 
+        from backend.alerts import send_order_notification  # local import
+
+        current_price = float(position.get("current_price") or entry_price or 0)
+        pnl_sign = "+" if est_pnl >= 0 else ""
+        send_order_notification(
+            kind="order",
+            ticker=ticker,
+            side=close_side,
+            amount=round(current_price * close_qty, 2),
+            mode="paper",
+            detail=f"manual close · est. P&L {pnl_sign}${est_pnl:.2f}",
+            is_close=True,
+        )
+
         market_note = None if is_open else "Market is closed — order queued for next open (GTC)."
         is_partial = qty_total > close_qty
         return {

@@ -577,7 +577,7 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
     subject = "MarketSage — test notification"
     body = (
         "If you can read this, your notification channel is wired up correctly. ✅\n"
-        "Tap “✅ Confirm receipt” to complete the round-trip test."
+        'Tap "Confirm receipt" below to finish the round-trip test.'
     )
     actions = [{"label": "✅ Confirm receipt", "url": confirm_url, "method": "POST"}]
     tg_markup = {"inline_keyboard": [[{"text": "✅ Confirm receipt", "url": confirm_url}]]}
@@ -589,7 +589,9 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
     if topic:
         results["ntfy"] = (
             "sent"
-            if post_ntfy(server, topic, subject, body, priority="default", actions=actions)
+            if post_ntfy(
+                server, topic, subject, body, tags="bell", priority="default", actions=actions
+            )
             else "failed"
         )
     else:
@@ -606,3 +608,23 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
             detail="No channel accepted the test. Enable and configure at least one channel.",
         )
     return {"ok": True, "results": results, "token": token, "ttl": 60}
+
+
+@router.get("/settings/export")
+def export_settings() -> dict[str, Any]:
+    """Download a portable JSON snapshot of CONFIG (settings + watchlist groups).
+
+    Secret values (API keys, bot tokens, ntfy topic, admin token) are redacted. Data
+    (signals/orders/etc.) is NOT here — export that via ``GET /data/export``. Manual only.
+    """
+    from datetime import datetime, timezone
+
+    from backend.database import export_app_settings, get_watchlist_groups
+
+    return {
+        "format": "marketsage-config",
+        "version": 1,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "settings": export_app_settings(redact_secrets=True),
+        "watchlist_groups": get_watchlist_groups(),
+    }

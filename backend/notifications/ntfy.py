@@ -28,6 +28,7 @@ def _ascii_header(value: str) -> str:
     replacements = {
         "—": "-",
         "–": "-",
+        "·": "-",
         "’": "'",
         "‘": "'",
         "“": '"',
@@ -63,6 +64,7 @@ def post_ntfy(
     subject: str,
     body: str,
     *,
+    tags: str | None = None,
     actions: list[dict] | None = None,
     priority: str | None = None,
 ) -> bool:
@@ -74,19 +76,26 @@ def post_ntfy(
     url = f"{_validate_server(server).rstrip('/')}/{topic}"
     headers: dict[str, str] = {
         "Title": _ascii_header(subject) or "MarketSage",
-        "Tags": "chart_with_upwards_trend,bell",
+        "Tags": _ascii_header(tags) if tags else "chart_with_upwards_trend,bell",
         "Content-Type": "text/plain; charset=utf-8",
     }
     if priority:
         headers["Priority"] = priority
     if actions:
+        # Inject the admin Bearer token into every action so the backend's auth
+        # middleware doesn't 401 the HTTP request ntfy fires on button tap.
+        _token = get_setting("admin_token", "") or get_settings().admin_token or ""
         action_parts = []
         for a in actions:
             label = _ascii_header(a["label"]) or "Action"
             parts = [f"http, {label}, {a['url']}", f"method={a.get('method', 'POST')}"]
             if a.get("body"):
-                parts.append(f"body={a['body']}")
+                # Single-quote so the JSON body's internal commas don't split the
+                # comma-delimited ntfy Actions grammar (ntfy honours quoted values).
+                parts.append(f"body='{a['body']}'")
             parts.append("headers.Content-Type=application/json")
+            if _token:
+                parts.append(f"headers.Authorization=Bearer {_token}")
             action_parts.append(", ".join(parts))
         headers["Actions"] = _ascii_header("; ".join(action_parts))
 
@@ -120,5 +129,15 @@ class NtfyChannel:
         body: str,
         *,
         actions: list[dict] | None = None,
+        tags: str | None = None,
+        priority: str | None = None,
     ) -> bool:
-        return post_ntfy(resolve_server(), resolve_topic(), subject, body, actions=actions)
+        return post_ntfy(
+            resolve_server(),
+            resolve_topic(),
+            subject,
+            body,
+            tags=tags,
+            actions=actions,
+            priority=priority,
+        )
