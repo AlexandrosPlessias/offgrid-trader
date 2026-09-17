@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { API, getAuthHeaders } from '../utils/api'
 import UsageSection from './UsageSection'
 import InfoTip from '../components/shared/InfoTip'
@@ -1146,6 +1146,13 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
   const [clearConfirm,     setClearConfirm]     = useState(false)
   const [clearStatus,      setClearStatus]      = useState(null)
 
+  // ── Export / backup / import ────────────────────────────────────────────────
+  const [exportDataStatus,   setExportDataStatus]   = useState(null)
+  const [exportDataXlsxStatus, setExportDataXlsxStatus] = useState(null)
+  const [exportConfigStatus, setExportConfigStatus] = useState(null)
+  const [importStatus,       setImportStatus]       = useState(null)   // null | 'importing' | {ok, counts} | 'error'
+  const importFileRef = useRef(null)
+
   const CLEAR_OPTIONS = [
     { id: 'signals',             label: 'Signals',              desc: 'Stored signal alerts' },
     { id: 'analysis_log',        label: 'Analysis history',     desc: 'Explorer per-ticker analysis log' },
@@ -1387,6 +1394,64 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
       setResetStatus('ok')
       setTimeout(() => setResetStatus(null), 4000)
     } catch (e) { setResetStatus('error') }
+  }
+
+  // Auth is a Bearer header, so a plain <a download> would 401 — fetch → blob → object-URL.
+  const downloadJson = async (path, filenamePrefix, setStatus) => {
+    setStatus('exporting')
+    try {
+      const r = await fetch(`${API}${path}`, { headers: getAuthHeaders() })
+      if (!r.ok) throw new Error(`Export failed (${r.status})`)
+      const blob = await r.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      const date = new Date().toISOString().slice(0, 10)
+      a.href = url
+      a.download = `${filenamePrefix}-${date}.json`
+      document.body.appendChild(a); a.click(); a.remove()
+      URL.revokeObjectURL(url)
+      setStatus('ok'); setTimeout(() => setStatus(null), 4000)
+    } catch (e) { setStatus('error'); setTimeout(() => setStatus(null), 5000) }
+  }
+
+  const downloadXlsx = async (path, filenamePrefix, setStatus) => {
+    setStatus('exporting')
+    try {
+      const r = await fetch(`${API}${path}`, { headers: getAuthHeaders() })
+      if (!r.ok) throw new Error(`Export failed (${r.status})`)
+      const blob = await r.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      const date = new Date().toISOString().slice(0, 10)
+      a.href = url
+      a.download = `${filenamePrefix}-${date}.xlsx`
+      document.body.appendChild(a); a.click(); a.remove()
+      URL.revokeObjectURL(url)
+      setStatus('ok'); setTimeout(() => setStatus(null), 4000)
+    } catch (e) { setStatus('error'); setTimeout(() => setStatus(null), 5000) }
+  }
+
+  const handleImportFile = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''   // reset so same file can be re-selected
+    setImportStatus('importing')
+    try {
+      const text = await file.text()
+      const payload = JSON.parse(text)
+      const r = await fetch(`${API}/data/import`, {
+        method: 'POST',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const data = await r.json()
+      if (!r.ok) throw new Error(data.detail || `Import failed (${r.status})`)
+      setImportStatus({ ok: true, total: data.total_rows, counts: data.counts })
+      setTimeout(() => setImportStatus(null), 8000)
+    } catch (err) {
+      setImportStatus({ ok: false, msg: err.message })
+      setTimeout(() => setImportStatus(null), 8000)
+    }
   }
 
 
@@ -2146,6 +2211,99 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
 
       {/* ── Data ──────────────────────────────────────────────────────────── */}
       <SettingSection id="settings-data" title="Data" icon="🗑️">
+
+        {/* Export / Backup ─────────────────────────────────────────────── */}
+        <p className="text-dim" style={{ fontSize: 13, marginBottom: 12 }}>
+          <strong>Export / Backup</strong> — download a portable snapshot to keep
+          off-site or move to another instance.
+        </p>
+
+        {/* Data export row */}
+        <div className="settings-save-row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          <button
+            className="btn-secondary btn-sm"
+            onClick={() => downloadJson('/data/export', 'marketsage-data', setExportDataStatus)}
+            disabled={exportDataStatus === 'exporting'}
+          >
+            ⬇ Export data (JSON)
+          </button>
+          <button
+            className="btn-secondary btn-sm"
+            onClick={() => downloadXlsx('/data/export/xlsx', 'marketsage-data', setExportDataXlsxStatus)}
+            disabled={exportDataXlsxStatus === 'exporting'}
+          >
+            ⬇ Export data (Excel)
+          </button>
+          {(exportDataStatus === 'exporting' || exportDataXlsxStatus === 'exporting') &&
+            <span className="text-dim" style={{ fontSize: 12 }}>Exporting…</span>}
+          {(exportDataStatus === 'ok' || exportDataXlsxStatus === 'ok') &&
+            <span className="settings-ok">✓ Downloaded</span>}
+          {(exportDataStatus === 'error' || exportDataXlsxStatus === 'error') &&
+            <span className="settings-err">✗ Export failed</span>}
+        </div>
+        <p className="text-dim" style={{ fontSize: 12, margin: '4px 0 14px' }}>
+          Signals, orders, discovery runs, watchlist — JSON for restore; Excel for analysis.
+        </p>
+
+        {/* Config export row */}
+        <div className="settings-save-row">
+          <button
+            className="btn-secondary btn-sm"
+            onClick={() => downloadJson('/settings/export', 'marketsage-config', setExportConfigStatus)}
+            disabled={exportConfigStatus === 'exporting'}
+          >
+            ⬇ Export config (JSON)
+          </button>
+          {exportConfigStatus === 'exporting' && <span className="text-dim" style={{ fontSize: 12 }}>Exporting…</span>}
+          {exportConfigStatus === 'ok'    && <span className="settings-ok">✓ Config exported</span>}
+          {exportConfigStatus === 'error' && <span className="settings-err">✗ Export failed</span>}
+        </div>
+        <p className="text-dim" style={{ fontSize: 12, margin: '4px 0 18px' }}>
+          Settings + watchlist groups (secrets redacted).
+        </p>
+
+        {/* Import / Restore */}
+        <p className="text-dim" style={{ fontSize: 13, marginBottom: 10 }}>
+          <strong>Import / Restore</strong> — load a JSON data snapshot back into this instance.
+          Existing rows are never overwritten (INSERT OR IGNORE). Clear specific tables first
+          if you want a clean restore.
+        </p>
+        <div className="settings-save-row">
+          <input
+            ref={importFileRef}
+            type="file"
+            accept=".json,application/json"
+            style={{ display: 'none' }}
+            onChange={handleImportFile}
+          />
+          <button
+            className="btn-secondary btn-sm"
+            onClick={() => importFileRef.current?.click()}
+            disabled={importStatus === 'importing'}
+          >
+            ⬆ Import data
+          </button>
+          {importStatus === 'importing' && <span className="text-dim" style={{ fontSize: 12 }}>Importing…</span>}
+          {importStatus?.ok === true && (
+            <span className="settings-ok">
+              ✓ {importStatus.total} row(s) imported
+              {importStatus.counts && (
+                <span style={{ opacity: 0.75, marginLeft: 6, fontSize: 11 }}>
+                  ({Object.entries(importStatus.counts).filter(([,v]) => v > 0).map(([k,v]) => `${k}: ${v}`).join(' · ')})
+                </span>
+              )}
+            </span>
+          )}
+          {importStatus?.ok === false && (
+            <span className="settings-err">✗ {importStatus.msg || 'Import failed'}</span>
+          )}
+        </div>
+        <p className="text-dim" style={{ fontSize: 11, margin: '4px 0 0', opacity: 0.8 }}>
+          Only data export files are importable — config files (with redacted secrets) are not.
+        </p>
+
+        <div style={{ borderTop: '1px solid var(--border)', margin: '18px 0', opacity: 0.4 }} />
+
         <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
           Select the data you want to erase. Settings, API keys, and watchlist
           groups are never affected.
