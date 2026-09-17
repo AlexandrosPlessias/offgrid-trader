@@ -29,6 +29,7 @@ from .database import (
     init_db,
     save_discovery_candidates,
     save_discovery_run,
+    save_event,
     update_discovery_run,
     update_paper_order_status,
 )
@@ -196,6 +197,29 @@ async def sync_paper_orders() -> None:
                 direction = 1 if side == "sell" else -1
                 updates["realized_pnl"] = round((fill - entry) * qty * direction, 4)
 
+                # Notify: this close leg just filled — fire regardless of origin
+                # (stop-loss, take-profit, or market close from Instant Cashout).
+                pnl = updates["realized_pnl"]
+                pnl_sign = "+" if pnl >= 0 else ""
+                order_type = ao.get("type", "")
+                if order_type == "stop":
+                    exit_label = "stop-loss triggered"
+                elif order_type == "limit":
+                    exit_label = "take-profit hit"
+                else:
+                    exit_label = "position closed"
+                from .alerts import send_order_notification  # local import
+
+                send_order_notification(
+                    kind="order",
+                    ticker=db_order.get("ticker", "?"),
+                    side=side,
+                    amount=round(fill * qty, 2),
+                    mode="paper",
+                    detail=f"{exit_label} · exit @ ${fill:.2f} · P&L {pnl_sign}${pnl:.2f}",
+                    is_close=True,
+                )
+
         update_paper_order_status(order_id, updates)
         updated += 1
 
@@ -253,6 +277,20 @@ async def monitor_frac_positions() -> None:
                     {"status": "closed", "exit_reason": "reconciled", "closed_at": now_iso},
                 )
                 closed += 1
+                from .alerts import send_order_notification  # local import
+
+                _frac_mode = get_setting("frac_mode", "paper")
+                _entry = float(row.get("entry_price") or 0)
+                _qty = float(row.get("qty") or 0)
+                send_order_notification(
+                    kind="fractional",
+                    ticker=ticker,
+                    side="sell",
+                    amount=round(_entry * _qty, 2),
+                    mode=_frac_mode,
+                    detail="reconciled — position closed externally on Alpaca",
+                    is_close=True,
+                )
             continue
 
         try:
@@ -308,6 +346,27 @@ async def monitor_frac_positions() -> None:
         closed += 1
         _log.info(
             "frac monitor: closed %s @ %.2f (%s) pnl=%.2f", ticker, current, exit_reason, realized
+        )
+        from .alerts import send_order_notification  # local import
+
+        _frac_mode = get_setting("frac_mode", "paper")
+        _reason_labels = {
+            "target": "take-profit hit",
+            "stop": "stop-loss triggered",
+            "eod": "end-of-day close",
+        }
+        pnl_sign = "+" if realized >= 0 else ""
+        send_order_notification(
+            kind="fractional",
+            ticker=ticker,
+            side="sell",
+            amount=round(current * held_qty, 2),
+            mode=_frac_mode,
+            detail=(
+                f"{_reason_labels.get(exit_reason, exit_reason)} · "
+                f"exit @ ${current:.2f} · P&L {pnl_sign}${realized:.2f}"
+            ),
+            is_close=True,
         )
 
     if closed:
@@ -413,19 +472,36 @@ class MonitorScheduler:
         self.running = True
         settings = get_settings()
         _log.info("started; interval=%sm", settings.scan_interval_minutes)
+        save_event("scheduler", f"Scheduler started (interval {settings.scan_interval_minutes}m)")
         try:
+            # Wait for the first grid slot so all scans fire at :00/:15/:30/:45
+            # (and discovery at :00 on the hour) rather than immediately at startup.
+            _init_interval = max(60, settings.scan_interval_minutes * 60)
+            _now = datetime.now(settings.market_hours.tzinfo)
+            _first_fire = _next_grid_time(_now, _init_interval)
+            self.next_run = _first_fire.isoformat()
+            _log.info("waiting for first grid slot: %s", self.next_run)
+            _init_sleep = max(1.0, (_first_fire - _now).total_seconds())
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=_init_sleep)
+            except asyncio.TimeoutError:
+                pass
+
             while not self._stop.is_set():
                 if is_market_open():
                     tickers = get_effective_watchlist()
                     _log.info("market open — scanning %d tickers", len(tickers))
+                    save_event("scan", f"Scan started — {len(tickers)} tickers")
                     try:
                         results = await scan_watchlist(send_alerts=True)
                         now = datetime.now(settings.market_hours.tzinfo)
                         self.last_run = now.isoformat()
                         total = sum(len(r.get("actionable", [])) for r in results)
                         _log.info("scan complete — %d actionable signal(s)", total)
+                        save_event("scan", f"Scan complete — {total} actionable signal(s)")
                     except Exception as exc:  # pragma: no cover - defensive
                         _log.error("scan error: %s", exc)
+                        save_event("scan", f"Scan error: {exc}", level="error")
                     # Sync paper order statuses after each watchlist scan.
                     try:
                         await sync_paper_orders()
@@ -461,6 +537,7 @@ class MonitorScheduler:
         finally:
             self.running = False
             _log.info("stopped")
+            save_event("scheduler", "Scheduler stopped")
 
     async def _exit_loop(self) -> None:
         """Fast poller dedicated to fractional stop/target exits.

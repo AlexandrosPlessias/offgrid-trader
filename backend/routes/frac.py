@@ -390,6 +390,22 @@ def close_frac_position(ticker: str) -> dict[str, Any]:
                 "closed_at": _now_iso(),
             },
         )
+        from backend.alerts import send_order_notification  # local import
+        from backend.database import get_setting as _gs
+
+        _frac_mode = _gs("frac_mode", "paper")
+        _pnl_str = ""
+        if realized is not None:
+            _pnl_str = f" · P&L {'+'if realized >= 0 else ''}${realized:.2f}"
+        send_order_notification(
+            kind="fractional",
+            ticker=ticker,
+            side="sell",
+            amount=round(current * close_qty, 2) if current else 0.0,
+            mode=_frac_mode,
+            detail=f"manual close · exit @ ${current:.2f}{_pnl_str}" if current else "manual close",
+            is_close=True,
+        )
         return {
             "closed": True,
             "ticker": ticker,
