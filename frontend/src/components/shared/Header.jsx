@@ -6,6 +6,7 @@ const NAV_PRIMARY = [
   { view: 'paper',     label: 'Trading',   icon: '📈' },
   { view: 'trending',  label: 'Discovery', icon: '🔥' },
   { view: 'explorer',  label: 'Explorer',  icon: '🔍' },
+  { view: 'events',    label: 'Activity',  icon: '📋' },
   { view: 'education', label: 'Learn',     icon: '📚' },
 ]
 const NAV_SECONDARY = [
@@ -79,6 +80,7 @@ export default function Header({ health, usage, btTodayTokens = 0, activeView, o
             <button className={`nav-tab ${activeView === 'paper'     ? 'active' : ''}`} onClick={() => onViewChange('paper')}>Trading</button>
             <button className={`nav-tab ${activeView === 'trending'  ? 'active' : ''}`} onClick={() => onViewChange('trending')}>Discovery</button>
             <button className={`nav-tab ${activeView === 'explorer'  ? 'active' : ''}`} onClick={() => onViewChange('explorer')}>Explorer</button>
+            <button className={`nav-tab ${activeView === 'events'    ? 'active' : ''}`} onClick={() => onViewChange('events')}>Activity</button>
             <button className={`nav-tab ${activeView === 'education' ? 'active' : ''}`} onClick={() => onViewChange('education')}>Learn</button>
           </nav>
         </div>
