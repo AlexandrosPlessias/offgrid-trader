@@ -219,3 +219,21 @@ macro ◀ fetched=5/5 series
 
 These log lines exist alongside the OTEL spans and provide a flat, scrollable view
 of the pipeline for quick debugging.
+
+---
+
+## Activity Feed (in-app event log)
+
+Beyond OTEL/Aspire, MarketSage keeps a lightweight, self-contained **event log** for an at-a-glance history — no external service required. Open it from the **Activity** tab in the top nav.
+
+Events are written coarsely from the pipeline's choke points into an `events` table (`id, ts, category, level, message, meta`) and served by `GET /events?limit=&after_id=&category=`. The page polls every ~5s. Categories:
+
+| Category | Emitted when |
+|---|---|
+| `scan` | a scan starts / completes, plus each signal hit |
+| `order` | a paper or fractional order is placed |
+| `discovery` | a discovery run starts / completes / errors |
+| `notification` | a push notification is dispatched (with channel status) |
+| `scheduler` | the scheduler starts / stops, and on loop errors |
+
+The table is capped (newest ~5000 rows) and can be cleared from **Settings → Data** (the `events` category). This is a read-only convenience feed; Aspire remains the place for full traces and metrics.

@@ -333,3 +333,20 @@ sqlite3 data/offgrid_trader.db "DELETE FROM app_settings WHERE key = 'scheduler_
 # Clear all signals and analysis log (preserves settings):
 curl -X POST http://localhost:8010/data/reset
 ```
+
+---
+
+## Export / Backup
+
+Download a portable snapshot of your data or config from **Settings → Data → Export / Backup**. Two separate JSON files keep data and secrets apart:
+
+- **Export data** (`GET /data/export`) — signals, analysis log, paper orders, fractional positions, discovery runs (with candidates), the watchlist, and ticker memory. Intended for backup, migration, or a state snapshot.
+- **Export config** (`GET /settings/export`) — all runtime settings plus watchlist groups, with **secret values redacted** (`alpaca_secret_key`, `frac_alpaca_secret_key`, `telegram_bot_token`, `telegram_webhook_secret`, `email_password`, `llm_api_key`, `ntfy_topic`, `admin_token` → `"__REDACTED__"`).
+
+Manual export only — there is no import/restore or auto-sync yet. The download is issued through the app (Bearer-authenticated `fetch`), so use the buttons rather than opening the URL directly.
+
+```bash
+# Or from the CLI (add -H "Authorization: Bearer <ADMIN_TOKEN>" if a token is set):
+curl http://localhost:8010/data/export      -o marketsage-data.json
+curl http://localhost:8010/settings/export  -o marketsage-config.json
+```
