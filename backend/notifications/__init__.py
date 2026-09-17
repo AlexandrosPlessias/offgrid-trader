@@ -23,7 +23,15 @@ class NotificationChannel(Protocol):
     def is_configured(self) -> bool:
         pass  # Protocol stub — implemented by each channel class
 
-    def send(self, subject: str, body: str, *, actions: list[dict] | None = None) -> bool:
+    def send(
+        self,
+        subject: str,
+        body: str,
+        *,
+        actions: list[dict] | None = None,
+        tags: str | None = None,
+        priority: str | None = None,
+    ) -> bool:
         pass  # Protocol stub — implemented by each channel class
 
 
@@ -38,7 +46,14 @@ def register_channels() -> None:
     _REGISTRY.append(NtfyChannel())
 
 
-def dispatch(subject: str, body: str, *, actions: list[dict] | None = None) -> dict[str, bool]:
+def dispatch(
+    subject: str,
+    body: str,
+    *,
+    actions: list[dict] | None = None,
+    tags: str | None = None,
+    priority: str | None = None,
+) -> dict[str, bool]:
     """Send to all configured channels; isolate failures per channel.
 
     Returns a mapping of channel name → success bool.
@@ -48,8 +63,21 @@ def dispatch(subject: str, body: str, *, actions: list[dict] | None = None) -> d
         if not channel.is_configured:
             continue
         try:
-            results[channel.name] = channel.send(subject, body, actions=actions)
+            results[channel.name] = channel.send(
+                subject, body, actions=actions, tags=tags, priority=priority
+            )
         except Exception as exc:  # noqa: BLE001
             _log.warning("notification channel %r failed: %s", channel.name, exc)
             results[channel.name] = False
+
+    if results:
+        from backend.database import save_event
+
+        _ok = [k for k, v in results.items() if v]
+        save_event(
+            "notification",
+            f"Notification sent via {', '.join(_ok)}" if _ok else "Notification failed",
+            level="info" if _ok else "warn",
+            meta={"subject": subject},
+        )
     return results

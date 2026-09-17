@@ -1,8 +1,8 @@
 # Notifications
 
-MarketSage sends **batched push alerts** at the end of each scan cycle — one
-message covering every signal detected in that run, with action buttons for
-placing paper trades directly from your phone.
+MarketSage sends **one push alert per signal** as each scan cycle turns it up —
+one message per opportunity, with action buttons for placing a trade directly
+from your phone.
 
 Three channels are available. All are off by default and independently
 enabled:
@@ -14,7 +14,9 @@ enabled:
 | ~~**Email**~~ | *Descoped* | — | No longer wired into the send path — ntfy/Telegram cover the same cases |
 
 > ⚠️ **Not financial advice.** Signals are for educational/research purposes only.
-> Action buttons place orders on your **paper trading** account, not real money.
+> The **Order** button trades on your **paper** account; the **Frac** button can
+> place **real** money when the fractional engine runs in `live` mode (the tap is
+> the confirmation).
 
 ---
 
@@ -91,7 +93,8 @@ credentials → delivery → action routing → frontend feedback — in one cli
 
 A separate toggle — **Order & fractional notifications** (default **on**) — pushes a
 short message to your channels each time an order or fractional buy is placed
-(e.g. `🪙 Fractional buy placed: BUY AAPL — $15 · LIVE 💰`).
+(e.g. `🪙 Fractional buy placed — BUY AAPL · $15.00 · LIVE 💰`, or
+`📈 Order placed — BUY AAPL · $500.00 · paper`).
 
 For ntfy:
 1. Toggle **Enable** on.
@@ -137,21 +140,46 @@ After editing `.env` run `make up` to recreate the container.
 
 ### 5. Notification format
 
-Each scan-cycle summary looks like this on your phone:
+MarketSage sends **one alert per signal**, the moment a scan cycle turns one up.
+Each alert looks like this on your phone:
 
 ```
-Title:  MarketSage — 3 signals  🕐 14:30 ET
+Title:  MarketSage · LONG AAPL · 78% confidence
 Body:
-  📈 AAPL  BUY   78% — RSI oversold + MACD cross
-  📉 TSLA  SHORT 71% — Volume spike + AI
-  ⚖  NVDA  HOLD  52% — below floor
+  Ticker:     AAPL
+  Direction:  LONG
+  Confidence: 78%
+  Price:      190.12
+  Entry:      190.00
+  Stop:       185.00
+  Target:     200.00
+  Source:     ai+rsi_extreme
 
-  [Paper AAPL BUY]   [Paper TSLA SELL]
+  Reasons:
+    - AI flagged long setup
+    - RSI oversold on 4H, 1D
+
+  Not financial advice · Generated locally by MarketSage
+
+  [Order AAPL BUY]   [Frac AAPL]
 ```
 
-Tapping a **Paper** button calls `POST /paper/orders` on your backend — the
-same endpoint as the UI. The order goes through the identical Alpaca submission
-and validation path; no shortcuts.
+Each alert carries up to **two from-phone trade actions**:
+
+- **Order** — places a bracket order via `POST /paper/orders/place` on your
+  **paper** account, using the signal's entry / stop / target. Shown for both
+  **LONG** and **SHORT** signals (ntfy action `Order {TICKER} {SIDE}`).
+- **Frac** — places a fractional buy via `POST /frac/order`. Shown for **LONG**
+  signals only — the fractional engine is buy-only (ntfy action `Frac {TICKER}`).
+  ⚠️ When that engine is in `live` mode the tap places a **real** order; the tap
+  itself is the confirmation.
+
+Both buttons hit the same endpoints the UI uses, so orders run through the
+identical dedup, tradability, and budget-cap checks — no shortcuts.
+
+> ntfy tags each notification by kind — a chart icon on signal alerts, a
+> bar-chart on the end-of-day digest, a rocket on startup — so they're easy to
+> tell apart at a glance.
 
 ### 6. Cloud (Fly.io) specifics
 
@@ -221,22 +249,30 @@ TELEGRAM_BOT_TOKEN=123456789:AAF...
 TELEGRAM_CHAT_ID=123456789
 ```
 
-### 4. Inline keyboard buttons (paper trade from phone)
+### 4. Inline keyboard buttons (trade from phone)
 
-When a Telegram notification arrives the message includes an inline keyboard
-with one button per actionable signal:
+Telegram alerts arrive as **HTML**, with the aligned signal body wrapped in a
+monospace `<pre>` block so the columns line up. Below each message sits an
+inline keyboard carrying the same **two trade actions** as ntfy:
 
 ```
-📈 AAPL BUY 78%
-[📄 Paper AAPL BUY]
+MarketSage · LONG AAPL · 78% confidence
 
-📉 TSLA SHORT 71%
-[📄 Paper TSLA SELL]
+  Ticker:     AAPL
+  Direction:  LONG
+  …
+
+[📄 Order BUY AAPL]
+[🪙 Frac AAPL]
 ```
 
-Tapping a button triggers `POST /notifications/telegram/callback` → which
-calls `POST /paper/orders` internally. Same validation, same Alpaca path as
-the UI.
+- **📄 Order {SIDE} {TICKER}** — bracket order on the **paper** account
+  (`POST /paper/orders/place`). Shown for **LONG** and **SHORT** signals.
+- **🪙 Frac {TICKER}** — fractional buy (`POST /frac/order`), **LONG** signals
+  only. Places a **real** order when the fractional engine is in `live` mode.
+
+Tapping a button triggers `POST /notifications/telegram/callback`, which drives
+the same endpoints — and the same validation — as the UI.
 
 #### Register the callback webhook (one-time, cloud only)
 
@@ -400,3 +436,21 @@ curl "http://localhost:18880/<your-topic>/json?poll=1&since=all"
 | Telegram messages arrive but buttons do nothing | Webhook not registered | Run the `setWebhook` curl command from [the Telegram setup section](#register-the-callback-webhook-one-time-cloud-only) |
 | Telegram webhook returns 403 | Secret token mismatch | `TELEGRAM_WEBHOOK_SECRET` in `.env` / Fly secrets must match the `secret_token` passed to `setWebhook` |
 | Email not sending | App Password wrong, 2FA off, or **Alert dispatch** toggle off | App Passwords require Google 2FA. Also check the **Alert dispatch** toggle at the top of the Notifications section — it gates email (ntfy/Telegram fire regardless). |
+
+---
+
+## Periodic reports — EoD digest & LLM summary
+
+Two report endpoints fan out to **both** ntfy and Telegram (the Telegram side renders as a monospace `<pre>` block):
+
+- **End-of-day digest** — `GET /reports/eod`. A deterministic summary of the day's economics, signals, and orders. Returns **502** if no channel is configured, so an external cron can't silently "succeed" while delivering nothing.
+- **LLM summary** — `GET /reports/llm-summary?period=daily|weekly`. A natural-language summary written by the configured LLM. Every figure is computed in Python and passed to the model as structured data (**compute-then-narrate** — the model never does arithmetic); on any LLM/parse failure it falls back to the deterministic EoD digest, so a report always sends.
+
+Both are meant to be triggered by an external scheduler (see BACKLOG item 8 — a Cloudflare Workers cron):
+
+```bash
+curl -H "Authorization: Bearer <ADMIN_TOKEN>" "https://<your-backend>/reports/eod"
+curl -H "Authorization: Bearer <ADMIN_TOKEN>" "https://<your-backend>/reports/llm-summary?period=weekly"
+```
+
+**Getting better LLM summaries:** feed a compact structured slice (today's signals, closed trades, top movers) rather than raw dumps; keep the model at low temperature; ask for a fixed short JSON shape; and rely on the deterministic-digest fallback for robustness.
