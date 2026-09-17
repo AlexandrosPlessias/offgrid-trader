@@ -1,18 +1,10 @@
 name: App Power
-run-name: App Power — ${{ inputs.action || 'scheduled' }}
+run-name: App Power — ${{ inputs.action }}
 
-# Manually take the app offline or bring it back online, OR let the
-# cron schedule do it automatically around US market hours, with a 1 h buffer:
-#   Start  8:30 AM ET  Mon–Fri  (1 h before the 9:30 AM open)
-#   Stop   5:00 PM ET  Mon–Fri  (1 h after  the 4:00 PM close)
-#
-# GitHub cron only runs in UTC and does not follow US Daylight Saving, so a
-# fixed UTC time drifts by 1 h twice a year.  To keep the buffer exact all year
-# we register BOTH the EDT and EST UTC times for each action, then the resolve
-# step below honours only the cron that matches the current Eastern offset
-# (the off-season twin becomes a no-op).  This is delay-immune: it keys off
-# which cron string fired (github.event.schedule) + today's offset, never the
-# wall-clock time the runner happened to start.
+# Manual-only workflow to start or stop the app on demand.
+# Automatic start/stop scheduling and EoD reports are handled by the
+# Cloudflare Workers cron trigger in infra/cron-worker/.
+# See docs/wiki/cloudflare-cron.md.
 on:
   workflow_dispatch:
     inputs:
@@ -26,71 +18,15 @@ on:
         required: true
         type: string
         default: 'offgrid-trader'
-  schedule:
-    - cron: '30 12 * * 1-5'   # 8:30 AM ET start — honoured during EDT (summer)
-    - cron: '30 13 * * 1-5'   # 8:30 AM ET start — honoured during EST (winter)
-    - cron: '0 21 * * 1-5'    # 5:00 PM ET stop  — honoured during EDT (summer)
-    - cron: '0 22 * * 1-5'    # 5:00 PM ET stop  — honoured during EST (winter)
 
 env:
   FLY_APP: offgrid-trader
 
 jobs:
-  # ── Resolve action (start|stop) from trigger type ───────────────────────────
-  resolve:
-    name: Resolve action
-    runs-on: ubuntu-latest
-    outputs:
-      action: ${{ steps.resolve.outputs.action }}
-    steps:
-      - name: Determine start or stop
-        id: resolve
-        env:
-          SCHED: ${{ github.event.schedule }}
-        run: |
-          if [ "${{ github.event_name }}" != "schedule" ]; then
-            echo "action=${{ inputs.action }}" >> "$GITHUB_OUTPUT"
-            echo "Manual trigger → ${{ inputs.action }}"
-            exit 0
-          fi
-
-          # Eastern UTC offset today: -0400 in EDT (summer), -0500 in EST (winter).
-          OFFSET=$(TZ="America/New_York" date +%z)
-          echo "Eastern offset today: $OFFSET · cron fired: '$SCHED'"
-
-          ACTION=none
-          if [ "$OFFSET" = "-0400" ]; then      # EDT — honour the summer crons
-            case "$SCHED" in
-              "30 12 * * 1-5") ACTION=start ;;
-              "0 21 * * 1-5")  ACTION=stop  ;;
-            esac
-          else                                   # EST — honour the winter crons
-            case "$SCHED" in
-              "30 13 * * 1-5") ACTION=start ;;
-              "0 22 * * 1-5")  ACTION=stop  ;;
-            esac
-          fi
-
-          echo "action=$ACTION" >> "$GITHUB_OUTPUT"
-          if [ "$ACTION" = "none" ]; then
-            echo "Off-season twin cron for this offset → no-op (skipping)."
-          else
-            echo "Scheduled trigger → $ACTION"
-          fi
-          echo "──────────────────────────────────────────"
-          echo "Fired at : $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          echo "Eastern  : $(TZ='America/New_York' date '+%Y-%m-%d %H:%M:%S %Z')"
-          echo "Cron     : ${SCHED:-manual}"
-          echo "Offset   : ${OFFSET:--}"
-          echo "Action   : $ACTION"
-          echo "──────────────────────────────────────────"
-
-  # ── Validate confirmation (manual dispatch only) ─────────────────────────────
+  # ── Validate confirmation ────────────────────────────────────────────────────
   check:
     name: Validate confirmation
     runs-on: ubuntu-latest
-    needs: resolve
-    if: github.event_name == 'workflow_dispatch'
     steps:
       - name: Verify app name
         run: |
@@ -103,12 +39,7 @@ jobs:
   backend:
     name: Backend → Fly.io
     runs-on: ubuntu-latest
-    needs: [resolve, check]
-    if: |
-      always() &&
-      needs.resolve.result == 'success' &&
-      needs.resolve.outputs.action != 'none' &&
-      (needs.check.result == 'success' || needs.check.result == 'skipped')
+    needs: check
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
@@ -116,35 +47,19 @@ jobs:
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
-      # Send EoD digest before the app goes offline so notifications can still fire.
-      - name: Send EoD report
-        if: needs.resolve.outputs.action == 'stop'
-        run: |
-          curl -sf -X GET \
-            -H "Authorization: Bearer ${{ secrets.ADMIN_TOKEN }}" \
-            "https://offgrid-trader.fly.dev/reports/eod" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print('EoD sent:', d.get('channels'))" \
-            || echo "EoD report skipped (app may already be offline)."
-
-      # min_machines_running = 0 in fly.toml keeps machines from auto-restarting.
       - name: Stop machines
-        if: needs.resolve.outputs.action == 'stop'
+        if: inputs.action == 'stop'
         run: flyctl scale count 0 -a "$FLY_APP" --yes
 
       - name: Redeploy
-        if: needs.resolve.outputs.action == 'start'
+        if: inputs.action == 'start'
         run: flyctl deploy --remote-only -a "$FLY_APP"
 
   # ── Frontend → Vercel ───────────────────────────────────────────────────────
   frontend:
     name: Frontend → Vercel
     runs-on: ubuntu-latest
-    needs: [resolve, check]
-    if: |
-      always() &&
-      needs.resolve.result == 'success' &&
-      needs.resolve.outputs.action != 'none' &&
-      (needs.check.result == 'success' || needs.check.result == 'skipped')
+    needs: check
     env:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
@@ -159,7 +74,7 @@ jobs:
         run: npm install -g vercel@latest
 
       - name: Remove production deployment
-        if: needs.resolve.outputs.action == 'stop'
+        if: inputs.action == 'stop'
         run: |
           PROD_URL=$(vercel ls "$FLY_APP" --prod --token=${{ secrets.VERCEL_TOKEN }} 2>/dev/null \
             | grep -o 'https://[^ ]*' | head -1)
@@ -171,16 +86,16 @@ jobs:
           vercel remove "$PROD_URL" --yes --token=${{ secrets.VERCEL_TOKEN }}
 
       - name: Pull Vercel environment
-        if: needs.resolve.outputs.action == 'start'
+        if: inputs.action == 'start'
         run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
         working-directory: frontend
 
       - name: Build
-        if: needs.resolve.outputs.action == 'start'
+        if: inputs.action == 'start'
         run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
         working-directory: frontend
 
       - name: Deploy pre-built output
-        if: needs.resolve.outputs.action == 'start'
+        if: inputs.action == 'start'
         run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
         working-directory: frontend
