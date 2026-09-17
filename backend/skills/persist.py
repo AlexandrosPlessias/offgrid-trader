@@ -21,7 +21,7 @@ class PersistSkill(Skill):
     can_retry = False
 
     def run(self, ctx: AgentContext) -> SkillResult:
-        from backend.database import save_analysis, save_signal
+        from backend.database import save_analysis, save_event, save_signal
 
         saved_ids: dict[str, int] = {}  # {ticker: signal_id}
         errors: list[str] = []
@@ -53,6 +53,12 @@ class PersistSkill(Skill):
                 signal_id = save_signal(opp, llm_provider=llm_provider, llm_model=llm_model)
                 saved_ids[opp["ticker"]] = signal_id
                 _log.debug("persist: signal %d for %s (deduped or new)", signal_id, ctx.ticker)
+                save_event(
+                    "scan",
+                    f"Signal {opp.get('type', '?')} {opp['ticker']} "
+                    f"{float(opp.get('confidence') or 0):.0f}%",
+                    meta={"ticker": opp["ticker"], "signal_id": signal_id},
+                )
             except Exception:
                 _log.exception("persist: save_signal failed for %s", ctx.ticker)
                 errors.append("save_signal failed — check server logs")

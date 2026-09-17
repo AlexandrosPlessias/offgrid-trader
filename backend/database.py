@@ -20,11 +20,14 @@ the database file and print a summary::
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .config import get_settings
+
+_log = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -288,6 +291,18 @@ CREATE TABLE IF NOT EXISTS frac_positions (
 );
 CREATE INDEX IF NOT EXISTS idx_frac_positions_ticker ON frac_positions(ticker);
 CREATE INDEX IF NOT EXISTS idx_frac_positions_status ON frac_positions(status);
+
+-- Unified activity stream for the Log / Activity Feed (coarse, best-effort).
+CREATE TABLE IF NOT EXISTS events (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts       TEXT NOT NULL,
+    category TEXT NOT NULL,                -- scan | order | discovery | notification | scheduler
+    level    TEXT NOT NULL DEFAULT 'info', -- info | warn | error
+    message  TEXT NOT NULL,
+    meta     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_category ON events(category);
 """
 
 
@@ -993,6 +1008,7 @@ _CLEAR_CATEGORY_LABELS: dict[str, str] = {
     "ticker_memory": "ticker_memory",
     "data_cache": "data_cache",
     "backtest_runs": "backtest_runs",  # trades/floor_suggests/compares cascade
+    "events": "events",  # activity-feed log
 }
 
 CLEAR_CATEGORIES = set(_CLEAR_CATEGORY_LABELS.keys())
@@ -1040,6 +1056,8 @@ def clear_selected_data(
         if "backtest_runs" in cats:
             # backtest_trades / backtest_floor_suggests / backtest_compares cascade
             result["backtest_runs_deleted"] = conn.execute("DELETE FROM backtest_runs").rowcount
+        if "events" in cats:
+            result["events_deleted"] = conn.execute("DELETE FROM events").rowcount
         conn.commit()
 
     return result
@@ -1062,6 +1080,245 @@ def clear_all_data(db_path: str | None = None) -> dict[str, int]:
         "floor_suggests_deleted": fs_rows,
         "compares_deleted": cmp_rows,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Event log — a coarse, unified activity stream (Log / Activity Feed).
+# --------------------------------------------------------------------------- #
+_EVENTS_MAX_ROWS = 5000
+
+
+def save_event(
+    category: str,
+    message: str,
+    *,
+    level: str = "info",
+    meta: dict[str, Any] | None = None,
+    db_path: str | None = None,
+) -> None:
+    """Append one activity event. Best-effort — never raises (must not break a flow)."""
+    try:
+        with _connect(db_path) as conn:
+            conn.execute(
+                "INSERT INTO events (ts, category, level, message, meta) VALUES (?, ?, ?, ?, ?)",
+                (_now_iso(), category, level, message, json.dumps(meta) if meta else None),
+            )
+            # Bound the table so the feed can't grow without limit.
+            conn.execute(
+                "DELETE FROM events WHERE id <= (SELECT MAX(id) FROM events) - ?",
+                (_EVENTS_MAX_ROWS,),
+            )
+            conn.commit()
+    except Exception:  # pragma: no cover - defensive; event logging must never break a flow
+        _log.debug("save_event failed", exc_info=True)
+
+
+def get_events(
+    limit: int = 100,
+    after_id: int | None = None,
+    category: str | None = None,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return activity events newest-first, optionally only those newer than *after_id*."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if after_id is not None:
+        clauses.append("id > ?")
+        params.append(after_id)
+    if category:
+        clauses.append("category = ?")
+        params.append(category)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(max(1, min(limit, 500)))
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT id, ts, category, level, message, meta FROM events "  # noqa: S608
+            f"{where} ORDER BY id DESC LIMIT ?",
+            params,
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        if d.get("meta"):
+            try:
+                d["meta"] = json.loads(d["meta"])
+            except (ValueError, TypeError):
+                pass
+        out.append(d)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Export / backup helpers (see routes/data.py, routes/settings.py).
+# --------------------------------------------------------------------------- #
+_SECRET_SETTING_KEYS = frozenset(
+    {
+        "alpaca_secret_key",
+        "frac_alpaca_secret_key",
+        "telegram_bot_token",
+        "telegram_webhook_secret",
+        "email_password",
+        "llm_api_key",
+        "ntfy_topic",
+        "admin_token",
+    }
+)
+
+
+def export_app_settings(redact_secrets: bool = True, db_path: str | None = None) -> dict[str, str]:
+    """Dump every app_settings key/value. Secret keys are redacted by default."""
+    with _connect(db_path) as conn:
+        rows = conn.execute("SELECT key, value FROM app_settings ORDER BY key").fetchall()
+    out: dict[str, str] = {}
+    for r in rows:
+        key = r["key"]
+        secret = redact_secrets and key in _SECRET_SETTING_KEYS
+        out[key] = "__REDACTED__" if secret else r["value"]
+    return out
+
+
+def get_all_ticker_memory(db_path: str | None = None) -> list[dict[str, Any]]:
+    """Return every ticker_memory row (for the data snapshot export)."""
+    with _connect(db_path) as conn:
+        rows = conn.execute("SELECT * FROM ticker_memory ORDER BY ticker").fetchall()
+    return [dict(r) for r in rows]
+
+
+def import_data_snapshot(data: dict[str, Any], db_path: str | None = None) -> dict[str, int]:
+    """Restore a data snapshot produced by GET /data/export.
+
+    Uses INSERT OR IGNORE on primary-key id so existing rows are never
+    overwritten — safe to call on a live instance.  For a clean restore,
+    clear the relevant tables first (Settings → Data) then import.
+
+    Returns a dict of table → rows_inserted counts.
+    """
+    counts: dict[str, int] = {}
+
+    def _j(v: Any) -> Any:
+        """Serialise lists/dicts back to JSON strings for TEXT columns."""
+        return json.dumps(v) if isinstance(v, (list, dict)) else v
+
+    def _insert_or_ignore(conn: Any, table: str, cols: list[str], rows: list[dict]) -> int:
+        inserted = 0
+        placeholders = ", ".join("?" * len(cols))
+        sql = f"INSERT OR IGNORE INTO {table} ({', '.join(cols)}) VALUES ({placeholders})"  # noqa: S608
+        for row in rows:
+            try:
+                conn.execute(sql, [_j(row.get(c)) for c in cols])
+                inserted += conn.execute("SELECT changes()").fetchone()[0]
+            except Exception:
+                pass
+        return inserted
+
+    with _connect(db_path) as conn:
+        # ── Signals ──────────────────────────────────────────────────────────
+        counts["signals"] = _insert_or_ignore(
+            conn, "signals",
+            ["id", "ticker", "type", "confidence", "source", "entry", "stop", "target",
+             "price", "week52_high", "week52_low", "reasons", "llm_provider", "llm_model",
+             "timestamp", "created_at"],
+            data.get("signals") or [],
+        )
+
+        # ── Analysis log ─────────────────────────────────────────────────────
+        counts["analysis_log"] = _insert_or_ignore(
+            conn, "analysis_log",
+            ["id", "ticker", "analysis_json", "market_snapshot", "opportunities_json",
+             "actionable_json", "prompt_tokens", "completion_tokens", "created_at"],
+            data.get("analysis_log") or [],
+        )
+
+        # ── Paper orders ──────────────────────────────────────────────────────
+        counts["paper_orders"] = _insert_or_ignore(
+            conn, "paper_orders",
+            ["id", "signal_id", "ticker", "side", "alpaca_order_id", "status", "notional",
+             "qty", "entry_price", "stop_price", "take_profit_price", "filled_avg_price",
+             "filled_at", "closed_at", "realized_pnl", "signal_confidence", "signal_source",
+             "signal_timestamp", "created_at"],
+            data.get("paper_orders") or [],
+        )
+
+        # ── Frac positions ───────────────────────────────────────────────────
+        counts["frac_positions"] = _insert_or_ignore(
+            conn, "frac_positions",
+            ["id", "signal_id", "ticker", "side", "notional", "qty", "entry_price",
+             "stop_price", "take_profit_price", "status", "alpaca_buy_order_id",
+             "alpaca_sell_order_id", "exit_price", "exit_reason", "realized_pnl", "mode",
+             "signal_confidence", "signal_source", "signal_timestamp", "opened_at", "closed_at"],
+            data.get("frac_positions") or [],
+        )
+
+        # ── Discovery runs + candidates ───────────────────────────────────────
+        disc_inserted = 0
+        cand_inserted = 0
+        for entry in data.get("discovery_runs") or []:
+            run = entry.get("run") or entry  # handle both {run, candidates} and flat
+            candidates = entry.get("candidates") or []
+            n = _insert_or_ignore(
+                conn, "discovery_runs",
+                ["id", "created_at", "sources", "candidate_count", "status", "error"],
+                [run],
+            )
+            disc_inserted += n
+            if n:  # only insert candidates when the run was new
+                cand_inserted += _insert_or_ignore(
+                    conn, "discovery_candidates",
+                    ["id", "run_id", "ticker", "score", "price", "percent_change", "volume",
+                     "source", "reasons", "components", "created_at"],
+                    candidates,
+                )
+        counts["discovery_runs"] = disc_inserted
+        counts["discovery_candidates"] = cand_inserted
+
+        # ── Ticker memory (upsert — ticker is the natural key) ────────────────
+        mem_inserted = 0
+        for row in data.get("ticker_memory") or []:
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO ticker_memory "
+                    "(ticker, last_scan, last_signal, last_confidence, consecutive_oversold, "
+                    "consecutive_overbought, last_price, price_trend_pct, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    [row.get(c) for c in (
+                        "ticker", "last_scan", "last_signal", "last_confidence",
+                        "consecutive_oversold", "consecutive_overbought", "last_price",
+                        "price_trend_pct", "updated_at",
+                    )],
+                )
+                mem_inserted += 1
+            except Exception:
+                pass
+        counts["ticker_memory"] = mem_inserted
+
+        # ── Watchlist overrides (merge added/removed lists) ───────────────────
+        wl = data.get("watchlist") or {}
+        imported_added = wl.get("added") or []
+        imported_removed = wl.get("removed") or []
+        if imported_added or imported_removed:
+            existing_added: list = json.loads(
+                (conn.execute("SELECT value FROM app_settings WHERE key='watchlist_added'").fetchone() or ("[]",))[0]
+            )
+            existing_removed: list = json.loads(
+                (conn.execute("SELECT value FROM app_settings WHERE key='watchlist_removed'").fetchone() or ("[]",))[0]
+            )
+            merged_added = list(dict.fromkeys([*existing_added, *imported_added]))
+            merged_removed = list(dict.fromkeys([*existing_removed, *imported_removed]))
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('watchlist_added', ?)",
+                (json.dumps(merged_added),),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('watchlist_removed', ?)",
+                (json.dumps(merged_removed),),
+            )
+            counts["watchlist_overrides"] = len(imported_added) + len(imported_removed)
+        else:
+            counts["watchlist_overrides"] = 0
+
+        conn.commit()
+
+    return counts
 
 
 def get_effective_watchlist(db_path: str | None = None) -> list[str]:
@@ -1737,9 +1994,11 @@ def save_discovery_run(sources: str, db_path: str | None = None) -> int:
             (_now_iso(), sources),
         )
         conn.commit()
-        if cur.lastrowid is None:
-            raise RuntimeError("insert into discovery_runs returned no lastrowid")
-        return cur.lastrowid
+        run_id = cur.lastrowid
+    if run_id is None:
+        raise RuntimeError("insert into discovery_runs returned no lastrowid")
+    save_event("discovery", f"Discovery run started — {sources}", meta={"run_id": run_id})
+    return run_id
 
 
 def update_discovery_run(
@@ -1756,6 +2015,16 @@ def update_discovery_run(
             (status, candidate_count, error, run_id),
         )
         conn.commit()
+    if status == "done":
+        save_event(
+            "discovery",
+            f"Discovery run complete — {candidate_count} candidates",
+            meta={"run_id": run_id, "candidate_count": candidate_count},
+        )
+    elif status == "error":
+        save_event(
+            "discovery", f"Discovery run error: {error}", level="error", meta={"run_id": run_id}
+        )
 
 
 def reset_stale_discovery_runs(older_than_minutes: int = 30, db_path: str | None = None) -> int:
