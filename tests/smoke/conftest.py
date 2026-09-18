@@ -40,7 +40,7 @@ try:
         opportunities,
         scheduler,  # noqa: F401
     )
-    from backend.main import app  # noqa: E402
+    from backend.main import app  # noqa: E402, F401  — import-existence check
 except Exception as exc:  # pragma: no cover
     raise ImportError(f"Fatal import error — aborting smoke test suite: {exc}") from exc
 

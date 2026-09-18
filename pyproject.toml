@@ -4,8 +4,14 @@
 max-complexity = 30
 
 [tool.ruff.lint.per-file-ignores]
-# FastAPI uses Body() as a dependency marker in default args — not a real call-in-default.
+# FastAPI uses Body()/Query()/Depends() as dependency markers in default args —
+# not real calls-in-default. This is the framework idiom across every route module.
 "backend/main.py" = ["B008"]
+"backend/routes/*.py" = ["B008"]
 # noqa: S110 / S608 comments are needed for flake8-bandit (not ruff) — keep them.
 "backend/*.py" = ["RUF100"]
 "tests/*.py" = ["RUF100"]
+# Intentional Unicode in user-facing notification text and docstrings
+# (en/em dashes, curly quotes, × sign) — not typos.
+"backend/notifications/ntfy.py" = ["RUF001"]
+"backend/routes/alpaca.py" = ["RUF002", "RUF003"]

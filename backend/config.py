@@ -249,7 +249,8 @@ class TelegramConfig:
     bot_token: str = field(default_factory=lambda: _env_str("TELEGRAM_BOT_TOKEN", ""))
     chat_id: str = field(default_factory=lambda: _env_str("TELEGRAM_CHAT_ID", ""))
 
-    # Optional: secret token for Telegram webhook verification (POST /notifications/telegram/callback)
+    # Optional: secret token for Telegram webhook verification
+    # (POST /notifications/telegram/callback)
     webhook_secret: str = field(default_factory=lambda: _env_str("TELEGRAM_WEBHOOK_SECRET", ""))
 
     @property
@@ -335,9 +336,7 @@ class AutoTradeConfig:
     """
 
     # Max concurrent open bracket positions before new bracket orders are held.
-    paper_max_positions: int = field(
-        default_factory=lambda: _env_int("PAPER_MAX_POSITIONS", 5)
-    )
+    paper_max_positions: int = field(default_factory=lambda: _env_int("PAPER_MAX_POSITIONS", 5))
     # How the tradability gate treats un-actionable signals:
     #   "untradable" — drop only permanently-unactionable signals (default)
     #   "strict"     — also drop when transiently blocked (no funds/capacity)

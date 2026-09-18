@@ -245,6 +245,7 @@ async def monitor_frac_positions() -> None:
     if get_setting("frac_trading_enabled", "false") != "true":
         return
 
+    from .alerts import send_order_notification  # local import — avoids circular import
     from .alpaca import AlpacaError, get_frac_client  # local import — avoids startup cost
     from .database import get_frac_positions, update_frac_position
 
@@ -278,8 +279,6 @@ async def monitor_frac_positions() -> None:
                     {"status": "closed", "exit_reason": "reconciled", "closed_at": now_iso},
                 )
                 closed += 1
-                from .alerts import send_order_notification  # local import
-
                 _frac_mode = get_setting("frac_mode", "paper")
                 _entry = float(row.get("entry_price") or 0)
                 _qty = float(row.get("qty") or 0)
@@ -348,8 +347,6 @@ async def monitor_frac_positions() -> None:
         _log.info(
             "frac monitor: closed %s @ %.2f (%s) pnl=%.2f", ticker, current, exit_reason, realized
         )
-        from .alerts import send_order_notification  # local import
-
         _frac_mode = get_setting("frac_mode", "paper")
         _reason_labels = {
             "target": "take-profit hit",

@@ -265,9 +265,7 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
             get_setting("paper_max_positions", "") or cfg.autotrade.paper_max_positions
         ),
         "paper_max_positions_env": cfg.autotrade.paper_max_positions,
-        "signal_drop_mode": (
-            get_setting("signal_drop_mode", "") or cfg.autotrade.signal_drop_mode
-        ),
+        "signal_drop_mode": (get_setting("signal_drop_mode", "") or cfg.autotrade.signal_drop_mode),
         "signal_drop_mode_env": cfg.autotrade.signal_drop_mode,
         "frac_autotrade_allow_live": (
             get_setting("frac_autotrade_allow_live", "")
