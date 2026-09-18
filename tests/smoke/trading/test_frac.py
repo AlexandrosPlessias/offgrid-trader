@@ -108,7 +108,7 @@ def test_frac_trade_skill(check):
                 {
                     "ticker": "AAPL",
                     "type": "long",
-                    "confidence": 80,
+                    "confidence": 90,  # above the 85 frac floor default
                     "entry": 100,
                     "stop": 95,
                     "target": 110,
@@ -116,7 +116,7 @@ def test_frac_trade_skill(check):
                 {
                     "ticker": "TSLA",
                     "type": "short",
-                    "confidence": 80,
+                    "confidence": 90,
                     "entry": 200,
                     "stop": 210,
                     "target": 180,
@@ -151,7 +151,7 @@ def test_frac_trade_skill(check):
                 {
                     "ticker": "NVDA",
                     "type": "long",
-                    "confidence": 80,
+                    "confidence": 90,  # above the 85 frac floor so budget is the blocker
                     "entry": 100,
                     "stop": 95,
                     "target": 110,

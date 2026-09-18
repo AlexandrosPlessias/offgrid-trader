@@ -80,7 +80,7 @@ def test_agentic_architecture(check):
         _agent = _TickerAgent("AAPL", memory=_MemoryLayer())
         check("TickerAgent constructs", _agent.ticker == "AAPL")
         # FetchData, AIAnalysis, OpportunityDetect, Persist, PaperTrade, FracTrade, Alert
-        check("TickerAgent has 7 default skills", len(_agent._skills) == 7)
+        check("TickerAgent has 8 default skills", len(_agent._skills) == 8)
 
         # ── 12h. TickerAgent runs end-to-end with mocked skills ───────────────
         class _OkSkill(_FetchDataSkill):
