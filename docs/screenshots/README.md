@@ -27,6 +27,7 @@ Captured with headless Chromium via [Playwright](https://playwright.dev).
 | File | Content |
 |---|---|
 | `13-trading-page.png` | Trading tab — account metrics tiles, equity curve chart, and positions table |
+| `13b-fractional-trading.png` | Trading tab → Fractional Trading sub-tab — notional tiles and open fractional positions |
 | `14-trading-orders.png` | Trading tab — Orders table with first row expanded showing fill details |
 | `15-signal-card-order.png` | Dashboard — Signal card with order status badge |
 
@@ -37,6 +38,31 @@ Captured with headless Chromium via [Playwright](https://playwright.dev).
 | `16-discovery.png` | Trending Discovery tab — scored candidate table with Watch/Trade icon buttons, source badges, score bars, Hide Restricted/OTC toggles |
 | `17-discovery-settings.png` | Settings — Discovery section with 🔵 Alpaca / 🟡 yfinance pill toggles, min-score slider, candidate count |
 | `18-mobile-hamburger.png` | Mobile (375 × 812 px) — hamburger ☰ nav drawer open showing Navigation, Tools, and External sections |
+
+### Reports & Activity
+
+| File | Content |
+|---|---|
+| `20-reports.png` | Reports tab — EoD/weekly history list, full/notification toggle, 🧠 model chip, Generate buttons |
+| `21-activity.png` | Activity tab — live event feed with category chips, the ⛔ Errors filter, and a red error row |
+
+### Backtesting
+
+| File | Content |
+|---|---|
+| `06-backtesting.png` | Backtesting tab — run configuration form |
+| `07-backtesting-results.png` | Backtesting tab — a completed run's metrics + trades |
+
+### Settings (deep-dive)
+
+| File | Content |
+|---|---|
+| `08-settings-ai-provider.png` | Settings → AI Provider — provider selector + model/key fields |
+| `09-settings-ai-usage.png` | Settings → AI Usage — 30-day token usage |
+| `10-settings-ai-usage-quota.png` | Settings → AI Usage — provider quota box |
+| `19-settings-fractional.png` | Settings → Live / Fractional profile |
+| `22-settings-autonomous.png` | Settings → Autonomous — confidence floors, max positions, signal drop mode, allow-live rail |
+| `23-settings-notifications.png` | Settings → Notifications — ntfy + Telegram toggles, test button |
 
 ### Explorer — section walkthrough (AAPL)
 
@@ -100,7 +126,7 @@ node capture.mjs
 node docs/screenshots/capture.mjs
 ```
 
-All 28 screenshots are written to `docs/screenshots/` next to the script.
+All 34 screenshots are written to `docs/screenshots/` next to the script.
 Existing files are overwritten — safe to re-run any time.
 
 ### What the script does

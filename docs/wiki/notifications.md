@@ -89,12 +89,32 @@ credentials → delivery → action routing → frontend feedback — in one cli
 > when your backend is reachable from the device that taps the button (a public URL,
 > not `localhost`). Delivery still works locally; only the confirm hop needs reachability.
 
+![Settings — Notifications panel with ntfy + Telegram toggles and test button](../screenshots/23-settings-notifications.png)
+
 ### Order & fractional placement notifications
 
 A separate toggle — **Order & fractional notifications** (default **on**) — pushes a
 short message to your channels each time an order or fractional buy is placed
 (e.g. `🪙 Fractional buy placed — BUY AAPL · $15.00 · LIVE 💰`, or
 `📈 Order placed — BUY AAPL · $500.00 · paper`).
+
+The same toggle also covers **blocked** and **failed** attempts, so the autonomous
+loop is never silent about an order it *wanted* to place but couldn't:
+
+- **Blocked (transient):** the position cap (`PAPER_MAX_POSITIONS`), the fractional
+  budget cap (`FRAC_BUDGET`), or insufficient buying power —
+  e.g. `⚠️ Would buy AAPL $500.00 — position cap reached (5). Top up or free a slot.`
+- **Failed:** an Alpaca rejection that isn't a money/capacity issue.
+
+Every attempt — placed, blocked, or failed — produces exactly one notification and a
+matching `order`-category [Activity event](observability.md#activity-feed-in-app-event-log).
+
+### System lifecycle notifications
+
+On startup and shutdown the backend fires a low-priority system alert to the same
+channels (`🚀 MarketSage is live — <ts>` / `🛑 MarketSage is shutting down — <ts>`)
+and logs a `system` Activity event. These never block startup/shutdown — a slow or
+failing channel is ignored.
 
 For ntfy:
 1. Toggle **Enable** on.
@@ -137,6 +157,13 @@ BACKEND_PUBLIC_URL=http://localhost:8010        # local
 ```
 
 After editing `.env` run `make up` to recreate the container.
+
+> **Authenticated action buttons.** When `ADMIN_TOKEN` is set, the backend's
+> trade endpoints require `Authorization: Bearer <token>`. So the ntfy action
+> buttons are emitted with an embedded `headers.Authorization=Bearer <ADMIN_TOKEN>`
+> — tapping *Order* / *Frac* on the phone calls the same guarded endpoint the UI
+> uses, with the token attached, no auth bypass. (Telegram inline buttons instead
+> route through the signed `/notifications/telegram/callback` webhook.)
 
 ### 5. Notification format
 
@@ -452,5 +479,10 @@ Both are meant to be triggered by an external scheduler (see BACKLOG item 8 — 
 curl -H "Authorization: Bearer <ADMIN_TOKEN>" "https://<your-backend>/reports/eod"
 curl -H "Authorization: Bearer <ADMIN_TOKEN>" "https://<your-backend>/reports/llm-summary?period=weekly"
 ```
+
+Both reports are **persisted** and browsable in-app on the **📑 Reports** tab, carry
+a model tag, and include parameter-tuning suggestions. See the dedicated
+[Reports](reports.md) page for the full feature (history, full/notification toggle,
+manual generate/delete, externalised prompts, `GET /reports`, `DELETE /reports/{id}`).
 
 **Getting better LLM summaries:** feed a compact structured slice (today's signals, closed trades, top movers) rather than raw dumps; keep the model at low temperature; ask for a fixed short JSON shape; and rely on the deterministic-digest fallback for robustness.

@@ -14,8 +14,10 @@
 - [Paper Trading](paper-trading)
 - [Trending Discovery](trending-discovery)
 - [Notifications](notifications)
+- [Reports](reports)
 - [Glossary](glossary)
 - [Observability](observability)
+- [Cloudflare Cron](cloudflare-cron)
 - [Development](development)
 
 ---

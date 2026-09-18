@@ -74,10 +74,15 @@ def dispatch(
         from backend.database import save_event
 
         _ok = [k for k, v in results.items() if v]
-        save_event(
-            "notification",
-            f"Notification sent via {', '.join(_ok)}" if _ok else "Notification failed",
-            level="info" if _ok else "warn",
-            meta={"subject": subject},
-        )
+        _bad = [k for k, v in results.items() if not v]
+        if _ok and _bad:
+            level, msg = (
+                "warn",
+                f"Notification partial — sent: {', '.join(_ok)}; failed: {', '.join(_bad)}",
+            )
+        elif _ok:
+            level, msg = "info", f"Notification sent via {', '.join(_ok)}"
+        else:
+            level, msg = "error", f"Notification failed on all channels: {', '.join(_bad)}"
+        save_event("notification", msg, level=level, meta={"subject": subject})
     return results

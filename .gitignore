@@ -242,3 +242,4 @@ my_temporary_notes.md
 # Claude Code local settings (may contain machine-specific paths)
 .claude/settings.local.json
 .dev.vars
+.claude/settings.json

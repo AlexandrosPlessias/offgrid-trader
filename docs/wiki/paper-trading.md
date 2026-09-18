@@ -441,6 +441,7 @@ the feed. The behaviour is set by **Signal drop rule**:
 | Signal drop rule | `SIGNAL_DROP_MODE` | `untradable` | `untradable` \| `strict` \| `never` |
 | Allow live auto-frac | `FRAC_AUTOTRADE_ALLOW_LIVE` | `false` | Safety rail — see below |
 | Discovery auto-add | `DISCOVERY_AUTOADD_ENABLED` | `false` | Auto-add tradable high-score candidates to the watchlist |
+| Discovery auto-add cap | `DISCOVERY_AUTOADD_TOP_N` | `5` | Max candidates auto-added per run (strongest N by score) |
 
 The env var is the boot default; a value saved from Settings overrides it live at
 call time (no restart).

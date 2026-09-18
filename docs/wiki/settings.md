@@ -92,9 +92,32 @@ docker exec ollama ollama pull qwen2.5:14b
 | `RSI_OVERBOUGHT` | `70` | RSI above this on 2+ timeframes → short candidate |
 | `VOLUME_SPIKE_MULTIPLIER` | `2.0` | Volume must be this many times the 20-day average to trigger volume-spike rule |
 | `SIGNIFICANT_MOVE_PCT` | `2.0` | Day price move (%) required alongside a volume spike |
-| `CONFIDENCE_FLOOR` | `65` | Minimum 0–100 confidence for a signal to be stored and alerted |
+| `CONFIDENCE_FLOOR` | `75` | Minimum 0–100 confidence for a signal to be stored and alerted. Runtime-mutable via **Settings → Autonomous**. |
 
-These are read-only from the UI — edit `.env` then `make up` to recreate the container.
+The RSI / volume / move thresholds are read-only from the UI — edit `.env` then `make up` to recreate the container. `CONFIDENCE_FLOOR` is also a live DB override (Settings → Autonomous).
+
+---
+
+## Autonomous trading
+
+Knobs for the hands-off loop that turns signals into orders. All are env boot-defaults
+with live DB overrides from **Settings → Autonomous** (Trading group). See
+[Paper Trading § Autonomous trading](paper-trading.md#autonomous-trading) for the full
+behaviour and the tradability gate.
+
+| Variable | Default | Runtime-mutable | Description |
+|---|---|---|---|
+| `PAPER_TRADING_ENABLED` | `true` | ✓ | Master switch — auto-place bracket orders from signals. |
+| `FRAC_TRADING_ENABLED` | `false` | ✓ | Master switch — auto-place fractional buys from signals. |
+| `FRAC_MIN_CONFIDENCE` | `85` | ✓ | Stricter confidence floor for fractional buys (they commit notional). |
+| `PAPER_TRADE_MIN_CONFIDENCE` | `0` | ✓ | Optional bracket-only floor; `0` falls back to `CONFIDENCE_FLOOR`. |
+| `PAPER_MAX_POSITIONS` | `5` | ✓ | Hold new bracket orders once this many positions are open. |
+| `SIGNAL_DROP_MODE` | `untradable` | ✓ | Tradability gate: `untradable` (drop only permanently unactionable) · `strict` (also drop transiently blocked) · `never` (annotate only). |
+| `FRAC_AUTOTRADE_ALLOW_LIVE` | `false` | ✓ | Safety rail — autonomous frac buys stay paper-only unless `true`. |
+| `DISCOVERY_AUTOADD_ENABLED` | `false` | ✓ | Auto-add high-score tradable discovery candidates to the watchlist. |
+| `DISCOVERY_AUTOADD_TOP_N` | `5` | ✓ | Per-run cap on auto-added candidates (strongest N by score). |
+
+![Settings — Autonomous trading section](../screenshots/22-settings-autonomous.png)
 
 ---
 
@@ -340,13 +363,16 @@ curl -X POST http://localhost:8010/data/reset
 
 Download a portable snapshot of your data or config from **Settings → Data → Export / Backup**. Two separate JSON files keep data and secrets apart:
 
-- **Export data** (`GET /data/export`) — signals, analysis log, paper orders, fractional positions, discovery runs (with candidates), the watchlist, and ticker memory. Intended for backup, migration, or a state snapshot.
+- **Export data** (`GET /data/export`) — signals, analysis log, paper orders, fractional positions, discovery runs (with candidates), the watchlist, and ticker memory as a JSON snapshot. Intended for backup, migration, or a state snapshot.
+- **Export data as Excel** (`GET /data/export/xlsx`) — the same data as a multi-sheet `.xlsx` workbook (one sheet per table) for spreadsheet analysis.
 - **Export config** (`GET /settings/export`) — all runtime settings plus watchlist groups, with **secret values redacted** (`alpaca_secret_key`, `frac_alpaca_secret_key`, `telegram_bot_token`, `telegram_webhook_secret`, `email_password`, `llm_api_key`, `ntfy_topic`, `admin_token` → `"__REDACTED__"`).
+- **Import / restore** (`POST /data/import`) — upload a previously-exported data JSON to restore its rows. Use the **Import** control in Settings → Data.
 
-Manual export only — there is no import/restore or auto-sync yet. The download is issued through the app (Bearer-authenticated `fetch`), so use the buttons rather than opening the URL directly.
+Downloads and uploads are issued through the app (Bearer-authenticated `fetch`), so use the buttons rather than opening the URL directly.
 
 ```bash
 # Or from the CLI (add -H "Authorization: Bearer <ADMIN_TOKEN>" if a token is set):
-curl http://localhost:8010/data/export      -o marketsage-data.json
-curl http://localhost:8010/settings/export  -o marketsage-config.json
+curl http://localhost:8010/data/export       -o marketsage-data.json
+curl http://localhost:8010/data/export/xlsx  -o marketsage-data.xlsx
+curl http://localhost:8010/settings/export   -o marketsage-config.json
 ```

@@ -303,6 +303,21 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_category ON events(category);
+
+CREATE TABLE IF NOT EXISTS reports (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    type              TEXT NOT NULL,            -- eod | weekly | daily
+    report_date       TEXT NOT NULL,            -- YYYY-MM-DD
+    headline          TEXT,
+    notification_body TEXT NOT NULL,            -- short version sent to channels
+    full_body         TEXT NOT NULL,            -- complete report shown in the UI
+    channels          TEXT,                     -- JSON of per-channel delivery results
+    llm               INTEGER NOT NULL DEFAULT 0,
+    model             TEXT,                      -- LLM model that generated the analysis
+    created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reports_created ON reports(created_at);
+CREATE INDEX IF NOT EXISTS idx_reports_type ON reports(type);
 """
 
 
@@ -403,6 +418,12 @@ def init_db(db_path: str | None = None) -> None:
             "CREATE INDEX IF NOT EXISTS idx_bt_floor_suggests_run"
             " ON backtest_floor_suggests(run_id)"
         )
+        # reports: add model column if missing (records which LLM generated the analysis).
+        existing_report_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(reports)").fetchall()
+        }
+        if "model" not in existing_report_cols:
+            conn.execute("ALTER TABLE reports ADD COLUMN model TEXT")
         conn.commit()
 
 
@@ -1143,9 +1164,83 @@ def get_events(
             try:
                 d["meta"] = json.loads(d["meta"])
             except (ValueError, TypeError):
-                pass
+                pass  # keep raw string if the stored value is not valid JSON
         out.append(d)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Reports — persisted EoD / weekly reports (notification + full versions)
+# --------------------------------------------------------------------------- #
+def save_report_record(
+    *,
+    report_type: str,
+    report_date: str,
+    headline: str,
+    notification_body: str,
+    full_body: str,
+    channels: dict[str, Any] | None = None,
+    llm: bool = False,
+    model: str | None = None,
+    db_path: str | None = None,
+) -> int:
+    """Persist a generated report; returns its new row id."""
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO reports (type, report_date, headline, notification_body, "
+            "full_body, channels, llm, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                report_type,
+                report_date,
+                headline,
+                notification_body,
+                full_body,
+                json.dumps(channels) if channels else None,
+                1 if llm else 0,
+                model,
+                _now_iso(),
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def get_report_records(
+    limit: int = 50, report_type: str | None = None, db_path: str | None = None
+) -> list[dict[str, Any]]:
+    """Return persisted reports newest-first (both notification + full bodies)."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if report_type:
+        clauses.append("type = ?")
+        params.append(report_type)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(max(1, min(limit, 200)))
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT id, type, report_date, headline, notification_body, full_body, "  # noqa: S608
+            f"channels, llm, model, created_at FROM reports {where} ORDER BY id DESC LIMIT ?",
+            params,
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        d["llm"] = bool(d.get("llm"))
+        if d.get("channels"):
+            try:
+                d["channels"] = json.loads(d["channels"])
+            except (ValueError, TypeError):
+                pass  # keep raw string if the stored value is not valid JSON
+        out.append(d)
+    return out
+
+
+def delete_report_record(report_id: int, db_path: str | None = None) -> bool:
+    """Delete a report by id; returns True if a row was removed."""
+    with _connect(db_path) as conn:
+        cur = conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+        conn.commit()
+        return cur.rowcount > 0
 
 
 # --------------------------------------------------------------------------- #

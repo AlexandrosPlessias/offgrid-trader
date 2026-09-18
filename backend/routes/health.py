@@ -32,6 +32,16 @@ def health() -> dict[str, Any]:
         "llm_model": active_model,
         "watchlist_size": len(get_effective_watchlist()),
         "scheduler": scheduler.status(),
+        "autotrade": {
+            "paper": get_setting("paper_trading_enabled", "true") == "true",
+            "frac": get_setting("frac_trading_enabled", "false") == "true",
+            "frac_mode": (
+                "live"
+                if "://api.alpaca.markets"
+                in (get_setting("frac_alpaca_url", "") or settings.frac.url)
+                else "paper"
+            ),
+        },
         "disclaimer": "Not financial advice.",
     }
     # Keep ollama_host for backward compatibility with existing clients/tooling.

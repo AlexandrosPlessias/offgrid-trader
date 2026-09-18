@@ -9,8 +9,10 @@ const CATEGORY_STYLE = {
   discovery:    { bg: '#3d2712', color: '#ffb454' },  // orange
   notification: { bg: '#2a1a3d', color: '#c98cff' },  // violet
   scheduler:    { bg: '#0f3538', color: '#4fd0d8' },  // teal
+  system:       { bg: '#1e2130', color: '#9ba8c9' },  // slate — startup/shutdown/config
+  report:       { bg: '#1a2e1a', color: '#7dde7d' },  // muted green — generated reports
 }
-const CATEGORIES = ['scan', 'order', 'discovery', 'notification', 'scheduler']
+const CATEGORIES = ['scan', 'order', 'discovery', 'notification', 'scheduler', 'system', 'report']
 
 // Level accent — error red, warn amber, info none
 const levelColor = (level) =>
@@ -37,7 +39,10 @@ export default function EventsPage() {
   const [filter, setFilter] = useState('all')
 
   const events = data?.events ?? []
-  const shown  = filter === 'all' ? events : events.filter(e => e.category === filter)
+  const shown  = filter === '__errors__' ? events.filter(e => e.level === 'error' || e.level === 'warn')
+               : filter === 'all'        ? events
+               :                          events.filter(e => e.category === filter)
+  const errorCount = events.filter(e => e.level === 'error').length
 
   return (
     <div style={{ maxWidth: 900, margin: '0 auto' }}>
@@ -59,6 +64,22 @@ export default function EventsPage() {
 
       {/* ── Category filter ─────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+        {/* Errors shortcut — always first, distinct red styling */}
+        <button
+          onClick={() => setFilter('__errors__')}
+          style={{
+            padding: '3px 11px', borderRadius: 999, fontSize: 12, fontWeight: 600,
+            cursor: 'pointer',
+            background: filter === '__errors__' ? 'color-mix(in srgb, var(--red) 18%, transparent)' : 'transparent',
+            color: filter === '__errors__' ? 'var(--red)' : 'color-mix(in srgb, var(--red) 70%, var(--dim))',
+            border: `1px solid ${filter === '__errors__' ? 'var(--red)' : 'color-mix(in srgb, var(--red) 35%, var(--border))'}`,
+          }}
+        >
+          ⛔ Errors{errorCount > 0 ? ` (${errorCount})` : ''}
+        </button>
+
+        <span style={{ alignSelf: 'center', color: 'var(--border)', fontSize: 14 }}>|</span>
+
         {['all', ...CATEGORIES].map(cat => {
           const active = filter === cat
           const cs = CATEGORY_STYLE[cat]

@@ -17,6 +17,16 @@ router = APIRouter()
 _log = logging.getLogger(__name__)
 
 
+def _cfg_event(section: str, changes: dict) -> None:
+    """Emit a system activity event for a settings change (best-effort)."""
+    try:
+        from backend.database import save_event
+
+        save_event("system", f"Config updated: {section}", meta=changes)
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
 class AlertsSettingRequest(BaseModel):
     enabled: bool = Field(..., description="Enable or disable alert dispatch")
 
@@ -75,6 +85,7 @@ class AutoTradeSettingRequest(BaseModel):
 @router.post("/settings/alerts")
 def set_alerts(request: AlertsSettingRequest) -> dict[str, Any]:
     set_setting("alerts_enabled", "true" if request.enabled else "false")
+    _cfg_event("alerts", {"alerts_enabled": request.enabled})
     return {"alerts_enabled": request.enabled}
 
 
@@ -89,6 +100,7 @@ async def set_scheduler(request: SchedulerSettingRequest) -> dict[str, Any]:
         scheduler.start()
     else:
         await scheduler.stop()
+    _cfg_event("scheduler", {"running": request.running})
     return scheduler.status()
 
 
@@ -135,6 +147,7 @@ def set_autotrade(request: AutoTradeSettingRequest) -> dict[str, Any]:
             "discovery_autoadd_enabled",
             "true" if request.discovery_autoadd_enabled else "false",
         )
+    _cfg_event("autotrade", {k: v for k, v in request.model_dump().items() if v is not None})
     return {"saved": True}
 
 
@@ -147,6 +160,7 @@ def set_signal_scan_llm(request: SignalScanLlmRequest) -> dict[str, Any]:
     Takes effect immediately (no restart required).
     """
     set_setting("signal_scan_llm_enabled", "true" if request.enabled else "false")
+    _cfg_event("signal-scan-llm", {"enabled": request.enabled})
     return {"signal_scan_llm_enabled": request.enabled}
 
 
@@ -279,6 +293,8 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
         )
         == "true",
         "discovery_autoadd_enabled_env": cfg.discovery.autoadd_enabled,
+        "frac_min_confidence_env": cfg.autotrade.frac_min_confidence,
+        "paper_trade_min_confidence_env": cfg.autotrade.paper_trade_min_confidence,
     }
 
 
@@ -358,10 +374,12 @@ def set_llm_settings(request: LLMSettingRequest) -> dict[str, Any]:
         set_setting("llm_fallback_provider", request.fallback_provider)
     if request.fallback_model is not None:
         set_setting("llm_fallback_model", request.fallback_model)
-    return {
-        "ok": True,
-        "provider": get_setting("llm_provider", "") or get_settings().llm.provider,
-    }
+    active_provider = get_setting("llm_provider", "") or get_settings().llm.provider
+    _cfg_event(
+        "llm",
+        {k: v for k, v in request.model_dump(exclude={"api_key"}).items() if v is not None},
+    )
+    return {"ok": True, "provider": active_provider}
 
 
 @router.get("/settings/models")

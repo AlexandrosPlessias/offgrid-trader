@@ -152,7 +152,7 @@ The engine captures **all** detected signals at `floor = 0` (regardless of confi
 - **Post-run**: drag the slider to any floor — metrics, trade list, and cumulative-R curve update instantly with no re-run.
 - **Sweep chart**: win rate, avg R, and trade count vs floor (0–100 in steps of 5) so the optimal floor is visually obvious.
 
-See [backtesting-explained.md § How to use the confidence-floor sweep](backtesting-explained.md#how-to-use-the-confidence-floor-sweep) for a step-by-step tuning workflow.
+See [backtesting-explained.md § Confidence floor sweep](backtesting-explained.md#confidence-floor-sweep) for a step-by-step tuning workflow.
 
 ---
 

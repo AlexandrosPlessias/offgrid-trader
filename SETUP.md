@@ -5,7 +5,7 @@ First-time setup for **MarketSage**. After this, see
 
 **Fastest path:** MarketSage runs for free on Vercel (frontend) + Fly.io (backend)
 with a cloud LLM — Groq free tier, no credit card required. Skip to
-[section 4b](#4b-cloud-ai-quick-start-recommended) to get started in minutes.
+[section 4b](#4b-cloud-ai-quick-start-recommended--no-gpu-no-credit-card) to get started in minutes.
 
 For local or offline development, the entire stack runs in Docker — no Python venv required.
 On **macOS**, native Ollama is used so inference runs on Apple Metal GPU. On Windows/Linux,

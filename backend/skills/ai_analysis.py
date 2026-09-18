@@ -61,6 +61,14 @@ class AIAnalysisSkill(Skill):
                     raise LLMError(err)
                 # Parse errors etc. — surface but don't retry.
                 ctx.analysis = analysis
+                from backend.database import save_event
+
+                save_event(
+                    "scan",
+                    f"LLM parse error for {ctx.ticker}: {err}",
+                    level="warn",
+                    meta={"ticker": ctx.ticker},
+                )
                 return SkillResult(success=False, error=err, data=analysis)
 
             ctx.analysis = analysis
@@ -75,7 +83,23 @@ class AIAnalysisSkill(Skill):
 
         except LLMError as exc:
             _log.warning("ai_analysis transient error for %s: %s", ctx.ticker, exc)
+            from backend.database import save_event
+
+            save_event(
+                "scan",
+                f"LLM error for {ctx.ticker}: {exc}",
+                level="error",
+                meta={"ticker": ctx.ticker, "error": str(exc)},
+            )
             return SkillResult(success=False, error=str(exc))
         except Exception as exc:
             _log.exception("ai_analysis unexpected error for %s", ctx.ticker)
+            from backend.database import save_event
+
+            save_event(
+                "scan",
+                f"Unexpected scan error for {ctx.ticker}: {exc}",
+                level="error",
+                meta={"ticker": ctx.ticker, "error": str(exc)},
+            )
             return SkillResult(success=False, error=str(exc))

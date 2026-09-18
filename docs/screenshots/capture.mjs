@@ -33,6 +33,10 @@
  *   17-discovery-settings.png    ← Discovery settings — source pill toggles
  *   18-mobile-hamburger.png      ← Mobile 375px — hamburger nav drawer open
  *   19-settings-fractional.png   ← Settings → Live / Fractional profile
+ *   20-reports.png               ← Reports tab — EoD/weekly history + viewer
+ *   21-activity.png              ← Activity tab — live event feed + Errors filter
+ *   22-settings-autonomous.png   ← Settings → Autonomous trading section
+ *   23-settings-notifications.png← Settings → Notifications (ntfy + Telegram)
  *
  * Explorer — per-section (10), requires a saved analysis in history:
  *   explorer-01-pipeline.png  …  explorer-10-signals.png
@@ -372,7 +376,46 @@ await shot(page, '19-settings-fractional.png', async () => {
   try { await page.locator('text=Live / Fractional').first().click(); await page.waitForTimeout(800); } catch { console.warn('⚠  Live / Fractional nav item not found'); }
 });
 
+// ── 8. Reports & Activity (top-nav tabs) ─────────────────────────────────────
+
+await shot(page, '20-reports.png', async () => {
+  await goto(page, BASE);
+  // Scope to the desktop header nav — the mobile drawer has duplicate labels.
+  try { await page.locator('.header-nav button:has-text("Reports")').click(); await page.waitForTimeout(2500); }
+  catch { console.warn('⚠  Reports tab not found'); }
+});
+
+await shot(page, '21-activity.png', async () => {
+  await goto(page, BASE);
+  try { await page.locator('.header-nav button:has-text("Activity")').click(); await page.waitForTimeout(2500); }
+  catch { console.warn('⚠  Activity tab not found'); }
+});
+
+// ── 9. Autonomous + Notifications settings sections ──────────────────────────
+
+await shot(page, '22-settings-autonomous.png', async () => {
+  await goto(page, BASE);
+  await page.locator('button[title="Settings"]').click();
+  await page.waitForTimeout(600);
+  try {
+    await page.locator('text=Autonomous').first().click();
+    await page.waitForTimeout(800);
+    await page.locator('text=Autonomous Trading').first().scrollIntoViewIfNeeded();
+    await page.waitForTimeout(400);
+  } catch { console.warn('⚠  Autonomous settings section not found'); }
+});
+
+await shot(page, '23-settings-notifications.png', async () => {
+  await goto(page, BASE);
+  await page.locator('button[title="Settings"]').click();
+  await page.waitForTimeout(600);
+  try {
+    await page.locator('text=Notifications').first().click();
+    await page.waitForTimeout(800);
+  } catch { console.warn('⚠  Notifications settings section not found'); }
+});
+
 await browser.close();
-console.log('\n✅ 30 screenshots saved to:', OUT);
+console.log('\n✅ 34 screenshots saved to:', OUT);
 console.log('\nTo run against production:');
 console.log('  SCREENSHOT_BASE_URL=https://offgrid-trader.vercel.app ADMIN_TOKEN=<token> node capture.mjs');

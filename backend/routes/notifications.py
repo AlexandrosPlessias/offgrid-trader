@@ -138,6 +138,15 @@ async def telegram_callback(
     parts = data.split(":")
     action = parts[0] if parts else ""
 
+    from backend.database import save_event
+
+    _ticker_str = parts[1] if len(parts) > 1 else "?"
+    save_event(
+        "notification",
+        f"Telegram callback — action: {action or '?'}, ticker: {_ticker_str}",
+        meta={"action": action, "data": data[:80]},
+    )
+
     endpoint = ""
     result_action = ""
     order_json: dict[str, Any] | None = None
