@@ -485,6 +485,60 @@ curl -X POST http://localhost:8010/data/reset
 }
 ```
 
+### `GET /data/export`
+
+Download a JSON snapshot of all data (signals, analysis log, paper orders, fractional positions, discovery runs + candidates, watchlist, ticker memory).
+
+```bash
+curl http://localhost:8010/data/export -o marketsage-data.json
+```
+
+### `GET /data/export/xlsx`
+
+Same data as a multi-sheet `.xlsx` workbook (one sheet per table).
+
+```bash
+curl http://localhost:8010/data/export/xlsx -o marketsage-data.xlsx
+```
+
+### `POST /data/import`
+
+Restore rows from a previously-exported data JSON (multipart file upload). Used by the Import control in Settings → Data.
+
+---
+
+## Reports
+
+### `GET /reports/eod`
+
+Generate, persist, and dispatch the end-of-day report to all configured channels. Returns **502** if no channel is configured. Response includes `id`, headline, both body versions, `llm`, and `model`.
+
+```bash
+curl -H "Authorization: Bearer <ADMIN_TOKEN>" http://localhost:8010/reports/eod
+```
+
+### `GET /reports/llm-summary?period=daily|weekly`
+
+Generate + dispatch a daily or weekly LLM summary (same response shape).
+
+### `GET /reports?limit=&type=`
+
+List persisted reports, newest first. `type` filters `eod|weekly|daily`.
+
+### `DELETE /reports/{id}`
+
+Delete a persisted report. Returns `{"deleted": <id>}` or **404**.
+
+See [reports.md](reports.md) for the feature overview.
+
+---
+
+## Activity / Events
+
+### `GET /events?limit=&after_id=&category=`
+
+Return the in-app activity log, newest first. `after_id` fetches only events newer than a given id (for incremental polling); `category` filters to one of `scan|order|discovery|notification|scheduler|report|system`. Each event has `id, ts, category, level (info|warn|error), message, meta`. See [observability.md](observability.md#activity-feed-in-app-event-log).
+
 ---
 
 ## Signals

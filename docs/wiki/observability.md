@@ -219,3 +219,30 @@ macro ◀ fetched=5/5 series
 
 These log lines exist alongside the OTEL spans and provide a flat, scrollable view
 of the pipeline for quick debugging.
+
+---
+
+## Activity Feed (in-app event log)
+
+Beyond OTEL/Aspire, MarketSage keeps a lightweight, self-contained **event log** for an at-a-glance history — no external service required. Open it from the **Activity** tab in the top nav.
+
+Events are written coarsely from the pipeline's choke points into an `events` table (`id, ts, category, level, message, meta`) and served by `GET /events?limit=&after_id=&category=`. The page polls every ~5s. Categories:
+
+| Category | Emitted when |
+|---|---|
+| `scan` | a scan starts / completes, each signal hit, plus LLM analysis failures |
+| `order` | a paper or fractional order is placed, held (cap/budget), or fails |
+| `discovery` | a discovery run starts / completes / errors |
+| `notification` | a push notification is dispatched (with channel status) or a Telegram callback arrives |
+| `scheduler` | the scheduler starts / stops, and on loop errors |
+| `report` | an EoD / weekly report is generated (or its LLM analysis fails) |
+| `system` | app startup / shutdown and Settings config changes |
+
+Each event carries a `level` (`info` · `warn` · `error`). The Activity page tints
+warn events amber and error events red, and offers a dedicated **⛔ Errors** filter
+(shows only warn/error rows) so failures — failed LLM calls, notification-send
+failures, scan errors — stand out at a glance from routine activity.
+
+![Activity feed — category chips, the Errors filter, and a highlighted error row](../screenshots/21-activity.png)
+
+The table is capped (newest ~5000 rows) and can be cleared from **Settings → Data** (the `events` category). This is a read-only convenience feed; Aspire remains the place for full traces and metrics.

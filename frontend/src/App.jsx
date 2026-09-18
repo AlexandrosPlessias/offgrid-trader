@@ -11,6 +11,8 @@ import SettingsPage from './pages/SettingsPage'
 import TrendingPage from './pages/TrendingPage'
 import TradingPage from './pages/TradingPage'
 import BacktestPage from './pages/BacktestPage'
+import EventsPage from './pages/EventsPage'
+import ReportsPage from './pages/ReportsPage'
 
 export default function App() {
   const [authed, setAuthed] = useState(() => !!sessionStorage.getItem('admin_token'))
@@ -166,9 +168,11 @@ export default function App() {
             onOpenInExplorer={openExplorer}
           />
         </div>
-        {/* Education and Backtest are light enough to mount on demand */}
+        {/* Education, Backtest and Activity are light enough to mount on demand */}
         {activeView === 'education' && <EducationPage />}
         {activeView === 'backtest' && <BacktestPage wl={wl} usage={usage} />}
+        {activeView === 'events' && <EventsPage />}
+        {activeView === 'reports' && <ReportsPage />}
 
         {/* Trending/Discovery and Trading are always mounted so state (run results,
             positions, etc.) survives tab switches — only visibility is toggled. */}

@@ -14,6 +14,7 @@ Run standalone to send a test alert through whatever channels are configured::
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -39,6 +40,11 @@ def _fmt_level(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.2f}"
 
 
+def _tg_html_escape(s: str) -> str:
+    """Escape the only three characters Telegram's HTML parse_mode reserves."""
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def format_alert(opportunity: dict[str, Any]) -> dict[str, str]:
     """Build a ``{"subject", "text"}`` message from an opportunity dict."""
 
@@ -49,7 +55,7 @@ def format_alert(opportunity: dict[str, Any]) -> dict[str, str]:
     source = opportunity.get("source") or "+".join(opportunity.get("sources", []) or [])
     reasons = opportunity.get("reasons") or []
 
-    subject = f"[offgrid-trader] {side} {ticker} ({confidence:.0f}% confidence)"
+    subject = f"MarketSage · {side} {ticker} · {confidence:.0f}% confidence"
 
     lines: list[str] = [
         f"Ticker:     {ticker}",
@@ -66,7 +72,7 @@ def format_alert(opportunity: dict[str, Any]) -> dict[str, str]:
         lines.append("Reasons:")
         lines.extend(f"  - {r}" for r in reasons)
     lines.append("")
-    lines.append("Not financial advice. Generated locally by offgrid-trader.")
+    lines.append("Not financial advice · Generated locally by MarketSage")
 
     return {"subject": subject, "text": "\n".join(lines)}
 
@@ -146,11 +152,20 @@ def send_email(subject: str, body: str) -> bool:
     #     return False
 
 
-def send_telegram(subject: str, body: str, reply_markup: dict | None = None) -> bool:
-    """Send *subject* + *body* via Telegram Bot API. Returns success.
+def send_telegram(
+    subject: str,
+    body: str,
+    reply_markup: dict | None = None,
+    *,
+    preformatted: bool = False,
+) -> bool:
+    """Send *subject* + *body* via Telegram Bot API (HTML parse mode). Returns success.
 
-    ``reply_markup`` (optional) is an inline-keyboard dict, e.g. a URL button:
-    ``{"inline_keyboard": [[{"text": "✅ Confirm", "url": "https://…"}]]}``.
+    ``reply_markup`` (optional) is an inline-keyboard dict, e.g. a callback button:
+    ``{"inline_keyboard": [[{"text": "📄 Order", "callback_data": "ord:…"}]]}``.
+    ``preformatted`` wraps the body in ``<pre>`` so space-aligned tables render as a
+    monospace block (signal alert / EoD digest); since HTML needs only ``& < >``
+    escaped, it also makes LLM-generated body text injection-proof.
     """
 
     import httpx  # already in requirements; local import to avoid top-level dep
@@ -159,12 +174,17 @@ def send_telegram(subject: str, body: str, reply_markup: dict | None = None) -> 
     if not (tg["enabled"] and tg["bot_token"] and tg["chat_id"]):
         return False
 
-    text = f"*{subject}*\n\n{body}"
+    subj = f"<b>{_tg_html_escape(subject)}</b>"
+    if body:
+        esc = _tg_html_escape(body)
+        text = f"{subj}\n\n<pre>{esc}</pre>" if preformatted else f"{subj}\n\n{esc}"
+    else:
+        text = subj  # subject-only (e.g. system events) — avoid an empty <pre> block
     url = f"https://api.telegram.org/bot{tg['bot_token']}/sendMessage"
     payload: dict[str, Any] = {
         "chat_id": tg["chat_id"],
         "text": text,
-        "parse_mode": "Markdown",
+        "parse_mode": "HTML",
     }
     if reply_markup:
         payload["reply_markup"] = reply_markup
@@ -172,10 +192,9 @@ def send_telegram(subject: str, body: str, reply_markup: dict | None = None) -> 
         r = httpx.post(url, json=payload, timeout=10.0)
         r.raise_for_status()
         return True
-    except Exception as exc:  # pragma: no cover - network dependent
-        # Telegram rejects the whole message when an inline button URL is invalid
-        # (e.g. a localhost BACKEND_PUBLIC_URL → BUTTON_URL_INVALID). Retry without
-        # the button so plain delivery still succeeds.
+    except Exception:  # pragma: no cover - network dependent
+        # Retry once without the inline button — an invalid button URL (e.g. a localhost
+        # BACKEND_PUBLIC_URL → BUTTON_URL_INVALID) rejects the whole message.
         if reply_markup:
             try:
                 payload.pop("reply_markup", None)
@@ -183,11 +202,54 @@ def send_telegram(subject: str, body: str, reply_markup: dict | None = None) -> 
                 r.raise_for_status()
                 _log.info("telegram: sent without inline button (button URL rejected)")
                 return True
-            except Exception as exc2:  # pragma: no cover - network dependent
-                _log.warning("telegram send failed: %s", exc2)
-                return False
-        _log.warning("telegram send failed: %s", exc)
-        return False
+            except Exception:  # pragma: no cover - network dependent
+                _log.debug("telegram retry without inline button failed; trying plain text")
+        # Last resort: drop HTML parse_mode and resend as plain text, so an HTML parse
+        # error never silently loses the message.
+        try:
+            payload.pop("reply_markup", None)
+            payload.pop("parse_mode", None)
+            payload["text"] = f"{subject}\n\n{body}".strip() if body else subject
+            r = httpx.post(url, json=payload, timeout=10.0)
+            r.raise_for_status()
+            _log.info("telegram: sent as plain text (parse_mode dropped)")
+            return True
+        except Exception as exc:  # pragma: no cover - network dependent
+            _log.warning("telegram send failed: %s", exc)
+            return False
+
+
+def _order_side(opp_type: str) -> str:
+    """Map an opportunity type (long/short) to an Alpaca order side (buy/sell)."""
+    return "sell" if str(opp_type).lower() in ("short", "sell") else "buy"
+
+
+def _bracket_payload(opp: dict[str, Any]) -> dict[str, Any]:
+    """Build a ManualOrderRequest body (POST /paper/orders/place) from an opportunity."""
+    return {
+        "ticker": opp.get("ticker"),
+        "side": _order_side(opp.get("type", "long")),
+        "entry": opp.get("entry"),
+        "stop": opp.get("stop"),
+        "target": opp.get("target"),
+        "signal_confidence": opp.get("confidence"),
+        "signal_source": opp.get("source") or "+".join(opp.get("sources", []) or []),
+    }
+
+
+def _frac_payload(opp: dict[str, Any]) -> dict[str, Any]:
+    """Build a FracOrderRequest body (POST /frac/order) from a long opportunity.
+
+    The tap is the confirmation, so ``confirm_live=True`` lets it place in live mode too.
+    """
+    return {
+        "ticker": opp.get("ticker"),
+        "side": "buy",
+        "entry": opp.get("entry"),
+        "confirm_live": True,
+        "signal_confidence": opp.get("confidence"),
+        "signal_source": opp.get("source") or "+".join(opp.get("sources", []) or []),
+    }
 
 
 def send_alert(
@@ -201,8 +263,12 @@ def send_alert(
     ``{"sent": True, "channels": ["telegram", "ntfy"], "skipped": False}``.
     """
 
-    settings = get_settings()
-    floor = settings.thresholds.confidence_floor if min_confidence is None else min_confidence
+    if min_confidence is None:
+        from .database import get_confidence_floor
+
+        floor = get_confidence_floor()
+    else:
+        floor = min_confidence
     confidence = float(opportunity.get("confidence") or 0.0)
 
     if confidence < floor:
@@ -233,29 +299,70 @@ def send_alert(
     cfg = get_settings()
     channels: list[str] = []
 
-    if send_telegram(message["subject"], message["text"]):
+    # From-notification trade buttons drive the same endpoints the UI uses (dedup,
+    # shortable/fractionable checks, budget cap — no bypass). Two actions per alert:
+    # a bracket order (long or short, needs entry/stop/target) and, for long signals,
+    # a fractional buy. ntfy carries them as http actions; Telegram as callback buttons.
+    backend_url = (get_setting("backend_public_url", "") or cfg.backend_public_url).rstrip("/")
+    ticker = opportunity.get("ticker")
+    is_long = str(opportunity.get("type", "long")).lower() in ("long", "buy")
+    order_side = _order_side(opportunity.get("type", "long"))
+    has_levels = ticker is not None and all(
+        opportunity.get(k) is not None for k in ("entry", "stop", "target")
+    )
+    has_entry = ticker is not None and opportunity.get("entry") is not None
+
+    actions: list[dict] = []
+    tg_buttons: list[dict] = []
+    if has_levels:
+        actions.append(
+            {
+                "label": f"Order {ticker} {order_side.upper()}",
+                "url": f"{backend_url}/paper/orders/place",
+                "method": "POST",
+                "body": json.dumps(_bracket_payload(opportunity)),
+            }
+        )
+        tg_buttons.append(
+            {
+                "text": f"📄 Order {order_side.upper()} {ticker}",
+                "callback_data": (
+                    f"ord:{ticker}:{order_side}:{opportunity['entry']:.2f}"
+                    f":{opportunity['stop']:.2f}:{opportunity['target']:.2f}"
+                ),
+            }
+        )
+    if is_long and has_entry:
+        actions.append(
+            {
+                "label": f"Frac {ticker}",
+                "url": f"{backend_url}/frac/order",
+                "method": "POST",
+                "body": json.dumps(_frac_payload(opportunity)),
+            }
+        )
+        tg_buttons.append(
+            {
+                "text": f"🪙 Frac {ticker}",
+                "callback_data": f"frac:{ticker}:{opportunity['entry']:.2f}",
+            }
+        )
+
+    tg_markup = {"inline_keyboard": [[b] for b in tg_buttons]} if tg_buttons else None
+    tag = "chart_with_upwards_trend" if is_long else "chart_with_downwards_trend"
+
+    if send_telegram(
+        message["subject"], message["text"], reply_markup=tg_markup, preformatted=True
+    ):
         channels.append("telegram")
 
-    # ntfy and any other registered channels
-    backend_url = get_setting("backend_public_url", "") or cfg.backend_public_url
-    ticker = opportunity.get("ticker", "?")
-    side = str(opportunity.get("type", "buy"))
-    actions: list[dict] | None = None
-    if opportunity.get("ticker"):
-        order_body = (
-            f'{{"ticker": "{ticker}", "side": "{side}",'
-            f' "qty": 1, "order_type": "market", "time_in_force": "day"}}'
-        )
-        actions = [
-            {
-                "label": f"Paper {ticker} {side.upper()}",
-                "url": f"{backend_url}/paper/orders",
-                "method": "POST",
-                "body": order_body,
-            }
-        ]
-
-    ntfy_results = _notify_dispatch(message["subject"], message["text"], actions=actions)
+    ntfy_results = _notify_dispatch(
+        message["subject"],
+        message["text"],
+        actions=actions or None,
+        tags=tag,
+        priority="high",
+    )
     channels.extend(k for k, v in ntfy_results.items() if v)
 
     return {
@@ -270,34 +377,99 @@ def send_order_notification(
     *,
     kind: str,  # "order" (bracket) | "fractional"
     ticker: str,
-    side: str,
+    side: str,  # "buy" | "sell"
     amount: float,
     mode: str = "paper",
     detail: str = "",
+    is_close: bool = False,  # True for stop/target/manual exits
 ) -> None:
-    """Notify configured channels that an order / fractional position was placed.
+    """Notify configured channels that an order / fractional position was placed or closed.
 
     Gated by the ``order_notifications_enabled`` setting (default on). Reuses
     :func:`send_system_event` so it respects each channel's own config. Never
     raises — placement must never fail because a notification failed.
     """
     try:
-        from .database import get_setting
+        from .database import get_setting, save_event
 
+        if kind == "fractional":
+            label = "Fractional exit" if is_close else "Fractional buy"
+            icon = "📉" if is_close else "🪙"
+        else:
+            label = "Order closed" if is_close else "Order placed"
+            icon = "📉" if is_close else "📈"
+
+        save_event(
+            "order",
+            f"{label} — {side.upper()} {ticker} ${amount:.2f} ({mode})",
+            meta={
+                "ticker": ticker,
+                "side": side,
+                "amount": amount,
+                "mode": mode,
+                "kind": kind,
+                "is_close": is_close,
+            },
+        )
         if get_setting("order_notifications_enabled", "true") != "true":
             return
-        icon = "📈" if kind == "order" else "🪙"
-        label = "Order" if kind == "order" else "Fractional buy"
-        mode_tag = " · LIVE 💰" if mode == "live" else ""
-        msg = f"{icon} {label} placed: {side.upper()} {ticker} — ${amount:.2f}{mode_tag}"
+        mode_label = "LIVE 💰" if mode == "live" else "paper"
+        msg = f"{icon} {label} — {side.upper()} {ticker} · ${amount:.2f} · {mode_label}"
         if detail:
             msg += f"\n{detail}"
-        send_system_event(msg)
+        tags = "moneybag,white_check_mark" if mode == "live" else "white_check_mark"
+        priority = "high" if mode == "live" else "default"
+        send_system_event(msg, tags=tags, priority=priority)
     except Exception as exc:  # pragma: no cover - defensive
         _log.warning("order notification failed: %s", exc)
 
 
-def send_system_event(message: str) -> dict[str, bool]:
+def send_order_blocked_notification(
+    *,
+    kind: str,  # "order" (bracket) | "fractional"
+    ticker: str,
+    amount: float,
+    reason: str,  # "insufficient_funds" | "position_cap" | "budget_cap" | "failed"
+    mode: str = "paper",
+    detail: str = "",
+) -> None:
+    """Notify that a wanted trade was NOT placed (blocked by money/capacity or failed).
+
+    Complements :func:`send_order_notification` (which fires on success). Gated by
+    the same ``order_notifications_enabled`` setting; always logs an event. Never
+    raises — a failed notification must never break the pipeline.
+    """
+    try:
+        from .database import get_setting, save_event
+
+        label = "Fractional buy" if kind == "fractional" else "Order"
+        blurbs = {
+            "insufficient_funds": "insufficient buying power — top up your wallet",
+            "position_cap": "position cap reached — close a position or raise the cap",
+            "budget_cap": "fractional budget reached — raise the budget or wait for exits",
+            "failed": "placement failed",
+        }
+        blurb = blurbs.get(reason, reason)
+
+        save_event(
+            "order",
+            f"{label} blocked — {ticker} ${amount:.2f} ({reason})",
+            level="warning",
+            meta={"ticker": ticker, "amount": amount, "kind": kind, "reason": reason, "mode": mode},
+        )
+        if get_setting("order_notifications_enabled", "true") != "true":
+            return
+        msg = f"⚠️ Would buy {ticker} · ${amount:.2f} — {blurb}"
+        if detail:
+            msg += f"\n{detail}"
+        send_system_event(msg, tags="warning", priority="default")
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("order blocked notification failed: %s", exc)
+
+
+def send_system_event(
+    message: str, *, tags: str | None = None, priority: str | None = None
+) -> dict[str, bool]:
     """Fire a minimal system notification (e.g. startup/shutdown) via enabled channels.
 
     Reuses the existing send logic (ntfy dispatch + Telegram). Each channel only
@@ -305,13 +477,13 @@ def send_system_event(message: str) -> dict[str, bool]:
     every failure is logged and swallowed so this can't block startup or shutdown.
 
     The emoji lives in the message body (UTF-8, preserved); the ntfy Title stays
-    a plain ASCII "MarketSage".
+    a plain ASCII "MarketSage". ``tags``/``priority`` tune the ntfy notification.
     """
     results: dict[str, bool] = {}
     try:
         from .notifications import dispatch as _notify_dispatch
 
-        results.update(_notify_dispatch("MarketSage", message))
+        results.update(_notify_dispatch("MarketSage", message, tags=tags, priority=priority))
     except Exception as exc:  # pragma: no cover - defensive
         _log.warning("system notification via ntfy failed: %s", exc)
     try:
@@ -322,9 +494,37 @@ def send_system_event(message: str) -> dict[str, bool]:
     return results
 
 
-if __name__ == "__main__":
-    import json
+def send_report(
+    subject: str,
+    body: str,
+    *,
+    tags: str | None = None,
+    priority: str | None = None,
+    preformatted: bool = True,
+) -> dict[str, bool]:
+    """Fan a digest/report out to BOTH ntfy and Telegram.
 
+    Like :func:`send_system_event` but carries a distinct subject + a rich body and
+    renders the Telegram side as a monospace ``<pre>`` block (``preformatted``), so
+    space-aligned tables survive. Used by the EoD digest and the LLM periodic reports.
+    Never raises — each channel failure is logged and swallowed.
+    """
+    results: dict[str, bool] = {}
+    try:
+        from .notifications import dispatch as _notify_dispatch
+
+        results.update(_notify_dispatch(subject, body, tags=tags, priority=priority))
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("report via ntfy failed: %s", exc)
+    try:
+        if send_telegram(subject, body, preformatted=preformatted):
+            results["telegram"] = True
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("report via telegram failed: %s", exc)
+    return results
+
+
+if __name__ == "__main__":
     demo = {
         "ticker": "AAPL",
         "type": "long",

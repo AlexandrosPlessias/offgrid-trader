@@ -471,6 +471,42 @@ The review must cover the **whole project** — not just these three — but cha
 
 ---
 
+## 8. Replace the in-process scheduler with a Cloudflare Workers cron trigger
+
+The in-process `MonitorScheduler` (`backend/scheduler.py`) is a hand-rolled `while` loop that silently misses ticks whenever the backend restarts or Fly idles the machine (`fly.toml` sets `auto_stop_machines = "stop"` and `min_machines_running = 0`). Scans, the EoD digest, and the new LLM reports must fire on schedule regardless of backend uptime — so the trigger has to live *outside* the app it wakes up.
+
+### Chosen approach — Cloudflare Workers Cron Triggers
+
+**Decided.** A small Worker committed under `infra/cron-worker/` (`wrangler.toml` + a `scheduled` handler) `fetch()`es the authenticated backend endpoints — the scan trigger, `GET /reports/eod`, and `GET /reports/llm-summary` — on cron schedules. `ADMIN_TOKEN` is stored as a Worker secret (`wrangler secret put ADMIN_TOKEN`) and sent as the auth header the existing admin-token middleware already enforces. The handler adds a **market-hours guard** (skip weekends / holidays) and **retry-on-non-2xx**, so a cold Fly start is retried until the machine wakes instead of being silently dropped.
+
+### Options considered
+
+| Option | Decision | Why |
+|---|---|---|
+| **Cloudflare Workers cron** | **Chosen** | Free and runs independently of Fly uptime; a `scheduled` handler plus Worker secrets keep `ADMIN_TOKEN` off any third party; retries and logs are built in |
+| GitHub Actions cron | Rejected | Scheduled workflows are frequently delayed or skipped under load, and already power `app-power.yml` — stacking scan/report timing on the same flaky scheduler compounds the risk |
+| cron-job.org | Rejected | A third party would store the endpoint URL + `ADMIN_TOKEN`, against this project's self-hosted ethos |
+
+### Acceptance criteria
+
+1. Scans fire on schedule independent of backend uptime — a stopped or idled Fly machine is woken and scanned, never silently skipped
+2. EoD and LLM reports fire on their cadences (close / daily / weekly)
+3. Failed calls are retried and observable — every attempt and its outcome is visible in the Worker logs
+4. `ADMIN_TOKEN` lives only in Worker secrets — never in `wrangler.toml`, the repo, or workflow YAML
+
+### Implementation order
+
+1. Scaffold the Worker — `infra/cron-worker/` with `wrangler.toml` + a `scheduled` handler
+2. Wire the cron schedules for the scan trigger, `GET /reports/eod`, and `GET /reports/llm-summary`
+3. Add the market-hours guard (skip weekends / holidays) + retry-on-non-2xx
+4. Store the secret — `wrangler secret put ADMIN_TOKEN`
+5. Migrate the scan / EoD triggers off `app-power.yml` onto the Worker
+6. Document — `docs/wiki/` + `README.md`
+
+`.github/workflows/app-power.yml` already demonstrates the cron-hits-an-authenticated-HTTP-endpoint-on-a-schedule pattern this Worker generalizes — it stops and starts the Fly machine on a fixed schedule via authenticated calls. Item 8 reuses that pattern for scan and report scheduling and retires the workflow's scheduling role.
+
+---
+
 ## Other ideas
 
 - **Multi-model support** — allow swapping models per ticker or per scan type; benchmark `qwen2.5:14b` vs `llama3.1:8b` vs `mistral:7b` on accuracy/latency

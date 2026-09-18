@@ -17,6 +17,16 @@ router = APIRouter()
 _log = logging.getLogger(__name__)
 
 
+def _cfg_event(section: str, changes: dict) -> None:
+    """Emit a system activity event for a settings change (best-effort)."""
+    try:
+        from backend.database import save_event
+
+        save_event("system", f"Config updated: {section}", meta=changes)
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
 class AlertsSettingRequest(BaseModel):
     enabled: bool = Field(..., description="Enable or disable alert dispatch")
 
@@ -60,9 +70,22 @@ class SignalScanLlmRequest(BaseModel):
     enabled: bool
 
 
+class AutoTradeSettingRequest(BaseModel):
+    """Autonomous-trading knobs — all optional; only provided fields are written."""
+
+    confidence_floor: float | None = Field(None, ge=0, le=100)
+    paper_max_positions: int | None = Field(None, ge=0, le=100)
+    signal_drop_mode: str | None = Field(None, description="untradable | strict | never")
+    frac_min_confidence: float | None = Field(None, ge=0, le=100)
+    paper_trade_min_confidence: float | None = Field(None, ge=0, le=100)
+    frac_autotrade_allow_live: bool | None = None
+    discovery_autoadd_enabled: bool | None = None
+
+
 @router.post("/settings/alerts")
 def set_alerts(request: AlertsSettingRequest) -> dict[str, Any]:
     set_setting("alerts_enabled", "true" if request.enabled else "false")
+    _cfg_event("alerts", {"alerts_enabled": request.enabled})
     return {"alerts_enabled": request.enabled}
 
 
@@ -77,6 +100,7 @@ async def set_scheduler(request: SchedulerSettingRequest) -> dict[str, Any]:
         scheduler.start()
     else:
         await scheduler.stop()
+    _cfg_event("scheduler", {"running": request.running})
     return scheduler.status()
 
 
@@ -85,6 +109,46 @@ def set_scan_interval(request: ScanIntervalRequest) -> dict[str, Any]:
     """Update the scan interval (persisted to DB; takes effect on next loop cycle)."""
     set_setting("scan_interval_minutes", str(request.minutes))
     return scheduler.status()
+
+
+@router.post("/settings/autotrade")
+def set_autotrade(request: AutoTradeSettingRequest) -> dict[str, Any]:
+    """Persist autonomous-trading knobs. Only provided fields are written.
+
+    Every value is a live DB override read by the scan pipeline at call time;
+    env vars still provide the boot defaults.
+    """
+    if request.signal_drop_mode is not None and request.signal_drop_mode not in (
+        "untradable",
+        "strict",
+        "never",
+    ):
+        raise HTTPException(
+            status_code=422, detail="signal_drop_mode must be untradable|strict|never"
+        )
+
+    if request.confidence_floor is not None:
+        set_setting("confidence_floor", str(request.confidence_floor))
+    if request.paper_max_positions is not None:
+        set_setting("paper_max_positions", str(request.paper_max_positions))
+    if request.signal_drop_mode is not None:
+        set_setting("signal_drop_mode", request.signal_drop_mode)
+    if request.frac_min_confidence is not None:
+        set_setting("frac_min_confidence", str(request.frac_min_confidence))
+    if request.paper_trade_min_confidence is not None:
+        set_setting("paper_trade_min_confidence", str(request.paper_trade_min_confidence))
+    if request.frac_autotrade_allow_live is not None:
+        set_setting(
+            "frac_autotrade_allow_live",
+            "true" if request.frac_autotrade_allow_live else "false",
+        )
+    if request.discovery_autoadd_enabled is not None:
+        set_setting(
+            "discovery_autoadd_enabled",
+            "true" if request.discovery_autoadd_enabled else "false",
+        )
+    _cfg_event("autotrade", {k: v for k, v in request.model_dump().items() if v is not None})
+    return {"saved": True}
 
 
 @router.post("/settings/signal-scan-llm")
@@ -96,6 +160,7 @@ def set_signal_scan_llm(request: SignalScanLlmRequest) -> dict[str, Any]:
     Takes effect immediately (no restart required).
     """
     set_setting("signal_scan_llm_enabled", "true" if request.enabled else "false")
+    _cfg_event("signal-scan-llm", {"enabled": request.enabled})
     return {"signal_scan_llm_enabled": request.enabled}
 
 
@@ -205,6 +270,31 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
         "frac_position_size_env": cfg.frac.position_size,
         "frac_budget_env": cfg.frac.budget,
         "frac_poll_seconds_env": cfg.frac.poll_seconds,
+        # Autonomous trading loop
+        "confidence_floor": float(
+            get_setting("confidence_floor", "") or cfg.thresholds.confidence_floor
+        ),
+        "confidence_floor_env": cfg.thresholds.confidence_floor,
+        "paper_max_positions": int(
+            get_setting("paper_max_positions", "") or cfg.autotrade.paper_max_positions
+        ),
+        "paper_max_positions_env": cfg.autotrade.paper_max_positions,
+        "signal_drop_mode": (get_setting("signal_drop_mode", "") or cfg.autotrade.signal_drop_mode),
+        "signal_drop_mode_env": cfg.autotrade.signal_drop_mode,
+        "frac_autotrade_allow_live": (
+            get_setting("frac_autotrade_allow_live", "")
+            or ("true" if cfg.autotrade.frac_autotrade_allow_live else "false")
+        )
+        == "true",
+        "frac_autotrade_allow_live_env": cfg.autotrade.frac_autotrade_allow_live,
+        "discovery_autoadd_enabled": (
+            get_setting("discovery_autoadd_enabled", "")
+            or ("true" if cfg.discovery.autoadd_enabled else "false")
+        )
+        == "true",
+        "discovery_autoadd_enabled_env": cfg.discovery.autoadd_enabled,
+        "frac_min_confidence_env": cfg.autotrade.frac_min_confidence,
+        "paper_trade_min_confidence_env": cfg.autotrade.paper_trade_min_confidence,
     }
 
 
@@ -284,10 +374,12 @@ def set_llm_settings(request: LLMSettingRequest) -> dict[str, Any]:
         set_setting("llm_fallback_provider", request.fallback_provider)
     if request.fallback_model is not None:
         set_setting("llm_fallback_model", request.fallback_model)
-    return {
-        "ok": True,
-        "provider": get_setting("llm_provider", "") or get_settings().llm.provider,
-    }
+    active_provider = get_setting("llm_provider", "") or get_settings().llm.provider
+    _cfg_event(
+        "llm",
+        {k: v for k, v in request.model_dump(exclude={"api_key"}).items() if v is not None},
+    )
+    return {"ok": True, "provider": active_provider}
 
 
 @router.get("/settings/models")
@@ -577,7 +669,7 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
     subject = "MarketSage — test notification"
     body = (
         "If you can read this, your notification channel is wired up correctly. ✅\n"
-        "Tap “✅ Confirm receipt” to complete the round-trip test."
+        'Tap "Confirm receipt" below to finish the round-trip test.'
     )
     actions = [{"label": "✅ Confirm receipt", "url": confirm_url, "method": "POST"}]
     tg_markup = {"inline_keyboard": [[{"text": "✅ Confirm receipt", "url": confirm_url}]]}
@@ -589,7 +681,9 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
     if topic:
         results["ntfy"] = (
             "sent"
-            if post_ntfy(server, topic, subject, body, priority="default", actions=actions)
+            if post_ntfy(
+                server, topic, subject, body, tags="bell", priority="default", actions=actions
+            )
             else "failed"
         )
     else:
@@ -606,3 +700,23 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
             detail="No channel accepted the test. Enable and configure at least one channel.",
         )
     return {"ok": True, "results": results, "token": token, "ttl": 60}
+
+
+@router.get("/settings/export")
+def export_settings() -> dict[str, Any]:
+    """Download a portable JSON snapshot of CONFIG (settings + watchlist groups).
+
+    Secret values (API keys, bot tokens, ntfy topic, admin token) are redacted. Data
+    (signals/orders/etc.) is NOT here — export that via ``GET /data/export``. Manual only.
+    """
+    from datetime import datetime, timezone
+
+    from backend.database import export_app_settings, get_watchlist_groups
+
+    return {
+        "format": "marketsage-config",
+        "version": 1,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "settings": export_app_settings(redact_secrets=True),
+        "watchlist_groups": get_watchlist_groups(),
+    }

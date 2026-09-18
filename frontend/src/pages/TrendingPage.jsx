@@ -419,6 +419,11 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                 // Tradable on paper but has borrow/short restrictions — warn before clicking
                 const hasRestrictions = asset && asset !== 'loading' && asset.tradable &&
                                         !asset.shortable && !asset.easy_to_borrow
+                // Alpaca 'fractionable' flag — unknown/loading → assume OK (allow attempt).
+                const notFractionable = asset && asset !== 'loading' ? asset.fractionable === false : false
+                // No possible action: can't place a bracket (not tradable) AND can't
+                // fractionally buy — adding it to the watchlist would only create dead signals.
+                const noAction = Boolean(notTradable && notFractionable)
                 // Compose a human tooltip explaining why trading is blocked or warned
                 const tradeBlock  = notTradable
                   ? (!asset.tradable ? 'Not tradable on Alpaca' : `Asset status: ${asset.status}`)
@@ -507,20 +512,25 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                             cursor: 'pointer',
                           }
-                          const watchIcon = removing ? '⏳' : adding ? '⏳' : added ? '✓' : '👁'
+                          // Block adding tickers with no possible action (can't
+                          // trade or fractionally buy) — but never block removing.
+                          const addBlocked = !added && noAction
+                          const watchIcon =
+                            removing ? '⏳' : adding ? '⏳' : added ? '✓' : addBlocked ? '🚫' : '👁'
                           const watchTitle =
                             removing ? `Removing ${c.ticker} from watchlist…` :
                             adding   ? 'Adding to watchlist…' :
                             added    ? `${c.ticker} is in your watchlist — click to remove` :
+                            addBlocked ? `${c.ticker} can't be traded or fractionally bought on Alpaca — not useful to watch` :
                             `Add ${c.ticker} to watchlist`
                           return (
                             <button
                               className="btn-secondary btn-sm"
                               onClick={() => added ? handleUnwatch(c.ticker) : handleAdd(c.ticker)}
-                              disabled={adding || removing}
+                              disabled={adding || removing || addBlocked}
                               title={watchTitle}
                               aria-label={watchTitle}
-                              style={{ ...iconBtn, opacity: removing ? 0.45 : 1 }}
+                              style={{ ...iconBtn, opacity: (removing || addBlocked) ? 0.45 : 1 }}
                             >
                               {watchIcon}
                             </button>
@@ -536,9 +546,6 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                           const traded   = ts === 'done'
                           const tradeErr = ts?.startsWith('error:') ? ts.slice(6) : null
                           const blocked  = Boolean(notTradable)
-                          // Alpaca 'fractionable' flag — unknown/loading → allow attempt.
-                          const notFractionable =
-                            asset && asset !== 'loading' ? asset.fractionable === false : false
 
                           const iconBtn = {
                             fontSize: 15, lineHeight: 1,

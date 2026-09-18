@@ -6,6 +6,8 @@ const NAV_PRIMARY = [
   { view: 'paper',     label: 'Trading',   icon: '📈' },
   { view: 'trending',  label: 'Discovery', icon: '🔥' },
   { view: 'explorer',  label: 'Explorer',  icon: '🔍' },
+  { view: 'events',    label: 'Activity',  icon: '📋' },
+  { view: 'reports',   label: 'Reports',   icon: '📑' },
   { view: 'education', label: 'Learn',     icon: '📚' },
 ]
 const NAV_SECONDARY = [
@@ -79,6 +81,8 @@ export default function Header({ health, usage, btTodayTokens = 0, activeView, o
             <button className={`nav-tab ${activeView === 'paper'     ? 'active' : ''}`} onClick={() => onViewChange('paper')}>Trading</button>
             <button className={`nav-tab ${activeView === 'trending'  ? 'active' : ''}`} onClick={() => onViewChange('trending')}>Discovery</button>
             <button className={`nav-tab ${activeView === 'explorer'  ? 'active' : ''}`} onClick={() => onViewChange('explorer')}>Explorer</button>
+            <button className={`nav-tab ${activeView === 'events'    ? 'active' : ''}`} onClick={() => onViewChange('events')}>Activity</button>
+            <button className={`nav-tab ${activeView === 'reports'   ? 'active' : ''}`} onClick={() => onViewChange('reports')}>Reports</button>
             <button className={`nav-tab ${activeView === 'education' ? 'active' : ''}`} onClick={() => onViewChange('education')}>Learn</button>
           </nav>
         </div>
@@ -206,6 +210,32 @@ export default function Header({ health, usage, btTodayTokens = 0, activeView, o
             <span className={`live-chip ${running ? 'live-chip-market-open' : 'live-chip-market-closed'}`} title={title}>
               🤖 Scanner: {running ? 'Active' : 'Off'}
               {running && nextRun && <span style={{ fontWeight: 400, opacity: 0.75, marginLeft: 5 }}>· next {nextRun}</span>}
+            </span>
+          )
+        })()}
+
+        {/* 3b. Autonomous trading ───────────────────────────────────── */}
+        {health && (() => {
+          const at = health.autotrade ?? {}
+          const paper = at.paper ?? false
+          const frac = at.frac ?? false
+          const fracLive = at.frac_mode === 'live'
+          const anyOn = paper || frac
+          const parts = []
+          if (paper) parts.push('Bracket')
+          if (frac) parts.push(fracLive ? 'Frac (LIVE)' : 'Frac')
+          const label = anyOn ? parts.join(' + ') : 'Off'
+          const title = [
+            'Autonomous trading',
+            `Paper bracket auto-trade: ${paper ? 'on' : 'off'}`,
+            `Fractional auto-trade: ${frac ? `on (${at.frac_mode})` : 'off'}`,
+          ].join('\n')
+          const cls = fracLive && frac
+            ? 'live-chip-api-err'
+            : (anyOn ? 'live-chip-market-open' : 'live-chip-market-closed')
+          return (
+            <span className={`live-chip ${cls}`} title={title}>
+              🤖 Auto: {label}
             </span>
           )
         })()}

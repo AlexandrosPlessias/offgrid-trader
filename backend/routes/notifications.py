@@ -62,9 +62,7 @@ def _roundtrip_status(token: str) -> str:
         return "confirmed" if entry["confirmed"] else "pending"
 
 
-@router.api_route(
-    "/notifications/test/confirm", methods=["GET", "POST"], include_in_schema=False
-)
+@router.api_route("/notifications/test/confirm", methods=["GET", "POST"], include_in_schema=False)
 async def confirm_roundtrip(token: str = Query(..., min_length=8, max_length=64)) -> Any:
     """Confirm a round-trip test token (tapped from the channel action button).
 
@@ -80,7 +78,7 @@ async def confirm_roundtrip(token: str = Query(..., min_length=8, max_length=64)
         )
     return HTMLResponse(
         "<html><body style='font-family:sans-serif;text-align:center;padding:48px'>"
-        "<h2>⚠ Link expired</h2><p>The confirmation link has expired (60&nbsp;s). "
+        "<h2>⚠️ Link expired</h2><p>The confirmation link has expired (60&nbsp;s). "
         "Send a new test from Settings.</p></body></html>",
         status_code=410,
     )
@@ -134,31 +132,65 @@ async def telegram_callback(
     tg = cfg.telegram
     answer_url = f"https://api.telegram.org/bot{tg.bot_token}/answerCallbackQuery"
 
-    # Parse callback_data: "paper:AAPL:buy" | "view:AAPL"
+    # Parse callback_data: "ord:AAPL:buy:190.00:185.00:200.00" | "frac:AAPL:190.00"
+    # (levels are encoded in the button, so the callback can build a real bracket /
+    #  fractional order — it drives the same endpoints the UI uses, no bypass.)
     parts = data.split(":")
     action = parts[0] if parts else ""
 
-    if action == "paper" and len(parts) >= 3:
-        ticker, side = parts[1], parts[2]
+    from backend.database import save_event
+
+    _ticker_str = parts[1] if len(parts) > 1 else "?"
+    save_event(
+        "notification",
+        f"Telegram callback — action: {action or '?'}, ticker: {_ticker_str}",
+        meta={"action": action, "data": data[:80]},
+    )
+
+    endpoint = ""
+    result_action = ""
+    order_json: dict[str, Any] | None = None
+    ticker = ""
+    if action == "ord" and len(parts) >= 6:
+        ticker = parts[1]
+        endpoint = "http://localhost:8000/paper/orders/place"
+        result_action = "paper_order"
+        try:
+            order_json = {
+                "ticker": ticker,
+                "side": parts[2],
+                "entry": float(parts[3]),
+                "stop": float(parts[4]),
+                "target": float(parts[5]),
+            }
+        except ValueError:
+            order_json = None
+    elif action == "frac" and len(parts) >= 3:
+        ticker = parts[1]
+        endpoint = "http://localhost:8000/frac/order"
+        result_action = "frac_order"
+        try:
+            order_json = {
+                "ticker": ticker,
+                "side": "buy",
+                "entry": float(parts[2]),
+                "confirm_live": True,
+            }
+        except ValueError:
+            order_json = None
+
+    if order_json is not None:
+        label = "Paper" if action == "ord" else "Fractional"
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                order_resp = await client.post(
-                    "http://localhost:8000/paper/orders",
-                    json={
-                        "ticker": ticker,
-                        "side": side,
-                        "qty": 1,
-                        "order_type": "market",
-                        "time_in_force": "day",
-                    },
-                )
+                order_resp = await client.post(endpoint, json=order_json)
             if order_resp.status_code in (200, 201):
-                text = f"Paper {side.upper()} order placed for {ticker}."
+                text = f"✅ {label} order placed for {ticker}"
             else:
-                text = f"Order failed ({order_resp.status_code})."
+                text = f"⚠️ Order rejected ({order_resp.status_code}) — check MarketSage"
         except Exception as exc:
             _log.warning("telegram callback order failed: %s", exc)
-            text = "Order placement failed. Check the app."
+            text = "⚠️ Order failed to place — check MarketSage"
 
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -166,7 +198,7 @@ async def telegram_callback(
         except Exception:  # noqa: BLE001 - answerCallbackQuery is best-effort; failure is silent
             _log.debug("answerCallbackQuery failed after order placement", exc_info=True)
 
-        return {"ok": True, "action": "paper_order", "ticker": ticker, "side": side}
+        return {"ok": True, "action": result_action, "ticker": ticker}
 
     # Unknown action — acknowledge to dismiss the spinner
     try:

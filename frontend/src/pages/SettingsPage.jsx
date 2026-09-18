@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { API, getAuthHeaders } from '../utils/api'
 import UsageSection from './UsageSection'
 import InfoTip from '../components/shared/InfoTip'
@@ -12,6 +12,7 @@ const SETTINGS_GROUPS = [
   { label: 'Trading', icon: '📈', children: [
     { id: 'settings-paper',         icon: '📈', label: 'Order Trading' },
     { id: 'settings-frac',          icon: '🪙', label: 'Live / Fractional' },
+    { id: 'settings-autotrade',     icon: '🤖', label: 'Autonomous' },
   ]},
   { label: 'AI', icon: '🧠', children: [
     { id: 'settings-ai-provider',   icon: '🧠', label: 'AI Provider' },
@@ -55,6 +56,8 @@ function DiscoverySettingsSection() {
   const [intervalMinutes,  setIntervalMinutes]  = useState(60)
   const [autoscanEnabled,  setAutoscanEnabled]  = useState(false)
   const [autoscanTopN,     setAutoscanTopN]     = useState(3)
+  const [autoaddEnabled,   setAutoaddEnabled]   = useState(false)
+  const [autoaddTopN,      setAutoaddTopN]      = useState(5)
 
   useEffect(() => {
     fetch(`${API}/settings/discovery`, { headers: getAuthHeaders() })
@@ -68,6 +71,8 @@ function DiscoverySettingsSection() {
         setIntervalMinutes(d.interval_minutes ?? 60)
         setAutoscanEnabled(d.autoscan_enabled ?? false)
         setAutoscanTopN(d.autoscan_top_n ?? 3)
+        setAutoaddEnabled(d.autoadd_enabled ?? false)
+        setAutoaddTopN(d.autoadd_top_n ?? 5)
       })
       .catch(() => setFetchErr(true))
   }, [])
@@ -86,6 +91,8 @@ function DiscoverySettingsSection() {
           interval_minutes: intervalMinutes,
           autoscan_enabled: autoscanEnabled,
           autoscan_top_n: autoscanTopN,
+          autoadd_enabled: autoaddEnabled,
+          autoadd_top_n: autoaddTopN,
         }),
       })
       if (!r.ok) throw new Error(await r.text())
@@ -228,6 +235,25 @@ function DiscoverySettingsSection() {
         )}
         <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
           {autoscanEnabled ? `Run full agent pipeline on top ${autoscanTopN} candidates` : 'Disabled'}
+        </span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Auto-add to watchlist</label>
+        <input type="checkbox" checked={autoaddEnabled} onChange={e => setAutoaddEnabled(e.target.checked)} />
+        {autoaddEnabled && (
+          <input
+            className="settings-input"
+            type="number" min={1} max={25}
+            value={autoaddTopN}
+            onChange={e => setAutoaddTopN(Number(e.target.value))}
+            style={{ width: 60, marginLeft: 10 }}
+          />
+        )}
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          {autoaddEnabled
+            ? `Add the top ${autoaddTopN} tradable candidate(s) per run to the watchlist (kept until removed)`
+            : 'Disabled'}
         </span>
       </div>
 
@@ -942,6 +968,164 @@ function NotificationsSection() {
   )
 }
 
+function AutonomousTradingSection() {
+  const [fetchErr,   setFetchErr]   = useState(false)
+  const [saveStatus, setSaveStatus] = useState(null)
+  const [saveErr,    setSaveErr]    = useState('')
+
+  const [confidenceFloor,   setConfidenceFloor]   = useState(75)
+  const [fracMinConf,       setFracMinConf]       = useState(85)
+  const [paperMinConf,      setPaperMinConf]      = useState(0)
+  const [maxPositions,      setMaxPositions]      = useState(5)
+  const [dropMode,          setDropMode]          = useState('untradable')
+  const [fracAllowLive,     setFracAllowLive]     = useState(false)
+  const [envDefaults,       setEnvDefaults]       = useState(null)
+
+  useEffect(() => {
+    fetch(`${API}/settings`, { headers: getAuthHeaders() })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => {
+        setConfidenceFloor(d.confidence_floor ?? 75)
+        setFracMinConf(d.frac_min_confidence ?? 85)
+        setPaperMinConf(d.paper_trade_min_confidence ?? 0)
+        setMaxPositions(d.paper_max_positions ?? 5)
+        setDropMode(d.signal_drop_mode ?? 'untradable')
+        setFracAllowLive(d.frac_autotrade_allow_live ?? false)
+        setEnvDefaults({
+          confidence_floor: d.confidence_floor_env ?? 75,
+          frac_min_confidence: d.frac_min_confidence_env ?? 85,
+          paper_trade_min_confidence: d.paper_trade_min_confidence_env ?? 0,
+          paper_max_positions: d.paper_max_positions_env ?? 5,
+          signal_drop_mode: d.signal_drop_mode_env ?? 'untradable',
+          frac_autotrade_allow_live: d.frac_autotrade_allow_live_env ?? false,
+        })
+      })
+      .catch(() => setFetchErr(true))
+  }, [])
+
+  const loadEnvDefaults = () => {
+    if (!envDefaults) return
+    setConfidenceFloor(envDefaults.confidence_floor)
+    setFracMinConf(envDefaults.frac_min_confidence)
+    setPaperMinConf(envDefaults.paper_trade_min_confidence)
+    setMaxPositions(envDefaults.paper_max_positions)
+    setDropMode(envDefaults.signal_drop_mode)
+    setFracAllowLive(envDefaults.frac_autotrade_allow_live)
+  }
+
+  const save = async () => {
+    setSaveStatus('saving'); setSaveErr('')
+    try {
+      const r = await fetch(`${API}/settings/autotrade`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({
+          confidence_floor: Number(confidenceFloor),
+          frac_min_confidence: Number(fracMinConf),
+          paper_trade_min_confidence: Number(paperMinConf),
+          paper_max_positions: Number(maxPositions),
+          signal_drop_mode: dropMode,
+          frac_autotrade_allow_live: fracAllowLive,
+        }),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      setSaveStatus('ok')
+      setTimeout(() => setSaveStatus(null), 3000)
+    } catch (e) {
+      setSaveErr(e.message || 'Save failed')
+      setSaveStatus('error')
+      setTimeout(() => setSaveStatus(null), 4000)
+    }
+  }
+
+  return (
+    <SettingSection id="settings-autotrade" title="Autonomous Trading" icon="🤖">
+      <p className="text-dim" style={{ fontSize: 13, marginBottom: 16 }}>
+        Tune how signals turn into orders automatically. Master on/off switches live under
+        <strong> Order Trading</strong> and <strong>Live / Fractional</strong>; these are the shared
+        gates and safety rails. Every value is also settable via environment variables.
+      </p>
+      {fetchErr && <p className="settings-err">Could not load settings.</p>}
+
+      <button
+        type="button"
+        className="settings-env-btn"
+        onClick={loadEnvDefaults}
+        disabled={!envDefaults}
+        style={{ marginBottom: 14 }}
+      >
+        ↩ Load Environment Default Values
+        <span className="settings-env-btn-sub">
+          (from .env — CONFIDENCE_FLOOR / FRAC_MIN_CONFIDENCE / PAPER_MAX_POSITIONS / SIGNAL_DROP_MODE …)
+        </span>
+      </button>
+
+      <div className="settings-row">
+        <label className="settings-label">Signal / bracket confidence floor</label>
+        <input className="settings-input" type="number" min={0} max={100}
+               value={confidenceFloor} onChange={e => setConfidenceFloor(e.target.value)}
+               style={{ width: 70 }} />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          Minimum % to create a signal and place a bracket order
+        </span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Fractional confidence floor</label>
+        <input className="settings-input" type="number" min={0} max={100}
+               value={fracMinConf} onChange={e => setFracMinConf(e.target.value)}
+               style={{ width: 70 }} />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          Stricter % required for a fractional buy (frac commits notional)
+        </span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Bracket-only floor (optional)</label>
+        <input className="settings-input" type="number" min={0} max={100}
+               value={paperMinConf} onChange={e => setPaperMinConf(e.target.value)}
+               style={{ width: 70 }} />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          0 = fall back to the signal floor above
+        </span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Max concurrent bracket positions</label>
+        <input className="settings-input" type="number" min={0} max={100}
+               value={maxPositions} onChange={e => setMaxPositions(e.target.value)}
+               style={{ width: 70 }} />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          New bracket orders are held once this many positions are open
+        </span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Signal drop rule</label>
+        <select className="settings-select" value={dropMode}
+                onChange={e => setDropMode(e.target.value)} style={{ maxWidth: 260 }}>
+          <option value="untradable">Drop only untradable (recommended)</option>
+          <option value="strict">Strict — also drop when out of funds/capacity</option>
+          <option value="never">Never drop (keep full audit trail)</option>
+        </select>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Allow live auto-frac</label>
+        <input type="checkbox" checked={fracAllowLive}
+               onChange={e => setFracAllowLive(e.target.checked)} />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          {fracAllowLive
+            ? '⚠️ Autonomous fractional buys will use REAL money when the frac profile is live'
+            : 'Autonomous frac buys are paper-only (safe default)'}
+        </span>
+      </div>
+
+      <SaveRow status={saveStatus} errMsg={saveErr} onSave={save} />
+    </SettingSection>
+  )
+}
+
 function SaveRow({ status, errMsg, onSave, label = 'Save' }) {
   return (
     <div className="settings-save-row">
@@ -1145,6 +1329,13 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
   const [clearSelected,    setClearSelected]    = useState(new Set())
   const [clearConfirm,     setClearConfirm]     = useState(false)
   const [clearStatus,      setClearStatus]      = useState(null)
+
+  // ── Export / backup / import ────────────────────────────────────────────────
+  const [exportDataStatus,   setExportDataStatus]   = useState(null)
+  const [exportDataXlsxStatus, setExportDataXlsxStatus] = useState(null)
+  const [exportConfigStatus, setExportConfigStatus] = useState(null)
+  const [importStatus,       setImportStatus]       = useState(null)   // null | 'importing' | {ok, counts} | 'error'
+  const importFileRef = useRef(null)
 
   const CLEAR_OPTIONS = [
     { id: 'signals',             label: 'Signals',              desc: 'Stored signal alerts' },
@@ -1387,6 +1578,64 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
       setResetStatus('ok')
       setTimeout(() => setResetStatus(null), 4000)
     } catch (e) { setResetStatus('error') }
+  }
+
+  // Auth is a Bearer header, so a plain <a download> would 401 — fetch → blob → object-URL.
+  const downloadJson = async (path, filenamePrefix, setStatus) => {
+    setStatus('exporting')
+    try {
+      const r = await fetch(`${API}${path}`, { headers: getAuthHeaders() })
+      if (!r.ok) throw new Error(`Export failed (${r.status})`)
+      const blob = await r.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      const date = new Date().toISOString().slice(0, 10)
+      a.href = url
+      a.download = `${filenamePrefix}-${date}.json`
+      document.body.appendChild(a); a.click(); a.remove()
+      URL.revokeObjectURL(url)
+      setStatus('ok'); setTimeout(() => setStatus(null), 4000)
+    } catch (e) { setStatus('error'); setTimeout(() => setStatus(null), 5000) }
+  }
+
+  const downloadXlsx = async (path, filenamePrefix, setStatus) => {
+    setStatus('exporting')
+    try {
+      const r = await fetch(`${API}${path}`, { headers: getAuthHeaders() })
+      if (!r.ok) throw new Error(`Export failed (${r.status})`)
+      const blob = await r.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      const date = new Date().toISOString().slice(0, 10)
+      a.href = url
+      a.download = `${filenamePrefix}-${date}.xlsx`
+      document.body.appendChild(a); a.click(); a.remove()
+      URL.revokeObjectURL(url)
+      setStatus('ok'); setTimeout(() => setStatus(null), 4000)
+    } catch (e) { setStatus('error'); setTimeout(() => setStatus(null), 5000) }
+  }
+
+  const handleImportFile = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''   // reset so same file can be re-selected
+    setImportStatus('importing')
+    try {
+      const text = await file.text()
+      const payload = JSON.parse(text)
+      const r = await fetch(`${API}/data/import`, {
+        method: 'POST',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const data = await r.json()
+      if (!r.ok) throw new Error(data.detail || `Import failed (${r.status})`)
+      setImportStatus({ ok: true, total: data.total_rows, counts: data.counts })
+      setTimeout(() => setImportStatus(null), 8000)
+    } catch (err) {
+      setImportStatus({ ok: false, msg: err.message })
+      setTimeout(() => setImportStatus(null), 8000)
+    }
   }
 
 
@@ -1696,6 +1945,9 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
 
       {/* ── Live / Fractional Trading ─────────────────────────────────────── */}
       <FracSettingsSection />
+
+      {/* ── Autonomous Trading ────────────────────────────────────────────── */}
+      <AutonomousTradingSection />
 
       {/* ── AI Provider ───────────────────────────────────────────────────── */}
       <SettingSection id="settings-ai-provider" title="AI Provider" icon="🧠">
@@ -2146,6 +2398,99 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
 
       {/* ── Data ──────────────────────────────────────────────────────────── */}
       <SettingSection id="settings-data" title="Data" icon="🗑️">
+
+        {/* Export / Backup ─────────────────────────────────────────────── */}
+        <p className="text-dim" style={{ fontSize: 13, marginBottom: 12 }}>
+          <strong>Export / Backup</strong> — download a portable snapshot to keep
+          off-site or move to another instance.
+        </p>
+
+        {/* Data export row */}
+        <div className="settings-save-row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          <button
+            className="btn-secondary btn-sm"
+            onClick={() => downloadJson('/data/export', 'marketsage-data', setExportDataStatus)}
+            disabled={exportDataStatus === 'exporting'}
+          >
+            ⬇ Export data (JSON)
+          </button>
+          <button
+            className="btn-secondary btn-sm"
+            onClick={() => downloadXlsx('/data/export/xlsx', 'marketsage-data', setExportDataXlsxStatus)}
+            disabled={exportDataXlsxStatus === 'exporting'}
+          >
+            ⬇ Export data (Excel)
+          </button>
+          {(exportDataStatus === 'exporting' || exportDataXlsxStatus === 'exporting') &&
+            <span className="text-dim" style={{ fontSize: 12 }}>Exporting…</span>}
+          {(exportDataStatus === 'ok' || exportDataXlsxStatus === 'ok') &&
+            <span className="settings-ok">✓ Downloaded</span>}
+          {(exportDataStatus === 'error' || exportDataXlsxStatus === 'error') &&
+            <span className="settings-err">✗ Export failed</span>}
+        </div>
+        <p className="text-dim" style={{ fontSize: 12, margin: '4px 0 14px' }}>
+          Signals, orders, discovery runs, watchlist — JSON for restore; Excel for analysis.
+        </p>
+
+        {/* Config export row */}
+        <div className="settings-save-row">
+          <button
+            className="btn-secondary btn-sm"
+            onClick={() => downloadJson('/settings/export', 'marketsage-config', setExportConfigStatus)}
+            disabled={exportConfigStatus === 'exporting'}
+          >
+            ⬇ Export config (JSON)
+          </button>
+          {exportConfigStatus === 'exporting' && <span className="text-dim" style={{ fontSize: 12 }}>Exporting…</span>}
+          {exportConfigStatus === 'ok'    && <span className="settings-ok">✓ Config exported</span>}
+          {exportConfigStatus === 'error' && <span className="settings-err">✗ Export failed</span>}
+        </div>
+        <p className="text-dim" style={{ fontSize: 12, margin: '4px 0 18px' }}>
+          Settings + watchlist groups (secrets redacted).
+        </p>
+
+        {/* Import / Restore */}
+        <p className="text-dim" style={{ fontSize: 13, marginBottom: 10 }}>
+          <strong>Import / Restore</strong> — load a JSON data snapshot back into this instance.
+          Existing rows are never overwritten (INSERT OR IGNORE). Clear specific tables first
+          if you want a clean restore.
+        </p>
+        <div className="settings-save-row">
+          <input
+            ref={importFileRef}
+            type="file"
+            accept=".json,application/json"
+            style={{ display: 'none' }}
+            onChange={handleImportFile}
+          />
+          <button
+            className="btn-secondary btn-sm"
+            onClick={() => importFileRef.current?.click()}
+            disabled={importStatus === 'importing'}
+          >
+            ⬆ Import data
+          </button>
+          {importStatus === 'importing' && <span className="text-dim" style={{ fontSize: 12 }}>Importing…</span>}
+          {importStatus?.ok === true && (
+            <span className="settings-ok">
+              ✓ {importStatus.total} row(s) imported
+              {importStatus.counts && (
+                <span style={{ opacity: 0.75, marginLeft: 6, fontSize: 11 }}>
+                  ({Object.entries(importStatus.counts).filter(([,v]) => v > 0).map(([k,v]) => `${k}: ${v}`).join(' · ')})
+                </span>
+              )}
+            </span>
+          )}
+          {importStatus?.ok === false && (
+            <span className="settings-err">✗ {importStatus.msg || 'Import failed'}</span>
+          )}
+        </div>
+        <p className="text-dim" style={{ fontSize: 11, margin: '4px 0 0', opacity: 0.8 }}>
+          Only data export files are importable — config files (with redacted secrets) are not.
+        </p>
+
+        <div style={{ borderTop: '1px solid var(--border)', margin: '18px 0', opacity: 0.4 }} />
+
         <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
           Select the data you want to erase. Settings, API keys, and watchlist
           groups are never affected.

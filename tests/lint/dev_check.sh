@@ -91,7 +91,7 @@ run "Flake8" "$VENV/bin/flake8" backend/ tests/ \
     --max-line-length=100 \
     --extend-ignore=E203,W503 \
     --extend-select=B,S \
-    --per-file-ignores="tests/*.py:S101,S311,B backend/main.py:B008"
+    --per-file-ignores="tests/*.py:S101,S311,B backend/main.py:B008 backend/routes/*.py:B008"
 
 # ── 5. Black (format check only — no files rewritten) ────────────────────────
 run "Black" "$VENV/bin/black" --check --diff --line-length 100 backend/ tests/

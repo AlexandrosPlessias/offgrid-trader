@@ -37,6 +37,13 @@ nav drawer. Code split into focused modules: 9 backend route files, 31 frontend 
 - **Paper Orders panel** — collapsible sidebar shows account equity, day P&L, open positions, and recent orders with cancel support
 - **Market clock** — header chip shows live market status (open/closed); scheduler and price polling are both market-hours gated
 
+### Automation & insights
+
+- **Autonomous trading** — a hands-off loop turns signals into orders without a tap: a **tradability gate** drops permanently un-actionable signals, confidence floors and a position cap govern placement, and a paper-only safety rail guards live fractional buys. All knobs are env defaults with live Settings → Autonomous overrides. See [docs/wiki/paper-trading.md](docs/wiki/paper-trading.md#autonomous-trading)
+- **Discovery auto-add** — high-score tradable candidates from Trending Discovery can be auto-added to the watchlist (capped per run)
+- **Reports** — persisted **EoD & weekly** reports combine deterministic account figures with an LLM analyst narrative (commentary, patterns, and parameter-tuning suggestions), viewable on the Reports tab and delivered to your channels. See [docs/wiki/reports.md](docs/wiki/reports.md)
+- **Activity feed** — an in-app event log (scan / order / discovery / notification / scheduler / report / system) with an Errors filter, for at-a-glance history without an external service. See [docs/wiki/observability.md](docs/wiki/observability.md#activity-feed-in-app-event-log)
+
 ### Mobile responsiveness
 
 - **Hamburger nav drawer** — replaces horizontal tabs on ≤ 768 px; sections: Navigation, Tools, External links

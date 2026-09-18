@@ -24,11 +24,13 @@ from typing import Any
 
 from .config import MarketHours, get_settings
 from .database import (
+    add_watchlist_tickers,
     get_effective_watchlist,
     get_setting,
     init_db,
     save_discovery_candidates,
     save_discovery_run,
+    save_event,
     update_discovery_run,
     update_paper_order_status,
 )
@@ -151,7 +153,9 @@ async def sync_paper_orders() -> None:
 
     try:
         client = get_client()
-        alpaca_orders = client.get_orders(status="all", limit=200)
+        # nested=True nests each bracket's stop/TP legs under the parent so we
+        # can reconcile a bracket's exit fill against its entry.
+        alpaca_orders = client.get_orders(status="all", limit=200, nested=True)
     except AlpacaError as exc:
         _log.warning("paper sync: Alpaca fetch failed: %s", exc)
         return
@@ -196,6 +200,81 @@ async def sync_paper_orders() -> None:
                 direction = 1 if side == "sell" else -1
                 updates["realized_pnl"] = round((fill - entry) * qty * direction, 4)
 
+                # Notify: this close leg just filled — fire regardless of origin
+                # (stop-loss, take-profit, or market close from Instant Cashout).
+                pnl = updates["realized_pnl"]
+                pnl_sign = "+" if pnl >= 0 else ""
+                order_type = ao.get("type", "")
+                if order_type == "stop":
+                    exit_label = "stop-loss triggered"
+                elif order_type == "limit":
+                    exit_label = "take-profit hit"
+                else:
+                    exit_label = "position closed"
+                from .alerts import send_order_notification  # local import
+
+                # Offload to a thread — the notification does blocking network
+                # I/O and must not stall the async poller.
+                await asyncio.to_thread(
+                    send_order_notification,
+                    kind="order",
+                    ticker=db_order.get("ticker", "?"),
+                    side=side,
+                    amount=round(fill * qty, 2),
+                    mode="paper",
+                    detail=f"{exit_label} · exit @ ${fill:.2f} · P&L {pnl_sign}${pnl:.2f}",
+                    is_close=True,
+                )
+
+        # Reconcile bracket closures: a bracket *entry* (notional set) closes
+        # when one of its child legs (stop/take-profit) fills. Without this the
+        # entry row stays filled/realized_pnl=None forever and inflates the
+        # "open positions" count and notional in the reports.
+        legs = ao.get("legs") or []
+        if legs:
+            db_order = get_paper_order_by_alpaca_id(order_id)
+            if (
+                db_order
+                and db_order.get("notional") is not None
+                and db_order.get("realized_pnl") is None
+            ):
+                exit_leg = next(
+                    (
+                        lg
+                        for lg in legs
+                        if lg.get("status") == "filled" and lg.get("filled_avg_price")
+                    ),
+                    None,
+                )
+                if exit_leg:
+                    entry_fill = float(filled_avg or db_order.get("entry_price") or 0)
+                    exit_px = float(exit_leg["filled_avg_price"])
+                    qty = float(filled_qty or db_order.get("qty") or 0)
+                    entry_side = db_order.get("side", "buy")
+                    # long (entry buy): profit when exit > entry; short inverts.
+                    direction = 1 if entry_side == "buy" else -1
+                    updates["realized_pnl"] = round((exit_px - entry_fill) * qty * direction, 4)
+
+                    pnl = updates["realized_pnl"]
+                    pnl_sign = "+" if pnl >= 0 else ""
+                    exit_label = (
+                        "stop-loss triggered"
+                        if exit_leg.get("type") == "stop"
+                        else "take-profit hit"
+                    )
+                    from .alerts import send_order_notification  # local import
+
+                    await asyncio.to_thread(
+                        send_order_notification,
+                        kind="order",
+                        ticker=db_order.get("ticker", "?"),
+                        side=entry_side,
+                        amount=round(exit_px * qty, 2),
+                        mode="paper",
+                        detail=f"{exit_label} · exit @ ${exit_px:.2f} · P&L {pnl_sign}${pnl:.2f}",
+                        is_close=True,
+                    )
+
         update_paper_order_status(order_id, updates)
         updated += 1
 
@@ -220,6 +299,7 @@ async def monitor_frac_positions() -> None:
     if get_setting("frac_trading_enabled", "false") != "true":
         return
 
+    from .alerts import send_order_notification  # local import — avoids circular import
     from .alpaca import AlpacaError, get_frac_client  # local import — avoids startup cost
     from .database import get_frac_positions, update_frac_position
 
@@ -253,6 +333,19 @@ async def monitor_frac_positions() -> None:
                     {"status": "closed", "exit_reason": "reconciled", "closed_at": now_iso},
                 )
                 closed += 1
+                _frac_mode = get_setting("frac_mode", "paper")
+                _entry = float(row.get("entry_price") or 0)
+                _qty = float(row.get("qty") or 0)
+                await asyncio.to_thread(
+                    send_order_notification,
+                    kind="fractional",
+                    ticker=ticker,
+                    side="sell",
+                    amount=round(_entry * _qty, 2),
+                    mode=_frac_mode,
+                    detail="reconciled — position closed externally on Alpaca",
+                    is_close=True,
+                )
             continue
 
         try:
@@ -309,6 +402,26 @@ async def monitor_frac_positions() -> None:
         _log.info(
             "frac monitor: closed %s @ %.2f (%s) pnl=%.2f", ticker, current, exit_reason, realized
         )
+        _frac_mode = get_setting("frac_mode", "paper")
+        _reason_labels = {
+            "target": "take-profit hit",
+            "stop": "stop-loss triggered",
+            "eod": "end-of-day close",
+        }
+        pnl_sign = "+" if realized >= 0 else ""
+        await asyncio.to_thread(
+            send_order_notification,
+            kind="fractional",
+            ticker=ticker,
+            side="sell",
+            amount=round(current * held_qty, 2),
+            mode=_frac_mode,
+            detail=(
+                f"{_reason_labels.get(exit_reason, exit_reason)} · "
+                f"exit @ ${current:.2f} · P&L {pnl_sign}${realized:.2f}"
+            ),
+            is_close=True,
+        )
 
     if closed:
         _log.info("frac monitor: closed %d position(s)", closed)
@@ -317,6 +430,55 @@ async def monitor_frac_positions() -> None:
 # --------------------------------------------------------------------------- #
 # Discovery cycle helper
 # --------------------------------------------------------------------------- #
+def _autoadd_tradable_candidates(candidates: list[dict[str, Any]]) -> None:
+    """Add the top-N *actionable* discovery candidates to the watchlist.
+
+    Candidates arrive score-sorted (strongest first). Only the top
+    ``discovery_autoadd_top_n`` are added so the watchlist can't balloon by a
+    whole run's worth of tickers each cycle. A candidate is actionable — and so
+    worth watching — only if it can place at least one order: a bracket buy
+    (tradable + active) OR a fractional buy (fractionable). This mirrors the
+    Trending page's add gate and the autonomous tradability gate, so a ticker
+    that shows 🚫 in the UI is never auto-added. Runs in a worker thread; never
+    raises.
+    """
+    try:
+        from .alpaca import AlpacaError, get_client
+        from .config import get_settings as _cfg
+        from .routes._models import _clean_ticker
+
+        top_n = int(get_setting("discovery_autoadd_top_n", "") or _cfg().discovery.autoadd_top_n)
+        client = get_client()
+        tradable_tickers: list[str] = []
+        for cand in candidates:
+            if len(tradable_tickers) >= top_n:
+                break  # only add the strongest top-N per run
+            ticker = (cand.get("ticker") or "").strip().upper()
+            if not ticker:
+                continue
+            try:
+                asset = client._get(f"/v2/assets/{_clean_ticker(ticker)}")
+            except AlpacaError:
+                continue  # unknown on Alpaca — skip (can't confirm it's useful)
+            can_bracket = asset.get("tradable", False) and asset.get("status") == "active"
+            can_frac = asset.get("fractionable", False)
+            if can_bracket or can_frac:
+                tradable_tickers.append(ticker)
+
+        if not tradable_tickers:
+            return
+        newly = add_watchlist_tickers(tradable_tickers)
+        if newly:
+            save_event(
+                "discovery",
+                f"Auto-added {len(newly)} ticker(s) to watchlist: {', '.join(newly)}",
+                meta={"tickers": newly},
+            )
+            _log.info("discovery: auto-added to watchlist: %s", newly)
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("discovery: auto-add failed: %s", exc)
+
+
 async def _maybe_run_discovery(sched: MonitorScheduler) -> None:
     """Run a discovery cycle if enabled and the interval has elapsed.
 
@@ -367,6 +529,15 @@ async def _maybe_run_discovery(sched: MonitorScheduler) -> None:
         sched.next_discovery = _next_grid_time(now, interval_min * 60).isoformat()
         _log.info("discovery: run %d complete — %d candidate(s)", run_id, len(candidates))
 
+        # Auto-add tradable high-score candidates to the watchlist (kept until
+        # manually removed). Gated by discovery_autoadd_enabled.
+        autoadd = (
+            get_setting("discovery_autoadd_enabled", "")
+            or ("true" if _cfg().discovery.autoadd_enabled else "false")
+        ) == "true"
+        if autoadd and candidates:
+            await asyncio.to_thread(_autoadd_tradable_candidates, candidates)
+
         # Auto-scan top-N through the full agent pipeline (no watchlist mutation).
         autoscan = get_setting("discovery_autoscan_enabled", "false") == "true"
         if autoscan and candidates:
@@ -413,19 +584,36 @@ class MonitorScheduler:
         self.running = True
         settings = get_settings()
         _log.info("started; interval=%sm", settings.scan_interval_minutes)
+        save_event("scheduler", f"Scheduler started (interval {settings.scan_interval_minutes}m)")
         try:
+            # Wait for the first grid slot so all scans fire at :00/:15/:30/:45
+            # (and discovery at :00 on the hour) rather than immediately at startup.
+            _init_interval = max(60, settings.scan_interval_minutes * 60)
+            _now = datetime.now(settings.market_hours.tzinfo)
+            _first_fire = _next_grid_time(_now, _init_interval)
+            self.next_run = _first_fire.isoformat()
+            _log.info("waiting for first grid slot: %s", self.next_run)
+            _init_sleep = max(1.0, (_first_fire - _now).total_seconds())
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=_init_sleep)
+            except asyncio.TimeoutError:
+                pass  # timeout is the normal path — stop-event not set, so proceed to scan loop
+
             while not self._stop.is_set():
                 if is_market_open():
                     tickers = get_effective_watchlist()
                     _log.info("market open — scanning %d tickers", len(tickers))
+                    save_event("scan", f"Scan started — {len(tickers)} tickers")
                     try:
                         results = await scan_watchlist(send_alerts=True)
                         now = datetime.now(settings.market_hours.tzinfo)
                         self.last_run = now.isoformat()
                         total = sum(len(r.get("actionable", [])) for r in results)
                         _log.info("scan complete — %d actionable signal(s)", total)
+                        save_event("scan", f"Scan complete — {total} actionable signal(s)")
                     except Exception as exc:  # pragma: no cover - defensive
                         _log.error("scan error: %s", exc)
+                        save_event("scan", f"Scan error: {exc}", level="error")
                     # Sync paper order statuses after each watchlist scan.
                     try:
                         await sync_paper_orders()
@@ -461,6 +649,7 @@ class MonitorScheduler:
         finally:
             self.running = False
             _log.info("stopped")
+            save_event("scheduler", "Scheduler stopped")
 
     async def _exit_loop(self) -> None:
         """Fast poller dedicated to fractional stop/target exits.

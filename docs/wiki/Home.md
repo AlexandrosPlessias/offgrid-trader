@@ -127,9 +127,13 @@ See [docs/screenshots/README.md](../screenshots/README.md) for full instructions
 | [Indicators](indicators.md) | RSI, MACD, EMA, Bollinger Bands, Stochastic, Volume ratio, Fundamentals, Balance Sheet, Macro — definitions and how they're used |
 | [Backtesting — Concepts](backtesting-explained.md) | What backtesting does, each metric in plain English, the confidence-floor sweep, and how to tune `CONFIDENCE_FLOOR` |
 | [Backtesting — Reference](backtesting.md) | Parameters, ATR bracket, LLM-mode quota, runs comparator, `/backtest*` API endpoints, schema |
-| [Paper Trading](paper-trading.md) | Alpaca paper account setup, bracket orders, live market data, `/paper/*` API endpoints |
+| [Paper Trading](paper-trading.md) | Alpaca paper account setup, bracket orders, live market data, autonomous trading loop, `/paper/*` API endpoints |
+| [Trending Discovery](trending-discovery.md) | Candidate scanning, scoring, watchlist auto-add, `/discovery/*` endpoints |
+| [Notifications](notifications.md) | ntfy + Telegram setup, order/blocked/system alerts, periodic reports |
+| [Reports](reports.md) | EoD & weekly LLM reports — the Reports page, tuning suggestions, model tag, `/reports*` endpoints |
 | [Glossary](glossary.md) | Alphabetical trading and macro terminology |
-| [Observability](observability.md) | OTEL span hierarchy, Aspire usage guide, log lines |
+| [Observability](observability.md) | OTEL span hierarchy, Aspire usage guide, log lines, in-app Activity feed |
+| [Cloudflare Cron](cloudflare-cron.md) | Workers cron that starts/stops the Fly app and sends EoD + weekly reports on schedule |
 
 ---
 

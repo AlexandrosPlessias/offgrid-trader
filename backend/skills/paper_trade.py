@@ -11,7 +11,9 @@ from __future__ import annotations
 import logging
 
 from backend.alpaca import AlpacaError, get_client
+from backend.config import get_settings as _cfg
 from backend.database import (
+    count_open_paper_positions,
     get_open_order_by_ticker_side,
     get_paper_order_by_signal,
     get_setting,
@@ -45,8 +47,19 @@ class PaperTradeSkill(Skill):
         notional = float(get_setting("paper_trade_position_size", "500") or 500)
 
         # Optional per-trade confidence override (independent from alert floor).
+        # env default lives in AutoTradeConfig; 0 means "no extra gate beyond floor".
         min_conf_raw = get_setting("paper_trade_min_confidence", "")
-        min_conf = float(min_conf_raw) if min_conf_raw else None
+        min_conf = (
+            float(min_conf_raw)
+            if min_conf_raw
+            else (_cfg().autotrade.paper_trade_min_confidence or None)
+        )
+
+        # Cap on concurrent open positions (setting overrides env default).
+        max_positions = int(
+            get_setting("paper_max_positions", "") or _cfg().autotrade.paper_max_positions
+        )
+        open_count = count_open_paper_positions()
 
         try:
             client = get_client()
@@ -55,8 +68,33 @@ class PaperTradeSkill(Skill):
             return SkillResult(success=False, error=str(exc))
 
         placed: list[str] = []
+        cap_notified = False
 
         for opp in ctx.actionable:
+            # Tradability gate annotated this — skip if a bracket can't be placed.
+            if opp.get("can_bracket") is False:
+                continue
+
+            if open_count >= max_positions:
+                if not cap_notified:
+                    from backend.alerts import send_order_blocked_notification
+
+                    send_order_blocked_notification(
+                        kind="order",
+                        ticker=opp["ticker"],
+                        amount=notional,
+                        reason="position_cap",
+                        detail=f"{open_count}/{max_positions} positions open",
+                    )
+                    cap_notified = True
+                _log.info(
+                    "paper_trade: position cap reached (%d/%d) — holding %s",
+                    open_count,
+                    max_positions,
+                    opp["ticker"],
+                )
+                continue
+
             if min_conf is not None and (opp.get("confidence") or 0) < min_conf:
                 _log.debug(
                     "paper_trade: skipping %s — confidence %.1f < min %.1f",
@@ -139,6 +177,7 @@ class PaperTradeSkill(Skill):
                     }
                 )
                 placed.append(alpaca_order_id or opp["ticker"])
+                open_count += 1  # count against the concurrent-position cap
                 _log.info(
                     "paper_trade: placed %s %s order id=%s",
                     side,
@@ -157,5 +196,15 @@ class PaperTradeSkill(Skill):
                 )
             except AlpacaError as exc:
                 _log.warning("paper_trade: order failed for %s: %s", opp["ticker"], exc)
+                from backend.alerts import send_order_blocked_notification
+
+                msg = str(exc).lower()
+                is_funds = "insufficient" in msg or "buying power" in msg
+                send_order_blocked_notification(
+                    kind="order",
+                    ticker=opp["ticker"],
+                    amount=notional,
+                    reason="insufficient_funds" if is_funds else "failed",
+                )
 
         return SkillResult(success=True, data={"orders_placed": placed})

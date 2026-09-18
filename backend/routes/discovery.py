@@ -49,6 +49,12 @@ class DiscoverySettingRequest(BaseModel):
     autoscan_top_n: int | None = Field(
         None, ge=1, le=20, description="Number of top candidates to auto-scan (1-20)"
     )
+    autoadd_enabled: bool | None = Field(
+        None, description="Auto-add high-score tradable candidates to the watchlist"
+    )
+    autoadd_top_n: int | None = Field(
+        None, ge=1, le=25, description="Max candidates auto-added to the watchlist per run (1-25)"
+    )
 
 
 _VALID_SOURCES = ("alpaca", "yfinance")
@@ -94,6 +100,12 @@ def _discovery_config_response() -> dict[str, Any]:
         ),
         "autoscan_enabled": get_setting("discovery_autoscan_enabled", "false") == "true",
         "autoscan_top_n": int(get_setting("discovery_autoscan_top_n", "") or cfg.autoscan_top_n),
+        "autoadd_enabled": (
+            get_setting("discovery_autoadd_enabled", "")
+            or ("true" if cfg.autoadd_enabled else "false")
+        )
+        == "true",
+        "autoadd_top_n": int(get_setting("discovery_autoadd_top_n", "") or cfg.autoadd_top_n),
     }
 
 
@@ -123,6 +135,13 @@ def save_discovery_settings(request: DiscoverySettingRequest) -> dict[str, Any]:
         )
     if request.autoscan_top_n is not None:
         set_setting("discovery_autoscan_top_n", str(request.autoscan_top_n))
+    if request.autoadd_enabled is not None:
+        set_setting(
+            "discovery_autoadd_enabled",
+            "true" if request.autoadd_enabled else "false",
+        )
+    if request.autoadd_top_n is not None:
+        set_setting("discovery_autoadd_top_n", str(request.autoadd_top_n))
     return _discovery_config_response()
 
 

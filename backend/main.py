@@ -95,7 +95,9 @@ def _setup_otel(app: FastAPI) -> None:
 # --------------------------------------------------------------------------- #
 # App + lifespan
 # --------------------------------------------------------------------------- #
-async def _fire_system_event(prefix: str) -> None:
+async def _fire_system_event(
+    prefix: str, *, tags: str | None = None, priority: str | None = None
+) -> None:
     """Fire a startup/shutdown notification via the existing alert channels.
 
     Runs the (sync) send off the event loop and never raises, so a slow or failing
@@ -108,7 +110,7 @@ async def _fire_system_event(prefix: str) -> None:
         from backend.alerts import send_system_event
 
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        await asyncio.to_thread(send_system_event, f"{prefix} — {ts}")
+        await asyncio.to_thread(send_system_event, f"{prefix} — {ts}", tags=tags, priority=priority)
     except Exception:  # noqa: BLE001,S110 - must never block startup/shutdown
         _log.debug("system event suppressed during lifecycle", exc_info=True)
 
@@ -124,6 +126,7 @@ async def lifespan(app: FastAPI):
     """
     init_db()
     reset_stale_discovery_runs()  # clean up 'running' rows orphaned by prior restarts
+    from backend.database import save_event
     from backend.notifications import register_channels
 
     register_channels()
@@ -132,15 +135,24 @@ async def lifespan(app: FastAPI):
     # is set in .env (fresh install default).
     db_sched = get_setting("scheduler_running", "")
     env_auto = get_settings().scheduler_auto_start
-    if db_sched == "true" or (db_sched == "" and env_auto):
+    auto_scan = db_sched == "true" or (db_sched == "" and env_auto)
+    if auto_scan:
         scheduler.start()
 
-    await _fire_system_event("🚀 MarketSage is live")
+    save_event(
+        "system",
+        f"App started — v{__version__}",
+        meta={"auto_scan": auto_scan, "version": __version__},
+    )
+    await _fire_system_event("🚀 MarketSage is live", tags="rocket", priority="low")
 
     try:
         yield
     finally:
-        await _fire_system_event("🛑 MarketSage is shutting down")
+        save_event("system", "App stopped")
+        await _fire_system_event(
+            "🛑 MarketSage is shutting down", tags="octagonal_sign", priority="low"
+        )
         await scheduler.stop()
 
 
