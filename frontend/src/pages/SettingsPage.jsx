@@ -12,6 +12,7 @@ const SETTINGS_GROUPS = [
   { label: 'Trading', icon: '📈', children: [
     { id: 'settings-paper',         icon: '📈', label: 'Order Trading' },
     { id: 'settings-frac',          icon: '🪙', label: 'Live / Fractional' },
+    { id: 'settings-autotrade',     icon: '🤖', label: 'Autonomous' },
   ]},
   { label: 'AI', icon: '🧠', children: [
     { id: 'settings-ai-provider',   icon: '🧠', label: 'AI Provider' },
@@ -55,6 +56,7 @@ function DiscoverySettingsSection() {
   const [intervalMinutes,  setIntervalMinutes]  = useState(60)
   const [autoscanEnabled,  setAutoscanEnabled]  = useState(false)
   const [autoscanTopN,     setAutoscanTopN]     = useState(3)
+  const [autoaddEnabled,   setAutoaddEnabled]   = useState(false)
 
   useEffect(() => {
     fetch(`${API}/settings/discovery`, { headers: getAuthHeaders() })
@@ -68,6 +70,7 @@ function DiscoverySettingsSection() {
         setIntervalMinutes(d.interval_minutes ?? 60)
         setAutoscanEnabled(d.autoscan_enabled ?? false)
         setAutoscanTopN(d.autoscan_top_n ?? 3)
+        setAutoaddEnabled(d.autoadd_enabled ?? false)
       })
       .catch(() => setFetchErr(true))
   }, [])
@@ -86,6 +89,7 @@ function DiscoverySettingsSection() {
           interval_minutes: intervalMinutes,
           autoscan_enabled: autoscanEnabled,
           autoscan_top_n: autoscanTopN,
+          autoadd_enabled: autoaddEnabled,
         }),
       })
       if (!r.ok) throw new Error(await r.text())
@@ -228,6 +232,16 @@ function DiscoverySettingsSection() {
         )}
         <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
           {autoscanEnabled ? `Run full agent pipeline on top ${autoscanTopN} candidates` : 'Disabled'}
+        </span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Auto-add to watchlist</label>
+        <input type="checkbox" checked={autoaddEnabled} onChange={e => setAutoaddEnabled(e.target.checked)} />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          {autoaddEnabled
+            ? 'Tradable high-score candidates are added to the watchlist (kept until removed)'
+            : 'Disabled'}
         </span>
       </div>
 
@@ -938,6 +952,132 @@ function NotificationsSection() {
         </div>
       )}
       </>)}
+    </SettingSection>
+  )
+}
+
+function AutonomousTradingSection() {
+  const [fetchErr,   setFetchErr]   = useState(false)
+  const [saveStatus, setSaveStatus] = useState(null)
+  const [saveErr,    setSaveErr]    = useState('')
+
+  const [confidenceFloor,   setConfidenceFloor]   = useState(75)
+  const [fracMinConf,       setFracMinConf]       = useState(85)
+  const [paperMinConf,      setPaperMinConf]      = useState(0)
+  const [maxPositions,      setMaxPositions]      = useState(5)
+  const [dropMode,          setDropMode]          = useState('untradable')
+  const [fracAllowLive,     setFracAllowLive]     = useState(false)
+
+  useEffect(() => {
+    fetch(`${API}/settings`, { headers: getAuthHeaders() })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => {
+        setConfidenceFloor(d.confidence_floor ?? 75)
+        setFracMinConf(d.frac_min_confidence ?? 85)
+        setPaperMinConf(d.paper_trade_min_confidence ?? 0)
+        setMaxPositions(d.paper_max_positions ?? 5)
+        setDropMode(d.signal_drop_mode ?? 'untradable')
+        setFracAllowLive(d.frac_autotrade_allow_live ?? false)
+      })
+      .catch(() => setFetchErr(true))
+  }, [])
+
+  const save = async () => {
+    setSaveStatus('saving'); setSaveErr('')
+    try {
+      const r = await fetch(`${API}/settings/autotrade`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({
+          confidence_floor: Number(confidenceFloor),
+          frac_min_confidence: Number(fracMinConf),
+          paper_trade_min_confidence: Number(paperMinConf),
+          paper_max_positions: Number(maxPositions),
+          signal_drop_mode: dropMode,
+          frac_autotrade_allow_live: fracAllowLive,
+        }),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      setSaveStatus('ok')
+      setTimeout(() => setSaveStatus(null), 3000)
+    } catch (e) {
+      setSaveErr(e.message || 'Save failed')
+      setSaveStatus('error')
+      setTimeout(() => setSaveStatus(null), 4000)
+    }
+  }
+
+  return (
+    <SettingSection id="settings-autotrade" title="Autonomous Trading" icon="🤖">
+      <p className="text-dim" style={{ fontSize: 13, marginBottom: 16 }}>
+        Tune how signals turn into orders automatically. Master on/off switches live under
+        <strong> Order Trading</strong> and <strong>Live / Fractional</strong>; these are the shared
+        gates and safety rails. Every value is also settable via environment variables.
+      </p>
+      {fetchErr && <p className="settings-err">Could not load settings.</p>}
+
+      <div className="settings-row">
+        <label className="settings-label">Signal / bracket confidence floor</label>
+        <input className="settings-input" type="number" min={0} max={100}
+               value={confidenceFloor} onChange={e => setConfidenceFloor(e.target.value)}
+               style={{ width: 70 }} />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          Minimum % to create a signal and place a bracket order
+        </span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Fractional confidence floor</label>
+        <input className="settings-input" type="number" min={0} max={100}
+               value={fracMinConf} onChange={e => setFracMinConf(e.target.value)}
+               style={{ width: 70 }} />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          Stricter % required for a fractional buy (frac commits notional)
+        </span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Bracket-only floor (optional)</label>
+        <input className="settings-input" type="number" min={0} max={100}
+               value={paperMinConf} onChange={e => setPaperMinConf(e.target.value)}
+               style={{ width: 70 }} />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          0 = fall back to the signal floor above
+        </span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Max concurrent bracket positions</label>
+        <input className="settings-input" type="number" min={0} max={100}
+               value={maxPositions} onChange={e => setMaxPositions(e.target.value)}
+               style={{ width: 70 }} />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          New bracket orders are held once this many positions are open
+        </span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Signal drop rule</label>
+        <select className="settings-select" value={dropMode}
+                onChange={e => setDropMode(e.target.value)} style={{ maxWidth: 260 }}>
+          <option value="untradable">Drop only untradable (recommended)</option>
+          <option value="strict">Strict — also drop when out of funds/capacity</option>
+          <option value="never">Never drop (keep full audit trail)</option>
+        </select>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Allow live auto-frac</label>
+        <input type="checkbox" checked={fracAllowLive}
+               onChange={e => setFracAllowLive(e.target.checked)} />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          {fracAllowLive
+            ? '⚠️ Autonomous fractional buys will use REAL money when the frac profile is live'
+            : 'Autonomous frac buys are paper-only (safe default)'}
+        </span>
+      </div>
+
+      <SaveRow status={saveStatus} errMsg={saveErr} onSave={save} />
     </SettingSection>
   )
 }
@@ -1761,6 +1901,9 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
 
       {/* ── Live / Fractional Trading ─────────────────────────────────────── */}
       <FracSettingsSection />
+
+      {/* ── Autonomous Trading ────────────────────────────────────────────── */}
+      <AutonomousTradingSection />
 
       {/* ── AI Provider ───────────────────────────────────────────────────── */}
       <SettingSection id="settings-ai-provider" title="AI Provider" icon="🧠">

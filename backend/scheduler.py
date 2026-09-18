@@ -24,6 +24,7 @@ from typing import Any
 
 from .config import MarketHours, get_settings
 from .database import (
+    add_watchlist_tickers,
     get_effective_watchlist,
     get_setting,
     init_db,
@@ -376,6 +377,47 @@ async def monitor_frac_positions() -> None:
 # --------------------------------------------------------------------------- #
 # Discovery cycle helper
 # --------------------------------------------------------------------------- #
+def _autoadd_tradable_candidates(candidates: list[dict[str, Any]]) -> None:
+    """Add discovery candidates that can place a bracket or frac order to the watchlist.
+
+    A candidate is useful only if it is tradable and can support at least one
+    action (long bracket, shortable short, or fractionable long). Candidates
+    that can do neither are skipped — adding them would create dead signals.
+    Runs in a worker thread; never raises.
+    """
+    try:
+        from .alpaca import AlpacaError, get_client
+        from .routes._models import _clean_ticker
+
+        client = get_client()
+        tradable_tickers: list[str] = []
+        for cand in candidates:
+            ticker = (cand.get("ticker") or "").strip().upper()
+            if not ticker:
+                continue
+            try:
+                asset = client._get(f"/v2/assets/{_clean_ticker(ticker)}")
+            except AlpacaError:
+                continue  # unknown on Alpaca — skip (can't confirm it's useful)
+            # A tradable asset can always place a long bracket buy, so tradable
+            # alone means the ticker can yield at least one actionable signal.
+            if asset.get("tradable", False):
+                tradable_tickers.append(ticker)
+
+        if not tradable_tickers:
+            return
+        newly = add_watchlist_tickers(tradable_tickers)
+        if newly:
+            save_event(
+                "discovery",
+                f"Auto-added {len(newly)} ticker(s) to watchlist: {', '.join(newly)}",
+                meta={"tickers": newly},
+            )
+            _log.info("discovery: auto-added to watchlist: %s", newly)
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("discovery: auto-add failed: %s", exc)
+
+
 async def _maybe_run_discovery(sched: MonitorScheduler) -> None:
     """Run a discovery cycle if enabled and the interval has elapsed.
 
@@ -425,6 +467,15 @@ async def _maybe_run_discovery(sched: MonitorScheduler) -> None:
         sched.last_discovery = now.isoformat()
         sched.next_discovery = _next_grid_time(now, interval_min * 60).isoformat()
         _log.info("discovery: run %d complete — %d candidate(s)", run_id, len(candidates))
+
+        # Auto-add tradable high-score candidates to the watchlist (kept until
+        # manually removed). Gated by discovery_autoadd_enabled.
+        autoadd = (
+            get_setting("discovery_autoadd_enabled", "")
+            or ("true" if _cfg().discovery.autoadd_enabled else "false")
+        ) == "true"
+        if autoadd and candidates:
+            await asyncio.to_thread(_autoadd_tradable_candidates, candidates)
 
         # Auto-scan top-N through the full agent pipeline (no watchlist mutation).
         autoscan = get_setting("discovery_autoscan_enabled", "false") == "true"
