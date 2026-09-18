@@ -211,7 +211,10 @@ async def sync_paper_orders() -> None:
                     exit_label = "position closed"
                 from .alerts import send_order_notification  # local import
 
-                send_order_notification(
+                # Offload to a thread — the notification does blocking network
+                # I/O and must not stall the async poller.
+                await asyncio.to_thread(
+                    send_order_notification,
                     kind="order",
                     ticker=db_order.get("ticker", "?"),
                     side=side,
@@ -282,7 +285,8 @@ async def monitor_frac_positions() -> None:
                 _frac_mode = get_setting("frac_mode", "paper")
                 _entry = float(row.get("entry_price") or 0)
                 _qty = float(row.get("qty") or 0)
-                send_order_notification(
+                await asyncio.to_thread(
+                    send_order_notification,
                     kind="fractional",
                     ticker=ticker,
                     side="sell",
@@ -354,7 +358,8 @@ async def monitor_frac_positions() -> None:
             "eod": "end-of-day close",
         }
         pnl_sign = "+" if realized >= 0 else ""
-        send_order_notification(
+        await asyncio.to_thread(
+            send_order_notification,
             kind="fractional",
             ticker=ticker,
             side="sell",
