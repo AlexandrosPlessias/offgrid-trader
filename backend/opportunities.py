@@ -479,11 +479,18 @@ def detect_opportunities(
     macro = market_data.get("macro", {}) or {}
 
     # Build a copy of thresholds with the floor override applied for the AI check.
+    # Precedence: explicit ai_floor_override (backtest) → live DB setting → config.
     ai_thresholds = thresholds
     if ai_floor_override is not None:
         from dataclasses import replace as _dc_replace
 
         ai_thresholds = _dc_replace(thresholds, confidence_floor=float(ai_floor_override))
+    else:
+        from dataclasses import replace as _dc_replace
+
+        from .database import get_confidence_floor
+
+        ai_thresholds = _dc_replace(thresholds, confidence_floor=get_confidence_floor())
 
     candidates: list[dict[str, Any]] = []
     ai_cands: list[dict[str, Any]] = []
@@ -622,7 +629,9 @@ def filter_by_confidence(
     """Return only opportunities at or above the confidence *floor*."""
 
     if floor is None:
-        floor = get_settings().thresholds.confidence_floor
+        from .database import get_confidence_floor
+
+        floor = get_confidence_floor()
     return [o for o in opportunities if o.get("confidence", 0) >= floor]
 
 

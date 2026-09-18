@@ -1337,6 +1337,51 @@ def get_effective_watchlist(db_path: str | None = None) -> list[str]:
     return result
 
 
+def get_confidence_floor(db_path: str | None = None) -> float:
+    """Resolve the effective signal confidence floor: DB setting → config default.
+
+    Lets the Settings page tune the floor live while the env var
+    ``CONFIDENCE_FLOOR`` still provides the boot default.
+    """
+    from .config import get_settings as _cfg
+
+    raw = get_setting("confidence_floor", "", db_path)
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return float(_cfg().thresholds.confidence_floor)
+
+
+def add_watchlist_tickers(tickers: list[str], db_path: str | None = None) -> list[str]:
+    """Add tickers to the watchlist overrides; return the ones newly added.
+
+    Dedups against the config base and existing additions, and un-removes any
+    that were previously removed. Shared by the manual bulk-add route and the
+    discovery auto-add path so both apply identical semantics.
+    """
+    from .config import get_settings as _cfg
+
+    base = _cfg().watchlist
+    added: list[str] = json.loads(get_setting("watchlist_added", "[]", db_path))
+    removed: list[str] = json.loads(get_setting("watchlist_removed", "[]", db_path))
+    newly: list[str] = []
+    for raw in tickers:
+        t = (raw or "").strip().upper()
+        if not t:
+            continue
+        if t in removed:
+            removed.remove(t)
+        if t not in base and t not in added:
+            added.append(t)
+            newly.append(t)
+    if newly or tickers:
+        set_setting("watchlist_added", json.dumps(added), db_path)
+        set_setting("watchlist_removed", json.dumps(removed), db_path)
+    return newly
+
+
 # --------------------------------------------------------------------------- #
 # Ticker memory — per-ticker agent context (one row per ticker, UPSERT)
 # --------------------------------------------------------------------------- #
@@ -1819,6 +1864,25 @@ def get_open_order_by_ticker_side(
             (ticker, side, *terminal),
         ).fetchone()
     return dict(row) if row else None
+
+
+def count_open_paper_positions(db_path: str | None = None) -> int:
+    """Count open bracket positions — orders not yet closed or terminated.
+
+    An open position is one whose ``realized_pnl`` is still NULL and whose
+    status is not a dead-end (cancelled/rejected/expired). Filled-and-holding
+    orders count as open positions; only closed-out or killed orders don't.
+    Used by PaperTradeSkill to enforce ``paper_max_positions``.
+    """
+    dead = ("cancelled", "canceled", "expired", "rejected", "done")
+    placeholders = ",".join("?" * len(dead))
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM paper_orders WHERE realized_pnl IS NULL"  # noqa: S608
+            f" AND status NOT IN ({placeholders})",
+            dead,
+        ).fetchone()
+    return int(row[0]) if row else 0
 
 
 def get_paper_order_by_alpaca_id(alpaca_order_id: str, db_path: str | None = None) -> dict | None:

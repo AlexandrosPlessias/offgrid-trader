@@ -40,6 +40,7 @@ from backend.skills.frac_trade import FracTradeSkill
 from backend.skills.opportunity_detect import OpportunityDetectSkill
 from backend.skills.paper_trade import PaperTradeSkill
 from backend.skills.persist import PersistSkill
+from backend.skills.tradability_gate import TradabilityGateSkill
 
 _log = logging.getLogger(__name__)
 _tracer = _otel_trace.get_tracer("marketsage.agent")
@@ -83,6 +84,7 @@ DEFAULT_SKILL_CLASSES: list[type[Skill]] = [
     FetchDataSkill,
     AIAnalysisSkill,
     OpportunityDetectSkill,
+    TradabilityGateSkill,  # drop signals with no bracket/frac path before persisting
     PersistSkill,
     PaperTradeSkill,  # after persist (needs saved_signal_ids), before alerts
     FracTradeSkill,  # fractional buys on the 2nd (frac) Alpaca profile

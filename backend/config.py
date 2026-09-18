@@ -216,7 +216,7 @@ class Thresholds:
         default_factory=lambda: _env_float("SIGNIFICANT_MOVE_PCT", 2.0)
     )
     # Minimum AI/opportunity confidence (0-100) required to store/alert.
-    confidence_floor: float = field(default_factory=lambda: _env_float("CONFIDENCE_FLOOR", 65.0))
+    confidence_floor: float = field(default_factory=lambda: _env_float("CONFIDENCE_FLOOR", 75.0))
 
 
 @dataclass(frozen=True)
@@ -306,7 +306,7 @@ class DiscoveryConfig:
     # Max candidates to score per run (bounds yfinance indicator calls)
     max_candidates: int = field(default_factory=lambda: _env_int("DISCOVERY_MAX_CANDIDATES", 25))
     # Minimum score (0-100) a candidate must reach to appear in the result
-    min_score: int = field(default_factory=lambda: _env_int("DISCOVERY_MIN_SCORE", 60))
+    min_score: int = field(default_factory=lambda: _env_int("DISCOVERY_MIN_SCORE", 75))
     # Minutes between automatic discovery runs when the scheduler is active
     interval_minutes: int = field(
         default_factory=lambda: _env_int("DISCOVERY_INTERVAL_MINUTES", 60)
@@ -316,6 +316,47 @@ class DiscoveryConfig:
         default_factory=lambda: _env_str("DISCOVERY_AUTOSCAN_ENABLED", "false").lower() == "true"
     )
     autoscan_top_n: int = field(default_factory=lambda: _env_int("DISCOVERY_AUTOSCAN_TOP_N", 3))
+    # When true, auto-add high-score *tradable* candidates to the watchlist
+    # (kept until manually removed — no auto-prune).
+    autoadd_enabled: bool = field(
+        default_factory=lambda: _env_str("DISCOVERY_AUTOADD_ENABLED", "false").lower() == "true"
+    )
+
+
+@dataclass(frozen=True)
+class AutoTradeConfig:
+    """Autonomous paper-trading loop settings.
+
+    Governs how the scan pipeline turns signals into orders without user taps.
+    Env-var values are boot-time defaults; the Settings page stores overrides
+    in the DB (keys: paper_max_positions, signal_drop_mode,
+    frac_autotrade_allow_live, frac_min_confidence, paper_trade_min_confidence)
+    read at call time via ``backend.database.get_setting``.
+    """
+
+    # Max concurrent open bracket positions before new bracket orders are held.
+    paper_max_positions: int = field(
+        default_factory=lambda: _env_int("PAPER_MAX_POSITIONS", 5)
+    )
+    # How the tradability gate treats un-actionable signals:
+    #   "untradable" — drop only permanently-unactionable signals (default)
+    #   "strict"     — also drop when transiently blocked (no funds/capacity)
+    #   "never"      — annotate only, never drop (full audit trail)
+    signal_drop_mode: str = field(
+        default_factory=lambda: _env_str("SIGNAL_DROP_MODE", "untradable")
+    )
+    # Fractional confidence floor (stricter than the signal/bracket floor).
+    frac_min_confidence: float = field(
+        default_factory=lambda: _env_float("FRAC_MIN_CONFIDENCE", 85.0)
+    )
+    # Optional bracket per-trade floor; 0 means "fall back to confidence_floor".
+    paper_trade_min_confidence: float = field(
+        default_factory=lambda: _env_float("PAPER_TRADE_MIN_CONFIDENCE", 0.0)
+    )
+    # Safety rail: autonomous frac buys are paper-only unless this is flipped.
+    frac_autotrade_allow_live: bool = field(
+        default_factory=lambda: _env_str("FRAC_AUTOTRADE_ALLOW_LIVE", "false").lower() == "true"
+    )
 
 
 @dataclass(frozen=True)
@@ -457,6 +498,7 @@ class Settings:
     alpaca: AlpacaConfig = field(default_factory=AlpacaConfig)
     frac: FracConfig = field(default_factory=FracConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
+    autotrade: AutoTradeConfig = field(default_factory=AutoTradeConfig)
 
 
 # Singleton-style accessor -------------------------------------------------- #

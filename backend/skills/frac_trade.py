@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 
 from backend.alpaca import AlpacaError, frac_mode, get_frac_client
+from backend.config import get_settings as _cfg
 from backend.database import (
     get_open_frac_notional,
     get_open_frac_position_by_ticker,
@@ -49,11 +50,25 @@ class FracTradeSkill(Skill):
         if not ctx.actionable:
             return SkillResult(success=True, data={"orders_placed": []})
 
+        mode = frac_mode()
+
+        # Safety rail: autonomous frac buys are paper-only unless explicitly allowed.
+        allow_live = (
+            get_setting("frac_autotrade_allow_live", "")
+            or ("true" if _cfg().autotrade.frac_autotrade_allow_live else "false")
+        ) == "true"
+        if mode == "live" and not allow_live:
+            _log.info("frac_trade: live mode + auto-live disabled — skipping autonomous buys")
+            return SkillResult(success=True, data={"skipped": "live-mode-blocked"})
+
         size = float(get_setting("frac_position_size", "15") or 15)
         budget = float(get_setting("frac_budget", "100") or 100)
 
+        # env default lives in AutoTradeConfig (85); setting overrides at call time.
         min_conf_raw = get_setting("frac_min_confidence", "")
-        min_conf = float(min_conf_raw) if min_conf_raw else None
+        min_conf = (
+            float(min_conf_raw) if min_conf_raw else (_cfg().autotrade.frac_min_confidence or None)
+        )
 
         try:
             client = get_frac_client()
@@ -61,13 +76,17 @@ class FracTradeSkill(Skill):
             _log.warning("frac_trade: could not init frac Alpaca client: %s", exc)
             return SkillResult(success=False, error=str(exc))
 
-        mode = frac_mode()
         deployed = get_open_frac_notional()
         placed: list[str] = []
+        budget_notified = False
 
         for opp in ctx.actionable:
             # Long-only — Alpaca cannot short fractional shares.
             if opp.get("type") != "long":
+                continue
+
+            # Tradability gate annotated this — skip if a frac buy can't be placed.
+            if opp.get("can_frac") is False:
                 continue
 
             if min_conf is not None and (opp.get("confidence") or 0) < min_conf:
@@ -87,6 +106,18 @@ class FracTradeSkill(Skill):
                     budget,
                     ticker,
                 )
+                if not budget_notified:
+                    from backend.alerts import send_order_blocked_notification
+
+                    send_order_blocked_notification(
+                        kind="fractional",
+                        ticker=ticker,
+                        amount=size,
+                        reason="budget_cap",
+                        mode=mode,
+                        detail=f"${deployed:.2f}/${budget:.2f} deployed",
+                    )
+                    budget_notified = True
                 continue
 
             stop = opp.get("stop")
@@ -137,5 +168,16 @@ class FracTradeSkill(Skill):
                 )
             except AlpacaError as exc:
                 _log.warning("frac_trade: order failed for %s: %s", ticker, exc)
+                from backend.alerts import send_order_blocked_notification
+
+                msg = str(exc).lower()
+                is_funds = "insufficient" in msg or "buying power" in msg
+                send_order_blocked_notification(
+                    kind="fractional",
+                    ticker=ticker,
+                    amount=size,
+                    reason="insufficient_funds" if is_funds else "failed",
+                    mode=mode,
+                )
 
         return SkillResult(success=True, data={"orders_placed": placed})
