@@ -60,7 +60,7 @@ function resolveAction(cron, offset) {
   // In EST they fire 1 h early but still after market close.
   if (cron === "5 21 * * 1-5")  return "eod";
   if (cron === "30 21 * * 1-5") return "stop";
-  if (cron === "35 21 * * 5")   return "weekly";
+  if (cron === "25 21 * * 5")   return "weekly";
   return "noop";
 }
 
