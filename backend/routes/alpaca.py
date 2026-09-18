@@ -210,7 +210,8 @@ def place_paper_order_manual(req: ManualOrderRequest) -> dict[str, Any]:
             except HTTPException:
                 raise  # re-raise our own 400 unchanged
             except AlpacaError:
-                pass  # asset-check failure is non-fatal; let the order attempt surface the real error
+                # asset-check failure is non-fatal — let the order attempt surface the real error
+                pass
 
         result = client.place_bracket_order(
             ticker=req.ticker,

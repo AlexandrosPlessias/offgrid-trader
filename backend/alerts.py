@@ -263,8 +263,12 @@ def send_alert(
     ``{"sent": True, "channels": ["telegram", "ntfy"], "skipped": False}``.
     """
 
-    settings = get_settings()
-    floor = settings.thresholds.confidence_floor if min_confidence is None else min_confidence
+    if min_confidence is None:
+        from .database import get_confidence_floor
+
+        floor = get_confidence_floor()
+    else:
+        floor = min_confidence
     confidence = float(opportunity.get("confidence") or 0.0)
 
     if confidence < floor:
@@ -418,6 +422,49 @@ def send_order_notification(
         send_system_event(msg, tags=tags, priority=priority)
     except Exception as exc:  # pragma: no cover - defensive
         _log.warning("order notification failed: %s", exc)
+
+
+def send_order_blocked_notification(
+    *,
+    kind: str,  # "order" (bracket) | "fractional"
+    ticker: str,
+    amount: float,
+    reason: str,  # "insufficient_funds" | "position_cap" | "budget_cap" | "failed"
+    mode: str = "paper",
+    detail: str = "",
+) -> None:
+    """Notify that a wanted trade was NOT placed (blocked by money/capacity or failed).
+
+    Complements :func:`send_order_notification` (which fires on success). Gated by
+    the same ``order_notifications_enabled`` setting; always logs an event. Never
+    raises — a failed notification must never break the pipeline.
+    """
+    try:
+        from .database import get_setting, save_event
+
+        label = "Fractional buy" if kind == "fractional" else "Order"
+        blurbs = {
+            "insufficient_funds": "insufficient buying power — top up your wallet",
+            "position_cap": "position cap reached — close a position or raise the cap",
+            "budget_cap": "fractional budget reached — raise the budget or wait for exits",
+            "failed": "placement failed",
+        }
+        blurb = blurbs.get(reason, reason)
+
+        save_event(
+            "order",
+            f"{label} blocked — {ticker} ${amount:.2f} ({reason})",
+            level="warning",
+            meta={"ticker": ticker, "amount": amount, "kind": kind, "reason": reason, "mode": mode},
+        )
+        if get_setting("order_notifications_enabled", "true") != "true":
+            return
+        msg = f"⚠️ Would buy {ticker} · ${amount:.2f} — {blurb}"
+        if detail:
+            msg += f"\n{detail}"
+        send_system_event(msg, tags="warning", priority="default")
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("order blocked notification failed: %s", exc)
 
 
 def send_system_event(

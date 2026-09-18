@@ -388,6 +388,73 @@ P&L).
 
 ---
 
+## Autonomous trading
+
+By default the scan pipeline is **hands-off**: when a signal fires it can place a
+paper bracket order and/or a fractional buy automatically — no phone tap needed.
+This is controlled by the **Settings → Autonomous** panel plus the master switches
+on the **Order Trading** and **Live / Fractional** panels.
+
+### The flow
+
+```
+Discovery (hourly)  ──▶  optional auto-add tradable candidates to the watchlist
+        │
+Scan (every N min)  ──▶  analyse watchlist  ──▶  signal ≥ confidence floor
+        │
+Tradability gate    ──▶  can this signal place ANY order?
+        │                   • no  → drop it (a useless signal is never saved)
+        │                   • yes → keep, annotated with can_bracket / can_frac
+        ▼
+PaperTradeSkill     ──▶  place bracket order (if can_bracket, within position cap)
+FracTradeSkill      ──▶  place fractional buy (if can_frac, long-only, within budget)
+        ▼
+Notification        ──▶  ✅ placed  |  ⚠️ blocked (top up / cap)  |  ✗ failed
+```
+
+### The tradability gate
+
+Before a signal is saved, the pipeline checks the Alpaca asset:
+
+- `can_bracket` = tradable **and** (long, or short **and** shortable)
+- `can_frac` = tradable **and** fractionable **and** long
+
+A signal that can do **neither** is *useless* and is dropped so it never clutters
+the feed. The behaviour is set by **Signal drop rule**:
+
+| Mode | Meaning |
+|---|---|
+| `untradable` (default) | Drop only permanently-unactionable signals. Transient blocks (no funds / cap) keep the signal and send a "top up your wallet" notification. |
+| `strict` | Also drop when transiently blocked — no "top up" notice. |
+| `never` | Never drop; keep every signal for the audit trail. |
+
+### Settings (all also settable via env vars)
+
+| Setting | Env var | Default | Purpose |
+|---|---|---|---|
+| Paper auto-trade | `PAPER_TRADING_ENABLED` | `true` | Master switch for auto bracket orders |
+| Frac auto-trade | `FRAC_TRADING_ENABLED` | `false` | Master switch for auto fractional buys |
+| Signal / bracket floor | `CONFIDENCE_FLOOR` | `75` | Min confidence to create a signal / bracket |
+| Fractional floor | `FRAC_MIN_CONFIDENCE` | `85` | Stricter floor for fractional buys |
+| Bracket-only floor | `PAPER_TRADE_MIN_CONFIDENCE` | `0` | Optional; 0 = use the signal floor |
+| Max bracket positions | `PAPER_MAX_POSITIONS` | `5` | Hold new bracket orders past this many open positions |
+| Signal drop rule | `SIGNAL_DROP_MODE` | `untradable` | `untradable` \| `strict` \| `never` |
+| Allow live auto-frac | `FRAC_AUTOTRADE_ALLOW_LIVE` | `false` | Safety rail — see below |
+| Discovery auto-add | `DISCOVERY_AUTOADD_ENABLED` | `false` | Auto-add tradable high-score candidates to the watchlist |
+
+The env var is the boot default; a value saved from Settings overrides it live at
+call time (no restart).
+
+### Paper-only safety rail
+
+Autonomous fractional buys are **paper-only** by default. Even with
+`FRAC_TRADING_ENABLED=true`, if the fractional profile points at a **live** Alpaca
+host the auto-buy is **hard-blocked** unless you explicitly set
+`FRAC_AUTOTRADE_ALLOW_LIVE=true`. Manual tap-to-buy (with its own live confirmation)
+is unaffected. This prevents the loop from ever spending real money by accident.
+
+---
+
 ## Limitations
 
 | Item | Detail |

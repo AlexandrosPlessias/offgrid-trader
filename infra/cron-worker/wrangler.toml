@@ -24,7 +24,7 @@ crons = [
   "30 13 * * 1-5",  # start — 8:30 AM ET (EST)
   "5 21 * * 1-5",   # EoD report — 5:05 PM ET (EDT) / 4:05 PM ET (EST)
   "30 21 * * 1-5",  # stop — 5:30 PM ET (EDT) / 4:30 PM ET (EST)
-  "35 21 * * 5",    # weekly LLM — 5:35 PM ET Fri (EDT) / 4:35 PM ET Fri (EST)
+  "25 21 * * 5",    # weekly LLM — 5:25 PM ET Fri (EDT) / 4:25 PM ET Fri (EST) — before the 21:30 stop
 ]
 
 # ── Observability (free — logs + traces stored 3 days in Cloudflare) ──────────

@@ -302,12 +302,19 @@ class AlpacaClient:
         )
         return self._post("/v2/orders", body)
 
-    def get_orders(self, status: str = "all", limit: int = 50) -> list[dict[str, Any]]:
-        """Return recent orders from Alpaca (most recent first)."""
-        return self._get(
-            "/v2/orders",
-            params={"status": status, "limit": limit, "direction": "desc"},
-        )
+    def get_orders(
+        self, status: str = "all", limit: int = 50, nested: bool = False
+    ) -> list[dict[str, Any]]:
+        """Return recent orders from Alpaca (most recent first).
+
+        ``nested=True`` rolls each bracket's stop/take-profit legs into the
+        parent order's ``legs`` array (and omits them as top-level rows) so
+        callers can reconcile a bracket's exit fill against its entry.
+        """
+        params: dict[str, Any] = {"status": status, "limit": limit, "direction": "desc"}
+        if nested:
+            params["nested"] = "true"
+        return self._get("/v2/orders", params=params)
 
     def get_positions(self) -> list[dict[str, Any]]:
         """Return all open positions."""

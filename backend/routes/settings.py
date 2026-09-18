@@ -60,6 +60,18 @@ class SignalScanLlmRequest(BaseModel):
     enabled: bool
 
 
+class AutoTradeSettingRequest(BaseModel):
+    """Autonomous-trading knobs — all optional; only provided fields are written."""
+
+    confidence_floor: float | None = Field(None, ge=0, le=100)
+    paper_max_positions: int | None = Field(None, ge=0, le=100)
+    signal_drop_mode: str | None = Field(None, description="untradable | strict | never")
+    frac_min_confidence: float | None = Field(None, ge=0, le=100)
+    paper_trade_min_confidence: float | None = Field(None, ge=0, le=100)
+    frac_autotrade_allow_live: bool | None = None
+    discovery_autoadd_enabled: bool | None = None
+
+
 @router.post("/settings/alerts")
 def set_alerts(request: AlertsSettingRequest) -> dict[str, Any]:
     set_setting("alerts_enabled", "true" if request.enabled else "false")
@@ -85,6 +97,45 @@ def set_scan_interval(request: ScanIntervalRequest) -> dict[str, Any]:
     """Update the scan interval (persisted to DB; takes effect on next loop cycle)."""
     set_setting("scan_interval_minutes", str(request.minutes))
     return scheduler.status()
+
+
+@router.post("/settings/autotrade")
+def set_autotrade(request: AutoTradeSettingRequest) -> dict[str, Any]:
+    """Persist autonomous-trading knobs. Only provided fields are written.
+
+    Every value is a live DB override read by the scan pipeline at call time;
+    env vars still provide the boot defaults.
+    """
+    if request.signal_drop_mode is not None and request.signal_drop_mode not in (
+        "untradable",
+        "strict",
+        "never",
+    ):
+        raise HTTPException(
+            status_code=422, detail="signal_drop_mode must be untradable|strict|never"
+        )
+
+    if request.confidence_floor is not None:
+        set_setting("confidence_floor", str(request.confidence_floor))
+    if request.paper_max_positions is not None:
+        set_setting("paper_max_positions", str(request.paper_max_positions))
+    if request.signal_drop_mode is not None:
+        set_setting("signal_drop_mode", request.signal_drop_mode)
+    if request.frac_min_confidence is not None:
+        set_setting("frac_min_confidence", str(request.frac_min_confidence))
+    if request.paper_trade_min_confidence is not None:
+        set_setting("paper_trade_min_confidence", str(request.paper_trade_min_confidence))
+    if request.frac_autotrade_allow_live is not None:
+        set_setting(
+            "frac_autotrade_allow_live",
+            "true" if request.frac_autotrade_allow_live else "false",
+        )
+    if request.discovery_autoadd_enabled is not None:
+        set_setting(
+            "discovery_autoadd_enabled",
+            "true" if request.discovery_autoadd_enabled else "false",
+        )
+    return {"saved": True}
 
 
 @router.post("/settings/signal-scan-llm")
@@ -205,6 +256,29 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
         "frac_position_size_env": cfg.frac.position_size,
         "frac_budget_env": cfg.frac.budget,
         "frac_poll_seconds_env": cfg.frac.poll_seconds,
+        # Autonomous trading loop
+        "confidence_floor": float(
+            get_setting("confidence_floor", "") or cfg.thresholds.confidence_floor
+        ),
+        "confidence_floor_env": cfg.thresholds.confidence_floor,
+        "paper_max_positions": int(
+            get_setting("paper_max_positions", "") or cfg.autotrade.paper_max_positions
+        ),
+        "paper_max_positions_env": cfg.autotrade.paper_max_positions,
+        "signal_drop_mode": (get_setting("signal_drop_mode", "") or cfg.autotrade.signal_drop_mode),
+        "signal_drop_mode_env": cfg.autotrade.signal_drop_mode,
+        "frac_autotrade_allow_live": (
+            get_setting("frac_autotrade_allow_live", "")
+            or ("true" if cfg.autotrade.frac_autotrade_allow_live else "false")
+        )
+        == "true",
+        "frac_autotrade_allow_live_env": cfg.autotrade.frac_autotrade_allow_live,
+        "discovery_autoadd_enabled": (
+            get_setting("discovery_autoadd_enabled", "")
+            or ("true" if cfg.discovery.autoadd_enabled else "false")
+        )
+        == "true",
+        "discovery_autoadd_enabled_env": cfg.discovery.autoadd_enabled,
     }
 
 

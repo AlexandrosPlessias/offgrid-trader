@@ -752,12 +752,12 @@ def get_recent_signals(
     params_filter: list[Any] = [ticker.upper()] if ticker else []
 
     with _connect(db_path) as conn:
-        total: int = conn.execute(f"SELECT COUNT(*) FROM signals{where}", params_filter).fetchone()[
-            0
-        ]
+        total: int = conn.execute(
+            f"SELECT COUNT(*) FROM signals{where}", params_filter  # noqa: S608
+        ).fetchone()[0]
         rows = conn.execute(
-            f"SELECT * FROM signals{where} ORDER BY id DESC LIMIT ? OFFSET ?",
-            params_filter + [int(limit), int(offset)],
+            f"SELECT * FROM signals{where} ORDER BY id DESC LIMIT ? OFFSET ?",  # noqa: S608
+            [*params_filter, int(limit), int(offset)],
         ).fetchall()
 
     results: list[dict[str, Any]] = []
@@ -1202,50 +1202,115 @@ def import_data_snapshot(data: dict[str, Any], db_path: str | None = None) -> di
     def _insert_or_ignore(conn: Any, table: str, cols: list[str], rows: list[dict]) -> int:
         inserted = 0
         placeholders = ", ".join("?" * len(cols))
-        sql = f"INSERT OR IGNORE INTO {table} ({', '.join(cols)}) VALUES ({placeholders})"  # noqa: S608
+        _colnames = ", ".join(cols)
+        sql = f"INSERT OR IGNORE INTO {table} ({_colnames}) VALUES ({placeholders})"  # noqa: S608
         for row in rows:
             try:
                 conn.execute(sql, [_j(row.get(c)) for c in cols])
                 inserted += conn.execute("SELECT changes()").fetchone()[0]
-            except Exception:
+            except Exception:  # noqa: S110 — best-effort row import must not abort the batch
                 pass
         return inserted
 
     with _connect(db_path) as conn:
         # ── Signals ──────────────────────────────────────────────────────────
         counts["signals"] = _insert_or_ignore(
-            conn, "signals",
-            ["id", "ticker", "type", "confidence", "source", "entry", "stop", "target",
-             "price", "week52_high", "week52_low", "reasons", "llm_provider", "llm_model",
-             "timestamp", "created_at"],
+            conn,
+            "signals",
+            [
+                "id",
+                "ticker",
+                "type",
+                "confidence",
+                "source",
+                "entry",
+                "stop",
+                "target",
+                "price",
+                "week52_high",
+                "week52_low",
+                "reasons",
+                "llm_provider",
+                "llm_model",
+                "timestamp",
+                "created_at",
+            ],
             data.get("signals") or [],
         )
 
         # ── Analysis log ─────────────────────────────────────────────────────
         counts["analysis_log"] = _insert_or_ignore(
-            conn, "analysis_log",
-            ["id", "ticker", "analysis_json", "market_snapshot", "opportunities_json",
-             "actionable_json", "prompt_tokens", "completion_tokens", "created_at"],
+            conn,
+            "analysis_log",
+            [
+                "id",
+                "ticker",
+                "analysis_json",
+                "market_snapshot",
+                "opportunities_json",
+                "actionable_json",
+                "prompt_tokens",
+                "completion_tokens",
+                "created_at",
+            ],
             data.get("analysis_log") or [],
         )
 
         # ── Paper orders ──────────────────────────────────────────────────────
         counts["paper_orders"] = _insert_or_ignore(
-            conn, "paper_orders",
-            ["id", "signal_id", "ticker", "side", "alpaca_order_id", "status", "notional",
-             "qty", "entry_price", "stop_price", "take_profit_price", "filled_avg_price",
-             "filled_at", "closed_at", "realized_pnl", "signal_confidence", "signal_source",
-             "signal_timestamp", "created_at"],
+            conn,
+            "paper_orders",
+            [
+                "id",
+                "signal_id",
+                "ticker",
+                "side",
+                "alpaca_order_id",
+                "status",
+                "notional",
+                "qty",
+                "entry_price",
+                "stop_price",
+                "take_profit_price",
+                "filled_avg_price",
+                "filled_at",
+                "closed_at",
+                "realized_pnl",
+                "signal_confidence",
+                "signal_source",
+                "signal_timestamp",
+                "created_at",
+            ],
             data.get("paper_orders") or [],
         )
 
         # ── Frac positions ───────────────────────────────────────────────────
         counts["frac_positions"] = _insert_or_ignore(
-            conn, "frac_positions",
-            ["id", "signal_id", "ticker", "side", "notional", "qty", "entry_price",
-             "stop_price", "take_profit_price", "status", "alpaca_buy_order_id",
-             "alpaca_sell_order_id", "exit_price", "exit_reason", "realized_pnl", "mode",
-             "signal_confidence", "signal_source", "signal_timestamp", "opened_at", "closed_at"],
+            conn,
+            "frac_positions",
+            [
+                "id",
+                "signal_id",
+                "ticker",
+                "side",
+                "notional",
+                "qty",
+                "entry_price",
+                "stop_price",
+                "take_profit_price",
+                "status",
+                "alpaca_buy_order_id",
+                "alpaca_sell_order_id",
+                "exit_price",
+                "exit_reason",
+                "realized_pnl",
+                "mode",
+                "signal_confidence",
+                "signal_source",
+                "signal_timestamp",
+                "opened_at",
+                "closed_at",
+            ],
             data.get("frac_positions") or [],
         )
 
@@ -1256,16 +1321,29 @@ def import_data_snapshot(data: dict[str, Any], db_path: str | None = None) -> di
             run = entry.get("run") or entry  # handle both {run, candidates} and flat
             candidates = entry.get("candidates") or []
             n = _insert_or_ignore(
-                conn, "discovery_runs",
+                conn,
+                "discovery_runs",
                 ["id", "created_at", "sources", "candidate_count", "status", "error"],
                 [run],
             )
             disc_inserted += n
             if n:  # only insert candidates when the run was new
                 cand_inserted += _insert_or_ignore(
-                    conn, "discovery_candidates",
-                    ["id", "run_id", "ticker", "score", "price", "percent_change", "volume",
-                     "source", "reasons", "components", "created_at"],
+                    conn,
+                    "discovery_candidates",
+                    [
+                        "id",
+                        "run_id",
+                        "ticker",
+                        "score",
+                        "price",
+                        "percent_change",
+                        "volume",
+                        "source",
+                        "reasons",
+                        "components",
+                        "created_at",
+                    ],
                     candidates,
                 )
         counts["discovery_runs"] = disc_inserted
@@ -1280,14 +1358,23 @@ def import_data_snapshot(data: dict[str, Any], db_path: str | None = None) -> di
                     "(ticker, last_scan, last_signal, last_confidence, consecutive_oversold, "
                     "consecutive_overbought, last_price, price_trend_pct, updated_at) "
                     "VALUES (?,?,?,?,?,?,?,?,?)",
-                    [row.get(c) for c in (
-                        "ticker", "last_scan", "last_signal", "last_confidence",
-                        "consecutive_oversold", "consecutive_overbought", "last_price",
-                        "price_trend_pct", "updated_at",
-                    )],
+                    [
+                        row.get(c)
+                        for c in (
+                            "ticker",
+                            "last_scan",
+                            "last_signal",
+                            "last_confidence",
+                            "consecutive_oversold",
+                            "consecutive_overbought",
+                            "last_price",
+                            "price_trend_pct",
+                            "updated_at",
+                        )
+                    ],
                 )
                 mem_inserted += 1
-            except Exception:
+            except Exception:  # noqa: S110 — best-effort row import must not abort the batch
                 pass
         counts["ticker_memory"] = mem_inserted
 
@@ -1297,10 +1384,20 @@ def import_data_snapshot(data: dict[str, Any], db_path: str | None = None) -> di
         imported_removed = wl.get("removed") or []
         if imported_added or imported_removed:
             existing_added: list = json.loads(
-                (conn.execute("SELECT value FROM app_settings WHERE key='watchlist_added'").fetchone() or ("[]",))[0]
+                (
+                    conn.execute(
+                        "SELECT value FROM app_settings WHERE key='watchlist_added'"
+                    ).fetchone()
+                    or ("[]",)
+                )[0]
             )
             existing_removed: list = json.loads(
-                (conn.execute("SELECT value FROM app_settings WHERE key='watchlist_removed'").fetchone() or ("[]",))[0]
+                (
+                    conn.execute(
+                        "SELECT value FROM app_settings WHERE key='watchlist_removed'"
+                    ).fetchone()
+                    or ("[]",)
+                )[0]
             )
             merged_added = list(dict.fromkeys([*existing_added, *imported_added]))
             merged_removed = list(dict.fromkeys([*existing_removed, *imported_removed]))
@@ -1335,6 +1432,51 @@ def get_effective_watchlist(db_path: str | None = None) -> list[str]:
             seen.add(t)
             result.append(t)
     return result
+
+
+def get_confidence_floor(db_path: str | None = None) -> float:
+    """Resolve the effective signal confidence floor: DB setting → config default.
+
+    Lets the Settings page tune the floor live while the env var
+    ``CONFIDENCE_FLOOR`` still provides the boot default.
+    """
+    from .config import get_settings as _cfg
+
+    raw = get_setting("confidence_floor", "", db_path)
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return float(_cfg().thresholds.confidence_floor)
+
+
+def add_watchlist_tickers(tickers: list[str], db_path: str | None = None) -> list[str]:
+    """Add tickers to the watchlist overrides; return the ones newly added.
+
+    Dedups against the config base and existing additions, and un-removes any
+    that were previously removed. Shared by the manual bulk-add route and the
+    discovery auto-add path so both apply identical semantics.
+    """
+    from .config import get_settings as _cfg
+
+    base = _cfg().watchlist
+    added: list[str] = json.loads(get_setting("watchlist_added", "[]", db_path))
+    removed: list[str] = json.loads(get_setting("watchlist_removed", "[]", db_path))
+    newly: list[str] = []
+    for raw in tickers:
+        t = (raw or "").strip().upper()
+        if not t:
+            continue
+        if t in removed:
+            removed.remove(t)
+        if t not in base and t not in added:
+            added.append(t)
+            newly.append(t)
+    if newly or tickers:
+        set_setting("watchlist_added", json.dumps(added), db_path)
+        set_setting("watchlist_removed", json.dumps(removed), db_path)
+    return newly
 
 
 # --------------------------------------------------------------------------- #
@@ -1819,6 +1961,25 @@ def get_open_order_by_ticker_side(
             (ticker, side, *terminal),
         ).fetchone()
     return dict(row) if row else None
+
+
+def count_open_paper_positions(db_path: str | None = None) -> int:
+    """Count open bracket positions — orders not yet closed or terminated.
+
+    An open position is one whose ``realized_pnl`` is still NULL and whose
+    status is not a dead-end (cancelled/rejected/expired). Filled-and-holding
+    orders count as open positions; only closed-out or killed orders don't.
+    Used by PaperTradeSkill to enforce ``paper_max_positions``.
+    """
+    dead = ("cancelled", "canceled", "expired", "rejected", "done")
+    placeholders = ",".join("?" * len(dead))
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM paper_orders WHERE realized_pnl IS NULL"  # noqa: S608
+            f" AND status NOT IN ({placeholders})",
+            dead,
+        ).fetchone()
+    return int(row[0]) if row else 0
 
 
 def get_paper_order_by_alpaca_id(alpaca_order_id: str, db_path: str | None = None) -> dict | None:

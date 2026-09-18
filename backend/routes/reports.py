@@ -111,9 +111,7 @@ def _build_eod(
             fwr = f"{feco['win_rate']:.0f}%" if feco["win_rate"] is not None else "n/a"
             fpnl_sign = "+" if feco["total_pnl"] >= 0 else ""
             lines.append(f"  Total P&L   : {fpnl_sign}{feco['total_pnl']:.2f}")
-            lines.append(
-                f"  Win rate    : {fwr}  ({feco['wins']}/{feco['closed_trades']} closed)"
-            )
+            lines.append(f"  Win rate    : {fwr}  ({feco['wins']}/{feco['closed_trades']} closed)")
         else:
             lines.append("  No closed fractional trades yet.")
         if feco["open_positions"]:
@@ -192,15 +190,20 @@ def eod_report() -> dict[str, Any]:
     # Today's fractional positions (opened or closed today)
     all_frac = get_frac_positions(limit=500)
     frac_today = [
-        f for f in all_frac
+        f
+        for f in all_frac
         if (f.get("opened_at") or "").startswith(today_utc)
         or (f.get("closed_at") or "").startswith(today_utc)
     ]
 
     eco = _economics(all_orders)
     subject, body = _build_eod(
-        signals_today, orders_today, all_orders, today_utc,
-        frac_today=frac_today, all_frac=all_frac,
+        signals_today,
+        orders_today,
+        all_orders,
+        today_utc,
+        frac_today=frac_today,
+        all_frac=all_frac,
     )
 
     from backend.alerts import send_report
@@ -301,7 +304,8 @@ def llm_summary_report(period: str = "daily") -> dict[str, Any]:
     orders = [o for o in all_orders if (o.get("created_at") or "") >= since]
     all_frac = get_frac_positions(limit=500)
     frac_period = [
-        f for f in all_frac
+        f
+        for f in all_frac
         if (f.get("opened_at") or "") >= since or (f.get("closed_at") or "") >= since
     ]
     eco = _economics(all_orders)
@@ -350,13 +354,18 @@ def llm_summary_report(period: str = "daily") -> dict[str, Any]:
         signals_today = [s for s in all_signals if (s.get("created_at") or "").startswith(date_str)]
         orders_today = [o for o in all_orders if (o.get("created_at") or "").startswith(date_str)]
         frac_today = [
-            f for f in all_frac
+            f
+            for f in all_frac
             if (f.get("opened_at") or "").startswith(date_str)
             or (f.get("closed_at") or "").startswith(date_str)
         ]
         _, body = _build_eod(
-            signals_today, orders_today, all_orders, date_str,
-            frac_today=frac_today, all_frac=all_frac,
+            signals_today,
+            orders_today,
+            all_orders,
+            date_str,
+            frac_today=frac_today,
+            all_frac=all_frac,
         )
         used_llm = False
 

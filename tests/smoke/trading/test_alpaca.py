@@ -65,6 +65,14 @@ def test_alpaca_bracket_order(check):
         )
 
         # ── 15b. PaperTradeSkill places order for actionable signal ─────────────
+        # Reset any NVDA paper order from a prior run so the ticker+side dedup
+        # doesn't block placement (the smoke DB persists across runs).
+        from backend.database import _connect as _conn15
+
+        with _conn15() as _c15:
+            _c15.execute("DELETE FROM paper_orders WHERE ticker = 'NVDA'")
+            _c15.commit()
+
         _sig_id = _save_signal(
             {
                 "ticker": "NVDA",
@@ -98,11 +106,14 @@ def test_alpaca_bracket_order(check):
         with mock.patch(
             "backend.skills.paper_trade.get_client", return_value=_FakeAlpaca()
         ), mock.patch(
+            "backend.skills.paper_trade.count_open_paper_positions", return_value=0
+        ), mock.patch(
             "backend.skills.paper_trade.get_setting",
             side_effect=lambda k, d="": {
                 "paper_trading_enabled": "true",
                 "paper_trade_position_size": "500",
                 "paper_trade_min_confidence": "",
+                "paper_max_positions": "5",
             }.get(k, d),
         ):
             _result15 = _PTS().run(_ctx15)

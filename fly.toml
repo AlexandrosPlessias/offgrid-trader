@@ -46,7 +46,7 @@ primary_region = "lhr"
   internal_port        = 8000
   protocol             = "tcp"
   auto_stop_machines   = "stop"
-  auto_start_machines  = true
+  auto_start_machines  = false   # Cloudflare Worker cron owns start — disable HTTP-triggered wake
   min_machines_running = 0
 
   [[services.ports]]

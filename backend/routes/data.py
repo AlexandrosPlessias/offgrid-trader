@@ -127,10 +127,12 @@ def export_data_xlsx() -> StreamingResponse:
         for cell in ws[1]:
             cell.font = bold
         for row in rows:
-            ws.append([
-                json.dumps(v) if isinstance(v, (list, dict)) else v
-                for v in (row.get(h) for h in headers)
-            ])
+            ws.append(
+                [
+                    json.dumps(v) if isinstance(v, (list, dict)) else v
+                    for v in (row.get(h) for h in headers)
+                ]
+            )
 
     # Remove the default empty sheet openpyxl creates.
     wb.remove(wb.active)
