@@ -22,8 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # wrangler-action v4 defaults to Wrangler v4 and runs on the Node 24
+      # runner; v3 pinned Wrangler 3.90.0, which fails on Node 24 runners.
       - name: Deploy to Cloudflare Workers
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
