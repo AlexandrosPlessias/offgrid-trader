@@ -86,6 +86,16 @@ cd infra/cron-worker
 npx wrangler deploy
 ```
 
+### 5 — Optional GitHub Actions auto-deploy
+
+The repo includes `/home/runner/work/offgrid-trader/offgrid-trader/.github/workflows/deploy-cloudflare-cron.yml`.
+It deploys automatically on `main` pushes that touch `infra/cron-worker/**`, and can also be run manually.
+
+Required repository secrets:
+
+- `CLOUDFLARE_API_TOKEN` — API token with Workers Scripts edit permission for this account
+- `CLOUDFLARE_ACCOUNT_ID` — Cloudflare account ID that owns `offgrid-trader-cron`
+
 Expected output:
 ```
 Deployed offgrid-trader-cron triggers (4.93 sec)

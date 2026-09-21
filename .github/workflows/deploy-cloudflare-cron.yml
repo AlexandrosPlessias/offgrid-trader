@@ -1,0 +1,28 @@
+name: Deploy Cloudflare Cron Worker
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "infra/cron-worker/**"
+      - ".github/workflows/deploy-cloudflare-cron.yml"
+
+concurrency:
+  group: cloudflare-cron-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy-cron-worker:
+    name: Deploy cron worker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: infra/cron-worker
+          command: deploy
