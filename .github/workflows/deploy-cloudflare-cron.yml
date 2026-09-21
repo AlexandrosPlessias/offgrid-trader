@@ -12,6 +12,9 @@ concurrency:
   group: cloudflare-cron-deploy
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   deploy-cron-worker:
     name: Deploy cron worker
