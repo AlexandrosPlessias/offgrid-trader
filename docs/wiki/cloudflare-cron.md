@@ -17,7 +17,7 @@ individual scan ticks.
 | `30 13 * * 1-5` | 8:30 AM ET | EST (winter) | Start the Fly app |
 | `5 21 * * 1-5` | 5:05 PM ET | EDT / 4:05 PM EST | EoD report → ntfy + Telegram |
 | `30 21 * * 1-5` | 5:30 PM ET | EDT / 4:30 PM EST | Stop the Fly app |
-| `35 21 * * 5` | 5:35 PM ET Fri | EDT / 4:35 PM EST | Weekly LLM summary |
+| `25 21 * * 5` | 5:25 PM ET Fri | EDT / 4:25 PM EST | Weekly LLM summary |
 
 **DST handling** — the free plan allows 5 cron triggers per account. Start uses dual EDT/EST twins
 so the app wakes at exactly 8:30 AM ET year-round. The three evening jobs use a single EDT-based
@@ -93,7 +93,7 @@ Deployed offgrid-trader-cron triggers (4.93 sec)
   schedule: 30 13 * * 1-5
   schedule: 5 21 * * 1-5
   schedule: 30 21 * * 1-5
-  schedule: 35 21 * * 5
+  schedule: 25 21 * * 5
 ```
 
 ---
@@ -130,7 +130,7 @@ npx wrangler dev --test-scheduled
 curl "http://localhost:8787/__scheduled?cron=5+21+*+*+1-5"   # EoD
 curl "http://localhost:8787/__scheduled?cron=30+21+*+*+1-5"  # stop
 curl "http://localhost:8787/__scheduled?cron=30+12+*+*+1-5"  # start
-curl "http://localhost:8787/__scheduled?cron=35+21+*+*+5"    # weekly
+curl "http://localhost:8787/__scheduled?cron=25+21+*+*+5"    # weekly
 ```
 
 Watch the output in terminal 1.
@@ -190,8 +190,18 @@ npx wrangler tail
 **Persistent (dashboard):**
 Workers & Pages → **offgrid-trader-cron** → **Logs** tab — searchable, 3-day history.
 
-Observability is enabled in `wrangler.toml` (`head_sampling_rate = 1` = 100% of invocations).
-Free — 1M log events/day, 3-day retention. No extra cost.
+## Viewing traces
+
+Workers & Pages → **offgrid-trader-cron** → **Observability/Traces**.
+
+Observability is already enabled in `wrangler.toml` (`head_sampling_rate = 1` = 100% sampled),
+so both logs and traces are emitted for each invocation.
+
+### Cost
+
+- Cloudflare Workers Free includes basic logs/traces for this setup.
+- Practical free limits (as configured here): 5 cron triggers/account, log retention around 3 days.
+- If you exceed free quotas or need higher retention, Cloudflare paid plans apply.
 
 Each invocation logs:
 - Cron string that fired + resolved ET offset + resolved action
