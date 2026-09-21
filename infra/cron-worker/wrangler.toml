@@ -12,7 +12,7 @@ workers_dev = false
 #   Start        8:30 AM ET  Mon–Fri  →  12:30 UTC (EDT) / 13:30 UTC (EST)
 #   EoD report   5:05 PM ET  Mon–Fri  →  21:05 UTC (EDT) / 22:05 UTC (EST)
 #   Stop         5:30 PM ET  Mon–Fri  →  21:30 UTC (EDT) / 22:30 UTC (EST)
-#   Weekly LLM   5:35 PM ET  Fridays  →  21:35 UTC (EDT) / 22:35 UTC (EST)
+#   Weekly LLM   5:25 PM ET  Fridays  →  21:25 UTC (EDT) / 22:25 UTC (EST)
 
 [triggers]
 # Free plan allows 5 cron triggers per account.
@@ -31,6 +31,11 @@ crons = [
 [observability]
 enabled = true
 head_sampling_rate = 1   # 1 = 100% of invocations traced
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+head_sampling_rate = 1   # 1 = 100% of invocation logs sampled
 
 # ── Secrets (set via: wrangler secret put <NAME>) ─────────────────────────────
 # ADMIN_TOKEN   — MarketSage admin token (Authorization header for backend calls)
