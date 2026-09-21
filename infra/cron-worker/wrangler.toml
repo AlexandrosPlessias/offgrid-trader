@@ -37,6 +37,11 @@ enabled = true
 invocation_logs = true
 head_sampling_rate = 1   # 1 = 100% of invocation logs sampled
 
+[observability.traces]
+enabled = true
+head_sampling_rate = 1
+persist = true
+
 # ── Secrets (set via: wrangler secret put <NAME>) ─────────────────────────────
 # ADMIN_TOKEN   — MarketSage admin token (Authorization header for backend calls)
 # BACKEND_URL   — base URL of the Fly backend, e.g. https://offgrid-trader.fly.dev
