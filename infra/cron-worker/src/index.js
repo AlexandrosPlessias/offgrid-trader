@@ -4,7 +4,7 @@
  * Handles three jobs:
  *   1. Start the Fly app at 8:30 AM ET Mon–Fri (via Fly Machines API)
  *   2. Send EoD report then stop the Fly app at 5:05 PM ET Mon–Fri
- *   3. Send weekly LLM summary at 5:30 PM ET Fridays
+ *   3. Send weekly LLM summary at 5:25 PM ET Fridays
  *
  * Scans are managed entirely by the in-process MonitorScheduler — this Worker
  * does not trigger individual scans.
@@ -77,6 +77,7 @@ async function callBackend(env, method, path, retries = MAX_RETRIES) {
   let lastBody = "";
 
   for (let attempt = 1; attempt <= retries; attempt++) {
+    console.log(`[cron] backend request ${method} ${path} attempt ${attempt}/${retries}`);
     try {
       const res = await fetch(url, {
         method,
@@ -95,7 +96,10 @@ async function callBackend(env, method, path, retries = MAX_RETRIES) {
     } catch (err) {
       console.error(`[cron] ${method} ${path} network error attempt ${attempt}/${retries}: ${err}`);
     }
-    if (attempt < retries) await sleep(RETRY_DELAY_MS);
+    if (attempt < retries) {
+      console.log(`[cron] retrying ${method} ${path} in ${RETRY_DELAY_MS / 1000}s`);
+      await sleep(RETRY_DELAY_MS);
+    }
   }
   return { ok: false, status: lastStatus, body: lastBody };
 }
@@ -103,6 +107,7 @@ async function callBackend(env, method, path, retries = MAX_RETRIES) {
 /** Call the Fly Machines API with the Fly API token. */
 async function callFly(env, method, path, body) {
   const url = `${FLY_API}${path}`;
+  console.log(`[cron] Fly API request ${method} ${path}`);
   const opts = {
     method,
     headers: {
@@ -113,6 +118,9 @@ async function callFly(env, method, path, body) {
   if (body !== undefined) opts.body = JSON.stringify(body);
   const res = await fetch(url, opts);
   const text = await res.text();
+  if (!res.ok) {
+    console.warn(`[cron] Fly API ${method} ${path} → ${res.status}: ${text.slice(0, 200)}`);
+  }
   return { ok: res.ok, status: res.status, body: text };
 }
 
@@ -123,7 +131,14 @@ async function listMachines(env) {
     console.error(`[cron] listMachines failed ${r.status}: ${r.body.slice(0, 200)}`);
     return [];
   }
-  return JSON.parse(r.body);
+  try {
+    const machines = JSON.parse(r.body);
+    console.log(`[cron] listMachines ok: ${Array.isArray(machines) ? machines.length : 0} machine(s)`);
+    return Array.isArray(machines) ? machines : [];
+  } catch (err) {
+    console.error(`[cron] listMachines JSON parse error: ${err}`);
+    return [];
+  }
 }
 
 /** Start all stopped machines. */
@@ -133,6 +148,7 @@ async function startApp(env) {
     console.warn("[cron] startApp: no machines found.");
     return;
   }
+  console.log(`[cron] startApp: attempting to start ${machines.length} machine(s).`);
   for (const m of machines) {
     console.log(`[cron] starting machine ${m.id} (state: ${m.state})`);
     const r = await callFly(env, "POST", `/apps/${env.FLY_APP}/machines/${m.id}/start`);
@@ -147,6 +163,7 @@ async function stopApp(env) {
     console.warn("[cron] stopApp: no machines found.");
     return;
   }
+  console.log(`[cron] stopApp: evaluating ${machines.length} machine(s).`);
   for (const m of machines) {
     if (m.state === "stopped") {
       console.log(`[cron] machine ${m.id} already stopped — skipping.`);
@@ -165,8 +182,12 @@ export default {
     const cron = event.cron ?? "unknown";
     const offset = easternOffset();
     const action = resolveAction(cron, offset);
+    const startedAt = Date.now();
 
     console.log(`[cron] fired — schedule: "${cron}" · ET offset: ${offset} · resolved: ${action}`);
+    console.log(
+      `[cron] env check — BACKEND_URL=${Boolean(env.BACKEND_URL)} · ADMIN_TOKEN=${Boolean(env.ADMIN_TOKEN)} · FLY_API_TOKEN=${Boolean(env.FLY_API_TOKEN)} · FLY_APP=${env.FLY_APP ? "set" : "missing"}`
+    );
 
     if (action === "noop") {
       console.log("[cron] Off-season twin cron — no-op.");
@@ -177,6 +198,7 @@ export default {
     if (action === "start") {
       console.log("[cron] Starting Fly app…");
       await startApp(env);
+      console.log(`[cron] action start completed in ${Date.now() - startedAt}ms`);
       return;
     }
 
@@ -185,6 +207,7 @@ export default {
       console.log("[cron] Sending EoD report…");
       const eod = await callBackend(env, "GET", "/reports/eod");
       console.log(`[cron] EoD result: ok=${eod.ok} status=${eod.status}`);
+      console.log(`[cron] action eod completed in ${Date.now() - startedAt}ms`);
       return;
     }
 
@@ -192,6 +215,7 @@ export default {
     if (action === "stop") {
       console.log("[cron] Stopping Fly app…");
       await stopApp(env);
+      console.log(`[cron] action stop completed in ${Date.now() - startedAt}ms`);
       return;
     }
 
@@ -200,6 +224,7 @@ export default {
       console.log("[cron] Sending weekly LLM summary…");
       const r = await callBackend(env, "GET", "/reports/llm-summary?period=weekly");
       console.log(`[cron] Weekly summary result: ok=${r.ok} status=${r.status}`);
+      console.log(`[cron] action weekly completed in ${Date.now() - startedAt}ms`);
       return;
     }
   },
