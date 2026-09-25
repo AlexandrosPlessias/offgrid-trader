@@ -24,6 +24,7 @@ from backend.database import (
     get_open_frac_notional,
     get_open_frac_position_by_ticker,
     get_setting,
+    save_event,
     save_frac_position,
 )
 from backend.skills import AgentContext, Skill, SkillResult
@@ -118,6 +119,18 @@ class FracTradeSkill(Skill):
                         detail=f"${deployed:.2f}/${budget:.2f} deployed",
                     )
                     budget_notified = True
+                    save_event(
+                        "order_blocked",
+                        f"Budget cap reached — skipped {ticker} "
+                        f"(${deployed:.2f}/${budget:.2f} deployed)",
+                        level="warning",
+                        meta={
+                            "ticker": ticker,
+                            "reason": "budget_cap",
+                            "deployed": round(deployed, 2),
+                            "budget": budget,
+                        },
+                    )
                 continue
 
             stop = opp.get("stop")
@@ -127,6 +140,23 @@ class FracTradeSkill(Skill):
                 continue
 
             entry_price = opp.get("entry") or opp.get("price")
+            side = opp.get("type", "long")
+
+            # Guard: reject inverted brackets (LLM can return stop on wrong side).
+            # Long: stop must be below entry; Short: stop must be above entry.
+            if entry_price:
+                stop_inverted = (side == "long" and stop >= entry_price) or (
+                    side == "short" and stop <= entry_price
+                )
+                if stop_inverted:
+                    _log.warning(
+                        "frac_trade: skipping %s — inverted stop (entry=%.4f stop=%.4f side=%s)",
+                        ticker,
+                        entry_price,
+                        stop,
+                        side,
+                    )
+                    continue
             signal_id = ctx.saved_signal_ids.get(ticker)
 
             try:
@@ -154,7 +184,11 @@ class FracTradeSkill(Skill):
                 deployed += size
                 placed.append(buy_order_id or ticker)
                 _log.info(
-                    "frac_trade: placed %s buy $%.2f (%s) id=%s", ticker, size, mode, buy_order_id
+                    "frac_trade: placed %s buy $%.2f (%s) id=%s",
+                    ticker,
+                    size,
+                    mode,
+                    buy_order_id,
                 )
                 from backend.alerts import send_order_notification
 

@@ -507,6 +507,86 @@ The in-process `MonitorScheduler` (`backend/scheduler.py`) is a hand-rolled `whi
 
 ---
 
+## 9. Report comparator — week-over-week / arbitrary-period deltas
+
+The four report types (`eod_frac`, `eod_orders`, `weekly_frac`, `weekly_orders`) each
+summarise a **single** window: EoD = today, weekly = the last 7 days, plus some all-time
+economics for context. None of them compares one period against another, so a weekly
+report can say "P&L +$42 this week" but never "…up from -$18 last week." The "cross-week"
+language in the weekly prompts refers to patterns *within* the current 7 days (signal
+recurrence on 3+ days, streaks), not this-week-vs-last-week.
+
+Goal: let the user see the **delta** between two periods — is performance improving or
+regressing week over week, and on which metrics.
+
+### The comparator — ad-hoc, pick any two reports
+
+Pick any two **already-persisted** reports of the same type and diff them — "this week vs the
+one before", or two arbitrary weeks the user selects. It's flexible (compare *any* two
+periods), needs **no recompute** (reports already store structured metrics), and mirrors the
+existing Backtest "runs comparator" (item 4).
+
+Feasible because the `reports` table already persists a `context_json` column (structured,
+numbers-only metrics — shipped on `feat/reports-split-llm-config-revamp`). The comparator
+diffs two stored blobs with **no data re-query**.
+
+The feature has **two layers** — a fast deterministic diff, and an LLM "trading master" review
+layered on top.
+
+### Layer 1 — Plain, non-LLM delta (quick glance)
+
+No LLM call. Diffs two stored reports and renders side-by-side deltas across **two dimensions**:
+
+- **Performance metrics** — P&L, win rate, closed trades, signals count, budget/position cap
+  hits, top movers. Show value A, value B, absolute Δ and %Δ with up/down colour.
+- **Configuration / tuning deltas** — the effective tuning knobs at each report's generation
+  time (e.g. `FRAC_BUDGET 100 → 150`, `FRAC_MIN_CONFIDENCE 85 → 80`). This is what makes the
+  comparison *causal* rather than just descriptive: the user sees which settings changed
+  between the two windows alongside how performance moved.
+
+This layer alone answers "what changed, and did my last tweak help?" at a glance, offline.
+
+### Layer 2 — "Super trading master" LLM review
+
+A one-click review that sends both periods' metrics **and** their config deltas to the LLM,
+asking it to act as an expert trading coach and return actionable judgement, not just narration:
+
+- **What's good** — metrics that improved and are worth keeping / doubling down on.
+- **What's bad** — regressions and their likely cause (often tied to a config change).
+- **What to improve** — concrete, specific suggestions with proposed setting values
+  (e.g. "win rate rose but trade count halved after `FRAC_MIN_CONFIDENCE 85→80` — try 82 to
+  recover volume without giving back the quality gain").
+
+Uses the mode-scoped tuning knobs already built for the reports (frac reports only suggest
+frac vars, orders only bracket vars). Tokens tracked as a new `report_compare` source in AI
+Usage (same pattern as `backtest_review`). The review is on-demand — never fires automatically.
+
+### Design sketch
+
+- **API** —
+  - `GET /reports/compare?a=<report_id>&b=<report_id>` → deterministic metric + config deltas
+    from each report's `context_json`. Reject the pair if `type` differs (can't compare a frac
+    report against an orders report).
+  - `POST /reports/compare/review` (body: the two ids) → the LLM trading-master analysis.
+- **UI** — Reports page: multiselect two report cards of the same type → comparison view with
+  a metric delta table, a config delta table, and a "Get trading-master review" button that
+  renders the LLM verdict (good / bad / improve sections). Reuse the Backtest runs-comparator layout.
+
+### Acceptance criteria
+
+1. Any two same-type persisted reports can be compared; mismatched types are rejected with a clear error.
+2. Layer 1 shows value A, value B, absolute Δ and %Δ for every shared metric **and** a config-delta table of changed tuning knobs — with **no LLM call**.
+3. Selecting "this week" + "previous week" of the same type reproduces a week-over-week view.
+4. Layer 2 review returns explicit **good / bad / improve** sections with concrete suggested setting values, scoped to the report's flow (frac vs orders), and only when explicitly requested.
+5. Config deltas correctly reflect the tuning values in effect when each report was generated (not the current live values).
+
+### Dependencies / prerequisites
+
+- Relies on `reports.context_json` being populated — shipped on `feat/reports-split-llm-config-revamp`. Pre-migration reports have no `context_json` and can't be compared (surface them as "no structured data" in the picker).
+- **Config deltas require a config snapshot per report.** Today `context_json` stores metrics but not the effective tuning knobs. Prerequisite: persist the `_current_tuning(mode)` snapshot into each report's `context_json` (or a sibling column) at generation time, so historical comparisons show the settings that were actually in force — not the current live values.
+
+---
+
 ## Other ideas
 
 - **Multi-model support** — allow swapping models per ticker or per scan type; benchmark `qwen2.5:14b` vs `llama3.1:8b` vs `mistral:7b` on accuracy/latency
