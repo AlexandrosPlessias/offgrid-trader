@@ -51,6 +51,10 @@ class AgentContext:
     actionable: list[dict[str, Any]] | None = None
     rules_checked: dict[str, Any] | None = None  # diagnostic snapshot from detect_opportunities
     saved_signal_ids: dict[str, int] = field(default_factory=dict)  # {ticker: signal_id}
+    # (ticker, type) pairs seen for the first time today — the alert skill only
+    # notifies on these, so a ticker that stays actionable all session is
+    # announced once instead of once per scan cycle.
+    new_signal_keys: set[tuple[str, str]] = field(default_factory=set)
     alerts_sent: list[dict[str, Any]] = field(default_factory=list)
     memory: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)

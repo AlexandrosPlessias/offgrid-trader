@@ -254,6 +254,7 @@ async def sync_paper_orders() -> None:
                     # long (entry buy): profit when exit > entry; short inverts.
                     direction = 1 if entry_side == "buy" else -1
                     updates["realized_pnl"] = round((exit_px - entry_fill) * qty * direction, 4)
+                    updates["exit_price"] = exit_px
 
                     pnl = updates["realized_pnl"]
                     pnl_sign = "+" if pnl >= 0 else ""
@@ -403,12 +404,35 @@ async def monitor_frac_positions() -> None:
             "frac monitor: closed %s @ %.2f (%s) pnl=%.2f", ticker, current, exit_reason, realized
         )
         _frac_mode = get_setting("frac_mode", "paper")
-        _reason_labels = {
-            "target": "take-profit hit",
-            "stop": "stop-loss triggered",
-            "eod": "end-of-day close",
+        _reason_icons = {
+            "target": "✅",
+            "stop": "📉",
+            "eod": "🔔",
         }
-        pnl_sign = "+" if realized >= 0 else ""
+        _reason_labels = {
+            "target": "Take-profit hit",
+            "stop": "Stop-loss hit",
+            "eod": "End-of-day close",
+        }
+        _icon = _reason_icons.get(exit_reason, "📉")
+        _reason = _reason_labels.get(exit_reason, exit_reason)
+        _mode_label = "LIVE 💰" if _frac_mode == "live" else "paper"
+        _pct = ((current - entry) / entry * 100) if entry else 0.0
+        _pct_str = f"{_pct:+.2f}%"
+        _pnl_sign = "+" if realized >= 0 else ""
+        _notional = float(row.get("notional") or 0)
+        _conf = row.get("signal_confidence")
+        _source = row.get("signal_source") or ""
+        _conf_str = f"{_conf:.1f}%" if _conf else ""
+
+        _title = f"{_icon} {ticker} — {_reason} [{_mode_label}] · Fractional"
+        _body_lines = [
+            f"Entry ${entry:.2f} → Exit ${current:.2f} ({_pct_str})",
+            f"P&L: {_pnl_sign}${realized:.2f} | {held_qty:.3f} shares (${_notional:.0f} deployed)",
+        ]
+        if _conf_str or _source:
+            _body_lines.append(" · ".join(filter(None, [_conf_str, _source])))
+
         await asyncio.to_thread(
             send_order_notification,
             kind="fractional",
@@ -416,10 +440,7 @@ async def monitor_frac_positions() -> None:
             side="sell",
             amount=round(current * held_qty, 2),
             mode=_frac_mode,
-            detail=(
-                f"{_reason_labels.get(exit_reason, exit_reason)} · "
-                f"exit @ ${current:.2f} · P&L {pnl_sign}${realized:.2f}"
-            ),
+            detail="\n".join([_title, *_body_lines]),
             is_close=True,
         )
 
@@ -586,6 +607,14 @@ class MonitorScheduler:
         _log.info("started; interval=%sm", settings.scan_interval_minutes)
         save_event("scheduler", f"Scheduler started (interval {settings.scan_interval_minutes}m)")
         try:
+            # Reconcile any paper orders that were filled/closed while the app was
+            # down — runs once at startup regardless of market hours so the position
+            # count is accurate before the first scan fires.
+            try:
+                await sync_paper_orders()
+            except Exception as exc:
+                _log.warning("startup paper sync error: %s", exc)
+
             # Wait for the first grid slot so all scans fire at :00/:15/:30/:45
             # (and discovery at :00 on the hour) rather than immediately at startup.
             _init_interval = max(60, settings.scan_interval_minutes * 60)
@@ -614,11 +643,6 @@ class MonitorScheduler:
                     except Exception as exc:  # pragma: no cover - defensive
                         _log.error("scan error: %s", exc)
                         save_event("scan", f"Scan error: {exc}", level="error")
-                    # Sync paper order statuses after each watchlist scan.
-                    try:
-                        await sync_paper_orders()
-                    except Exception as exc:  # pragma: no cover - defensive
-                        _log.warning("paper sync error: %s", exc)
                     # Discovery cycle — runs after watchlist scan when market is open.
                     try:
                         await _maybe_run_discovery(self)
@@ -626,6 +650,14 @@ class MonitorScheduler:
                         _log.warning("discovery cycle error: %s", exc)
                 else:
                     _log.info("market closed — sleeping")
+
+                # Sync paper order statuses every cycle (market open or closed) so
+                # EOD fills and any orders placed while the app was down are
+                # reconciled promptly and the position count stays accurate.
+                try:
+                    await sync_paper_orders()
+                except Exception as exc:  # pragma: no cover - defensive
+                    _log.warning("paper sync error: %s", exc)
 
                 # Re-read interval each cycle so UI changes take effect immediately.
                 db_interval = get_setting("scan_interval_minutes", "")

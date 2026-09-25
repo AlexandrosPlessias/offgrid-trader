@@ -14,6 +14,9 @@ class AlertSkill(Skill):
 
     Non-critical: alert delivery failures must never abort the pipeline.
     Respects the ``ctx.send_alerts`` flag — when False the skill is a no-op.
+
+    Must run after PersistSkill, which populates ``ctx.new_signal_keys`` with the
+    ticker+type pairs seen for the first time today; only those are alerted.
     """
 
     name = "alert"
@@ -30,6 +33,15 @@ class AlertSkill(Skill):
         errors: list[str] = []
 
         for opp in ctx.actionable or []:
+            # Only the first sighting of a ticker+type today alerts. Without this
+            # a ticker that stays actionable notifies on every scan cycle.
+            if (opp["ticker"], opp.get("type")) not in ctx.new_signal_keys:
+                _log.debug(
+                    "alert: skipping %s %s — already alerted today",
+                    opp.get("type"),
+                    opp["ticker"],
+                )
+                continue
             try:
                 result = send_alert(opp)
                 sent.append(result)
