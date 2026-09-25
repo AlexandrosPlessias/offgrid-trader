@@ -17,6 +17,7 @@ from backend.database import (
     get_open_order_by_ticker_side,
     get_paper_order_by_signal,
     get_setting,
+    save_event,
     save_paper_order,
 )
 from backend.skills import AgentContext, Skill, SkillResult
@@ -87,6 +88,18 @@ class PaperTradeSkill(Skill):
                         detail=f"{open_count}/{max_positions} positions open",
                     )
                     cap_notified = True
+                    save_event(
+                        "order_blocked",
+                        f"Position cap reached — skipped {opp['ticker']} "
+                        f"({open_count}/{max_positions} open)",
+                        level="warning",
+                        meta={
+                            "ticker": opp["ticker"],
+                            "reason": "position_cap",
+                            "open": open_count,
+                            "cap": max_positions,
+                        },
+                    )
                 _log.info(
                     "paper_trade: position cap reached (%d/%d) — holding %s",
                     open_count,

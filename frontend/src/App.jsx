@@ -13,6 +13,7 @@ import TradingPage from './pages/TradingPage'
 import BacktestPage from './pages/BacktestPage'
 import EventsPage from './pages/EventsPage'
 import ReportsPage from './pages/ReportsPage'
+import SchedulePage from './pages/SchedulePage'
 
 export default function App() {
   const [authed, setAuthed] = useState(() => !!sessionStorage.getItem('admin_token'))
@@ -173,6 +174,7 @@ export default function App() {
         {activeView === 'backtest' && <BacktestPage wl={wl} usage={usage} />}
         {activeView === 'events' && <EventsPage />}
         {activeView === 'reports' && <ReportsPage />}
+        {activeView === 'schedule' && <SchedulePage />}
 
         {/* Trending/Discovery and Trading are always mounted so state (run results,
             positions, etc.) survives tab switches — only visibility is toggled. */}

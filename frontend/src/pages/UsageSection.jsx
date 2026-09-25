@@ -6,7 +6,7 @@ import {
 } from 'recharts'
 import { API, getAuthHeaders } from '../utils/api'
 import { fmtTokens } from '../utils/fmt'
-import { AXIS_TICK } from '../utils/colors'
+import { AXIS_TICK, CHART_TOOLTIP_STYLE } from '../utils/colors'
 
 const USAGE_PERIODS = [
   { label: 'Today',  days: 1  },
@@ -63,14 +63,26 @@ export default function UsageSection({ usage: usageProp, onRefresh }) {
   const modelKeys = by_provider.map(p => `${p.provider}::${p.model}`)
 
   // Stats for the selected model (or overall totals)
+  // Fall back to summing by_provider when backend totals are missing or zero
+  // (can happen when top-level aggregation and per-provider rows are from different DB queries).
   const selStats = selModel
     ? by_provider.find(p => `${p.provider}::${p.model}` === selModel) ?? {}
-    : {
-        total_tokens:      usage.total_tokens      ?? 0,
-        prompt_tokens:     usage.total_prompt_tokens  ?? 0,
-        completion_tokens: usage.total_completion_tokens ?? 0,
-        rows:              usage.total_rows         ?? 0,
-      }
+    : (() => {
+        const backendTotal   = usage.total_tokens            ?? 0
+        const backendPrompt  = usage.total_prompt_tokens     ?? 0
+        const backendCompl   = usage.total_completion_tokens ?? 0
+        const backendRows    = usage.total_rows              ?? 0
+        const providerTotal  = by_provider.reduce((s, p) => s + (p.total_tokens      ?? 0), 0)
+        const providerPrompt = by_provider.reduce((s, p) => s + (p.prompt_tokens     ?? 0), 0)
+        const providerCompl  = by_provider.reduce((s, p) => s + (p.completion_tokens ?? 0), 0)
+        const providerRows   = by_provider.reduce((s, p) => s + (p.rows              ?? 0), 0)
+        return {
+          total_tokens:      backendTotal  || providerTotal,
+          prompt_tokens:     backendPrompt || providerPrompt,
+          completion_tokens: backendCompl  || providerCompl,
+          rows:              backendRows   || providerRows,
+        }
+      })()
 
   // Daily chart data — filter by selected model or use all-provider by_day.
   // Normalise to { date, prompt_tokens, completion_tokens, total_tokens } for the chart.

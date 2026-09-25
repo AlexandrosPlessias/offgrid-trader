@@ -20,11 +20,11 @@ workers_dev = false
 # EoD, stop, weekly use a single EDT-based time — in winter (EST) they fire
 # 1 h early but still after market close, so the drift is harmless.
 crons = [
-  "30 12 * * 1-5",  # start — 8:30 AM ET (EDT)
-  "30 13 * * 1-5",  # start — 8:30 AM ET (EST)
-  "5 21 * * 1-5",   # EoD report — 5:05 PM ET (EDT) / 4:05 PM ET (EST)
-  "30 21 * * 1-5",  # stop — 5:30 PM ET (EDT) / 4:30 PM ET (EST)
-  "25 21 * * 5",    # weekly LLM — 5:25 PM ET Fri (EDT) / 4:25 PM ET Fri (EST) — before the 21:30 stop
+  "30 12 * * MON-FRI",  # start — 8:30 AM ET (EDT)
+  "30 13 * * MON-FRI",  # start — 8:30 AM ET (EST)
+  "5 21 * * MON-FRI",   # EoD report — 5:05 PM ET (EDT) / 4:05 PM ET (EST)
+  "30 21 * * MON-FRI",  # stop — 5:30 PM ET (EDT) / 4:30 PM ET (EST)
+  "25 21 * * FRI",  # weekly LLM — 5:25 PM ET Fri (EDT) / 4:25 PM ET Fri (EST) — before the 21:30 stop
 ]
 
 # ── Observability (free — logs + traces stored 3 days in Cloudflare) ──────────

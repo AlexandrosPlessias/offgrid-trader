@@ -13,11 +13,22 @@ individual scan ticks.
 
 | Cron (UTC) | ET time | Season | Action |
 |---|---|---|---|
-| `30 12 * * 1-5` | 8:30 AM ET | EDT (summer) | Start the Fly app |
-| `30 13 * * 1-5` | 8:30 AM ET | EST (winter) | Start the Fly app |
-| `5 21 * * 1-5` | 5:05 PM ET | EDT / 4:05 PM EST | EoD report → ntfy + Telegram |
-| `30 21 * * 1-5` | 5:30 PM ET | EDT / 4:30 PM EST | Stop the Fly app |
-| `25 21 * * 5` | 5:25 PM ET Fri | EDT / 4:25 PM EST | Weekly LLM summary |
+| `30 12 * * MON-FRI` | 8:30 AM ET | EDT (summer) | Start the Fly app |
+| `30 13 * * MON-FRI` | 8:30 AM ET | EST (winter) | Start the Fly app |
+| `5 21 * * MON-FRI` | 5:05 PM ET | EDT / 4:05 PM EST | EoD reports (orders **and** frac) → ntfy + Telegram |
+| `30 21 * * MON-FRI` | 5:30 PM ET | EDT / 4:30 PM EST | Stop the Fly app |
+| `25 21 * * FRI` | 5:25 PM ET Fri | EDT / 4:25 PM EST | Weekly reports (orders **and** frac) |
+
+> **Always use day names, never numbers.** The numeric form runs a day behind here: the
+> weekly cron `25 21 * * 5` fired on **Thursday**, and switching only that one to `FRI`
+> made it fire on Friday — same slot, same worker, so the day format was the only
+> variable. By the same shift `1-5` resolved to **Sunday–Thursday**, which silently
+> skipped every Friday: no EoD report, no stop, no start. All five schedules now use
+> three-letter names, which Cloudflare stores verbatim so `resolveAction()` matches them
+> exactly.
+
+The EoD and weekly actions each make **two** sequential backend calls — `/reports/eod/orders`
+then `/reports/eod/frac` (and the weekly equivalents) — so both notifications land.
 
 **DST handling** — the free plan allows 5 cron triggers per account. Start uses dual EDT/EST twins
 so the app wakes at exactly 8:30 AM ET year-round. The three evening jobs use a single EDT-based
@@ -37,6 +48,29 @@ infra/cron-worker/
 ├── set-secrets.sh      — one-shot script to push all secrets from .env to Cloudflare
 └── .dev.vars           — local-only secrets for wrangler dev (gitignored, auto-generated)
 ```
+
+---
+
+## Starting the Fly machine
+
+`startApp()` starts every stopped machine. If the app has **no machines at all** — for
+example after a failed deploy destroyed the last one — it recreates one by cloning the
+most recent machine's config (`GET /machines?include_deleted=true`) and swapping in the
+image from the latest successful release.
+
+Cloning matters: a hand-written config would omit the volume mount, the `[[services]]`
+port handlers and the `[env]` block, producing a machine that boots but has **no database
+and serves no traffic** — so every later `/reports/*` call would fail against an app that
+looks "started". As a backstop, the Worker refuses to create a machine whose template has
+no volume mount, and logs that a manual `fly deploy` is required instead.
+
+### DST resolution
+
+`easternOffset()` compares the current UTC hour against the same instant rendered in
+`America/New_York` to decide whether the account is on EDT (`-0400`) or EST (`-0500`).
+It formats with `hourCycle: "h23"` rather than `hour12: false`, because the `en-US`
+locale defaults to the `h24` cycle, which renders midnight as `"24"` and would skew the
+computed offset by a full day for any job scheduled in the `00:xx` UTC hour.
 
 ---
 
@@ -99,11 +133,11 @@ Required repository secrets:
 Expected output:
 ```
 Deployed offgrid-trader-cron triggers (4.93 sec)
-  schedule: 30 12 * * 1-5
-  schedule: 30 13 * * 1-5
-  schedule: 5 21 * * 1-5
-  schedule: 30 21 * * 1-5
-  schedule: 25 21 * * 5
+  schedule: 30 12 * * MON-FRI
+  schedule: 30 13 * * MON-FRI
+  schedule: 5 21 * * MON-FRI
+  schedule: 30 21 * * MON-FRI
+  schedule: 25 21 * * FRI
 ```
 
 ---
@@ -137,10 +171,10 @@ cd infra/cron-worker
 npx wrangler dev --test-scheduled
 
 # Terminal 2 — fire a simulated cron tick
-curl "http://localhost:8787/__scheduled?cron=5+21+*+*+1-5"   # EoD
-curl "http://localhost:8787/__scheduled?cron=30+21+*+*+1-5"  # stop
-curl "http://localhost:8787/__scheduled?cron=30+12+*+*+1-5"  # start
-curl "http://localhost:8787/__scheduled?cron=25+21+*+*+5"    # weekly
+curl "http://localhost:8787/__scheduled?cron=5+21+*+*+MON-FRI"   # EoD
+curl "http://localhost:8787/__scheduled?cron=30+21+*+*+MON-FRI"  # stop
+curl "http://localhost:8787/__scheduled?cron=30+12+*+*+MON-FRI"  # start
+curl "http://localhost:8787/__scheduled?cron=25+21+*+*+FRI"  # weekly
 ```
 
 Watch the output in terminal 1.
@@ -173,11 +207,11 @@ ET offset — no manual DST math needed. To shift a job:
 Example — move EoD from 5:05 PM to 4:35 PM ET (EDT = 20:35 UTC):
 ```toml
 # wrangler.toml
-"35 20 * * 1-5",   # EoD — EDT 4:35 PM ET
+"35 20 * * MON-FRI",   # EoD — EDT 4:35 PM ET
 ```
 ```js
 // src/index.js — resolveAction
-if (cron === "35 20 * * 1-5") return "eod";
+if (cron === "35 20 * * MON-FRI") return "eod";
 ```
 
 ### Adding a new job

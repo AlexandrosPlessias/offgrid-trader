@@ -7,7 +7,7 @@ const GLOSSARY_CATEGORIES = [
     icon: '📡',
     terms: [
       ['Confidence',                   '0–100 score combining AI confidence and rule-based evidence. Higher = stronger agreement across sources.'],
-      ['Confidence Floor',             'The minimum confidence score a signal must reach before it triggers an alert or paper trade. Setting it high reduces noisy, low-conviction signals; setting it low lets more signals through.'],
+      ['Confidence Floor',             'The minimum confidence score a signal must reach before it is stored, alerted, or paper traded. Setting it high reduces noisy, low-conviction signals; setting it low lets more signals through. Clearing the floor is necessary but not sufficient for an alert — see Alert deduplication.'],
       ['Confidence Score',             'A number from 0 to 100 that reflects how strongly the AI and the technical indicators agree on a trade direction. Think of it like a jury vote — the closer to 100, the more votes in favour.'],
       ['Discovery / Trending Discovery', "An automatic process that scans the market for trending tickers you haven't added to your watchlist yet — like a search engine for trading opportunities. Results appear in the Discovery tab."],
       ['Risk Level',                   "A label (low / medium / high) that summarises how risky a trade idea is, based on how wildly the stock's price tends to swing and how large the proposed position would be."],
@@ -160,6 +160,10 @@ const EDU_SECTIONS = [
   { id: 'edu-signals',       label: 'How scores work' },
   { id: 'edu-backtesting',   label: 'Backtesting' },
   { id: 'edu-paper-trading', label: 'Paper Trading' },
+  { id: 'edu-fractional',    label: 'Fractional' },
+  { id: 'edu-reports',       label: 'Reports' },
+  { id: 'edu-schedule',      label: 'Schedule' },
+  { id: 'edu-discovery',     label: 'Discovery' },
   { id: 'edu-glossary',      label: 'Glossary' },
   { id: 'edu-further',       label: 'Further reading' },
 ]
@@ -698,6 +702,16 @@ export default function EducationPage() {
               fire alone — it must stack with 2+ other sources to clear the floor.
             </div>
           </div>
+          <div className="edu-score-step">
+            <span className="edu-score-num">6</span>
+            <div>
+              <strong>Alert deduplication</strong> — clearing the floor makes a signal storable, not
+              automatically alertable. Only the first sighting of a ticker+direction each day sends a
+              notification; later sightings stay silent unless confidence climbs by at least the
+              re-alert threshold (default 10 points). Without this, a ticker that stays actionable all
+              session would notify on every scan cycle.
+            </div>
+          </div>
         </div>
 
         <div className="edu-callout">
@@ -976,6 +990,179 @@ export default function EducationPage() {
           skipped rather than buying 1 share at nearly 2× the intended size. Increase your
           position size if you want to trade expensive stocks.
         </div>
+      </EduSection>
+
+      {/* Section 9 — Fractional trading */}
+      <EduSection id="edu-fractional" title="Fractional trading" badge="Fractional">
+        <p className="section-desc">
+          Bracket orders can only buy <strong>whole shares</strong>, which quietly skips expensive
+          stocks — a $958 stock on a $500 budget gets no order at all. Fractional trading solves
+          that by buying a fixed <em>dollar amount</em> instead of a share count, so price stops
+          deciding what you can trade. It runs on its own Alpaca profile, separate from paper
+          trading, and has its own tab under <strong>Trading → Fractional</strong>.
+        </p>
+
+        <h4 className="edu-sub-heading">How it differs from bracket orders</h4>
+        <table className="edu-macro-table">
+          <thead><tr><th></th><th>Bracket (paper)</th><th>Fractional</th></tr></thead>
+          <tbody>
+            <tr><td>Buys</td><td>Whole shares</td><td>A dollar amount (notional)</td></tr>
+            <tr><td>Direction</td><td>Long and short</td><td>Long only — Alpaca has no fractional shorts</td></tr>
+            <tr><td>Exits</td><td>Stop/target attached at Alpaca</td><td>Polled by MarketSage, then a market sell</td></tr>
+            <tr><td>Capped by</td><td>Max open positions</td><td>A total budget in dollars</td></tr>
+            <tr><td>Account</td><td>Paper profile</td><td>Its own profile — may be paper <em>or</em> live</td></tr>
+          </tbody>
+        </table>
+
+        <h4 className="edu-sub-heading">Why exits work differently</h4>
+        <p className="section-desc">
+          A bracket order hands its stop and target to Alpaca, which watches the price for you.
+          Fractional orders have no such legs, so MarketSage watches instead: every{' '}
+          <code>FRAC_POLL_SECONDS</code> it compares each open position's live price against its
+          stop and target, and sells when one is crossed. Two consequences follow from that —
+          exits are only as prompt as the poll interval, and <strong>they only happen while the
+          app is running</strong>. If the machine is asleep, nothing is being watched.
+        </p>
+
+        <h4 className="edu-sub-heading">Settings</h4>
+        <table className="edu-macro-table">
+          <thead><tr><th>Setting</th><th>Default</th><th>What it controls</th></tr></thead>
+          <tbody>
+            <tr><td><code>FRAC_POSITION_SIZE</code></td><td>$15</td><td>Dollar amount per buy. Smaller size = more positions within the same budget</td></tr>
+            <tr><td><code>FRAC_BUDGET</code></td><td>$100</td><td>Total notional deployed at once. Once hit, further buys are blocked until something exits</td></tr>
+            <tr><td><code>FRAC_MIN_CONFIDENCE</code></td><td>85</td><td>Confidence floor just for fractional buys — usually stricter than the global floor</td></tr>
+            <tr><td><code>FRAC_POLL_SECONDS</code></td><td>60</td><td>How often exits are checked. Lower = tighter exits, more API calls</td></tr>
+            <tr><td>End-of-day close</td><td>off</td><td>Close every open fractional position near the bell rather than holding overnight</td></tr>
+          </tbody>
+        </table>
+
+        <div className="edu-callout">
+          <strong>Live money is opt-in twice.</strong> Pointing the fractional profile at a live
+          Alpaca URL is not enough on its own — autonomous buying stays hard-blocked until you
+          also explicitly allow live auto-trading. This is deliberate: it makes accidentally
+          trading real money take two separate decisions rather than one.
+        </div>
+      </EduSection>
+
+      {/* Section 10 — Reports & notifications */}
+      <EduSection id="edu-reports" title="Reports & notifications" badge="Reports">
+        <p className="section-desc">
+          MarketSage summarises its own performance and pushes it to your phone, so you can leave
+          it running unattended. There are <strong>four</strong> reports rather than one, because
+          mixing bracket and fractional results produces advice that fits neither.
+        </p>
+
+        <table className="edu-macro-table">
+          <thead><tr><th>Report</th><th>Window</th><th>Covers</th></tr></thead>
+          <tbody>
+            <tr><td>EoD Orders</td><td>Today</td><td>Bracket trades</td></tr>
+            <tr><td>EoD Fractional</td><td>Today</td><td>Fractional trades</td></tr>
+            <tr><td>Weekly Orders</td><td>7 days</td><td>Bracket trades + cross-week patterns</td></tr>
+            <tr><td>Weekly Fractional</td><td>7 days</td><td>Fractional trades + cross-week patterns</td></tr>
+          </tbody>
+        </table>
+
+        <h4 className="edu-sub-heading">Compute, then narrate</h4>
+        <p className="section-desc">
+          Every number in a report is calculated in Python and handed to the AI as structured
+          data. <strong>The model never does arithmetic</strong> — it only writes prose about
+          figures that are already correct. This matters because language models are fluent but
+          unreliable at mental maths, and a confidently wrong P&amp;L is worse than no report.
+          If the AI call fails entirely, a plain deterministic digest is sent instead, so a
+          report always arrives.
+        </p>
+
+        <h4 className="edu-sub-heading">Blocked trades become advice</h4>
+        <p className="section-desc">
+          Whenever a trade is wanted but refused — position cap reached, fractional budget
+          exhausted, not enough buying power — the reason is recorded. Those counts go into the
+          report, which is what lets it say something concrete like <em>"the cap blocked 12
+          signals this week — raise it from 5 to 8"</em> rather than a vague suggestion. Missed
+          opportunities are invisible unless you deliberately count them.
+        </p>
+
+        <h4 className="edu-sub-heading">Why you don't get 13 alerts for one ticker</h4>
+        <p className="section-desc">
+          A ticker that clears the confidence floor usually keeps clearing it for hours, and every
+          scan re-detects it. Alerting on each detection would mean a notification every scan
+          cycle. Instead, only the <strong>first sighting of a ticker and direction each day</strong>{' '}
+          notifies. A repeat only alerts again if confidence has climbed materially — the default
+          is 10 points — on the reasoning that 62% → 80% is new information while 62% → 65% is not.
+        </p>
+
+        <h4 className="edu-sub-heading">Reading the tags</h4>
+        <p className="section-desc">
+          Every notification starts with its mode and category, so the first thing you read tells
+          you what it is: <code>[Order] [Placed]</code>, <code>[Frac] [Closed]</code>,{' '}
+          <code>[Order/Frac] [Signal]</code>, <code>[Order] [Blocked]</code>. A short signal is
+          tagged <code>[Order]</code> only, since fractional shorts don't exist.
+        </p>
+      </EduSection>
+
+      {/* Section 11 — The trading day */}
+      <EduSection id="edu-schedule" title="The trading day" badge="Schedule">
+        <p className="section-desc">
+          The <strong>Schedule</strong> tab draws the whole week as a timeline — when the machine
+          wakes, when scans fire, when reports go out — so you can see the rhythm without reading
+          cron expressions.
+        </p>
+
+        <h4 className="edu-sub-heading">Two schedulers, not one</h4>
+        <p className="section-desc">
+          This trips people up, so it's worth stating plainly. Two independent schedulers drive
+          the app, and they own different things:
+        </p>
+        <table className="edu-macro-table">
+          <thead><tr><th>Scheduler</th><th>Owns</th><th>Runs</th></tr></thead>
+          <tbody>
+            <tr><td>External cron</td><td>Waking and stopping the server; triggering the four reports</td><td>Always — even while the server is off</td></tr>
+            <tr><td>In-app scheduler</td><td>Signal scans, discovery, order sync, fractional exits</td><td>Only while the server is running</td></tr>
+          </tbody>
+        </table>
+
+        <div className="edu-callout">
+          <strong>Why it must be external.</strong> Something has to start a stopped server, and
+          that something cannot itself live on the stopped server. The external cron runs
+          elsewhere for exactly this reason. The same logic explains a failure you may hit: if
+          the wake never happens, scans don't run <em>and</em> the reports fail — because the
+          report endpoints are served by the very app that never started.
+        </div>
+
+        <p className="section-desc">
+          Running on a schedule rather than continuously is also what keeps hosting near-free:
+          the server is only billed while it's awake, which for a market-hours tool is roughly a
+          third of the day.
+        </p>
+      </EduSection>
+
+      {/* Section 12 — Discovery & Activity */}
+      <EduSection id="edu-discovery" title="Discovery & Activity" badge="Discovery">
+        <p className="section-desc">
+          Two supporting tabs: one finds new tickers to watch, the other records everything the
+          system did.
+        </p>
+
+        <h4 className="edu-sub-heading">Discovery — widening the net</h4>
+        <p className="section-desc">
+          A fixed watchlist can only ever find opportunities in stocks you already thought of.
+          Discovery scans market-wide sources for unusual activity, scores each candidate, and can
+          automatically add the strongest to your watchlist, where the normal analysis pipeline
+          picks them up. Candidates below the score threshold are shown but not added, so you can
+          judge the scoring before trusting it.
+        </p>
+
+        <h4 className="edu-sub-heading">Activity — the audit trail</h4>
+        <p className="section-desc">
+          The <strong>Activity</strong> tab is a running log of scans, orders, blocked trades,
+          notifications, reports, and system events. An <strong>⛔ Errors</strong> filter narrows
+          it to warnings and failures, which is usually the fastest way to answer "why did nothing
+          trade today?".
+        </p>
+        <p className="section-desc">
+          Notification rows expand to show the <strong>exact text that was sent</strong> — not a
+          paraphrase. If a message on your phone looked wrong, this is where you check what was
+          actually delivered.
+        </p>
       </EduSection>
 
       {/* Section 8 — Glossary with live search */}

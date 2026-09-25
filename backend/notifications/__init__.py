@@ -83,6 +83,14 @@ def dispatch(
         elif _ok:
             level, msg = "info", f"Notification sent via {', '.join(_ok)}"
         else:
-            level, msg = "error", f"Notification failed on all channels: {', '.join(_bad)}"
-        save_event("notification", msg, level=level, meta={"subject": subject})
+            level, msg = (
+                "error",
+                f"Notification failed on all channels: {', '.join(_bad)}",
+            )
+        save_event(
+            "notification",
+            msg,
+            level=level,
+            meta={"subject": subject, "notification_msg": body},
+        )
     return results

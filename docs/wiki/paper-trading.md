@@ -179,7 +179,30 @@ The last three charts (realised) only appear once orders have been filled and cl
 ### Open Positions
 
 Live from Alpaca `GET /v2/positions`: Ticker · Side · Qty · Avg Entry · Current
-Price · Market Value · Unrealised P&L · P&L %.
+Price · Market Value · Unrealised P&L · P&L % · Stop · Take Profit · Proximity.
+
+#### Positions that are already on their way out
+
+A position keeps showing as open until its exit order actually **fills**, which can lag
+the trigger by a long time — a target crossed after 16:00 ET cannot fill until the next
+regular session, because bracket limit legs do not execute in extended hours.
+
+Two indicators make that state visible rather than looking like a stuck position:
+
+| Indicator | Where | Means |
+|---|---|---|
+| `⏳ SELLING` | Amber badge directly under the ticker | A live order exists on the opposite side of the position |
+| `⏳ Exit queued` | Action column, replacing the cashout button | That pending exit is why the shares are locked |
+
+![Open Positions — FPS carries the SELLING badge while its take-profit sell is queued](../screenshots/13c-open-positions.png)
+
+Both are driven by an opposite-side order in `new`, `pending_new`, `accepted`, `held` or
+`partially_filled`. Hovering either one names the actual order status. They clear
+automatically once the exit fills.
+
+When Alpaca reports `qty_available: 0`, every share is reserved against pending orders
+and no cashout is possible until those settle or are cancelled — the action column says
+so rather than offering a button that would fail.
 
 ### Orders table
 
@@ -411,6 +434,13 @@ FracTradeSkill      ──▶  place fractional buy (if can_frac, long-only, wit
         ▼
 Notification        ──▶  ✅ placed  |  ⚠️ blocked (top up / cap)  |  ✗ failed
 ```
+
+Every block is also **persisted** as an `order_blocked` event recording its reason
+(`position_cap`, `budget_cap`, `insufficient_funds`, `untradable_dropped`). Those counts
+are fed into each report's `blocked_events` context, which is what lets the weekly report
+say something concrete like *"the cap blocked 12 signals this week — raise
+`PAPER_MAX_POSITIONS` from 5 to 8"* instead of a vague suggestion. See
+[Reports § Blocked-event logging](reports.md#blocked-event-logging).
 
 ### The tradability gate
 

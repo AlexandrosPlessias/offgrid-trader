@@ -235,8 +235,9 @@ Events are written coarsely from the pipeline's choke points into an `events` ta
 | `discovery` | a discovery run starts / completes / errors |
 | `notification` | a push notification is dispatched (with channel status) or a Telegram callback arrives |
 | `scheduler` | the scheduler starts / stops, and on loop errors |
-| `report` | an EoD / weekly report is generated (or its LLM analysis fails) |
+| `report` | any of the four reports (EoD/weekly × orders/frac) is generated, or its LLM analysis fails |
 | `system` | app startup / shutdown and Settings config changes |
+| `order_blocked` | a wanted trade was skipped — position cap, budget cap, or untradable |
 
 Each event carries a `level` (`info` · `warn` · `error`). The Activity page tints
 warn events amber and error events red, and offers a dedicated **⛔ Errors** filter
@@ -244,5 +245,18 @@ warn events amber and error events red, and offers a dedicated **⛔ Errors** fi
 failures, scan errors — stand out at a glance from routine activity.
 
 ![Activity feed — category chips, the Errors filter, and a highlighted error row](../screenshots/21-activity.png)
+
+### Seeing the exact text that was sent
+
+Any event carrying a non-empty `meta` gets a **details ↓** toggle that expands the row.
+For `notification` events the expanded panel shows `meta.notification_msg` — the exact
+body that was pushed to your phone, not a paraphrase — which makes it possible to audit
+after the fact why a message read the way it did. Events without a `notification_msg`
+fall back to a pretty-printed dump of their `meta`.
+
+`order_blocked` events record the reason (`position_cap`, `budget_cap`,
+`insufficient_funds`, `untradable_dropped`) and are counted into each report's
+`blocked_events` context, so the LLM can quantify missed opportunities and recommend a
+concrete setting change. See [Reports § Blocked-event logging](reports.md#blocked-event-logging).
 
 The table is capped (newest ~5000 rows) and can be cleared from **Settings → Data** (the `events` category). This is a read-only convenience feed; Aspire remains the place for full traces and metrics.

@@ -2609,6 +2609,17 @@ details.edu-section[open] .edu-chevron {
   color: var(--text);
   margin-bottom: 2px;
 }
+/* Accordion body — preserves the 14px inter-field spacing the fields had as
+   direct flex children of .settings-section before they were wrapped. */
+.settings-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+/* Collapsed cards shrink to just their header row. */
+.settings-section.collapsed {
+  gap: 0;
+}
 .settings-row {
   display: flex;
   align-items: center;

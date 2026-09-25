@@ -55,7 +55,8 @@ def format_alert(opportunity: dict[str, Any]) -> dict[str, str]:
     source = opportunity.get("source") or "+".join(opportunity.get("sources", []) or [])
     reasons = opportunity.get("reasons") or []
 
-    subject = f"MarketSage · {side} {ticker} · {confidence:.0f}% confidence"
+    mode_tag = "Order" if side == "SHORT" else "Order/Frac"
+    subject = f"[{mode_tag}] [Signal] MarketSage · {side} {ticker} · {confidence:.0f}% confidence"
 
     lines: list[str] = [
         f"Ticker:     {ticker}",
@@ -71,9 +72,6 @@ def format_alert(opportunity: dict[str, Any]) -> dict[str, str]:
         lines.append("")
         lines.append("Reasons:")
         lines.extend(f"  - {r}" for r in reasons)
-    lines.append("")
-    lines.append("Not financial advice · Generated locally by MarketSage")
-
     return {"subject": subject, "text": "\n".join(lines)}
 
 
@@ -399,6 +397,22 @@ def send_order_notification(
             label = "Order closed" if is_close else "Order placed"
             icon = "📉" if is_close else "📈"
 
+        mode_label = "LIVE 💰" if mode == "live" else "paper"
+        mode_tag = "Frac" if kind == "fractional" else "Order"
+        cat_tag = "Closed" if is_close else "Placed"
+        tag_prefix = f"[{mode_tag}] [{cat_tag}]"
+        # When detail contains newlines it carries a fully-formatted rich message
+        # (title on first line, body on subsequent lines) — use it as-is.
+        if detail and "\n" in detail:
+            msg = f"{tag_prefix}\n{detail}"
+        else:
+            msg = (
+                f"{tag_prefix} {icon} {label} — {side.upper()} {ticker}"
+                f" · ${amount:.2f} · {mode_label}"
+            )
+            if detail:
+                msg += f"\n{detail}"
+
         save_event(
             "order",
             f"{label} — {side.upper()} {ticker} ${amount:.2f} ({mode})",
@@ -409,14 +423,11 @@ def send_order_notification(
                 "mode": mode,
                 "kind": kind,
                 "is_close": is_close,
+                "notification_msg": msg,
             },
         )
         if get_setting("order_notifications_enabled", "true") != "true":
             return
-        mode_label = "LIVE 💰" if mode == "live" else "paper"
-        msg = f"{icon} {label} — {side.upper()} {ticker} · ${amount:.2f} · {mode_label}"
-        if detail:
-            msg += f"\n{detail}"
         tags = "moneybag,white_check_mark" if mode == "live" else "white_check_mark"
         priority = "high" if mode == "live" else "default"
         send_system_event(msg, tags=tags, priority=priority)
@@ -459,7 +470,8 @@ def send_order_blocked_notification(
         )
         if get_setting("order_notifications_enabled", "true") != "true":
             return
-        msg = f"⚠️ Would buy {ticker} · ${amount:.2f} — {blurb}"
+        mode_tag = "Frac" if kind == "fractional" else "Order"
+        msg = f"[{mode_tag}] [Blocked] ⚠️ Would buy {ticker} · ${amount:.2f} — {blurb}"
         if detail:
             msg += f"\n{detail}"
         send_system_event(msg, tags="warning", priority="default")

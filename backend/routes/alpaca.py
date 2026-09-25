@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from backend.database import (
     get_paper_orders,
+    get_paper_orders_for_tickers,
     get_setting,
     set_setting,
     update_paper_order_status,
@@ -133,6 +134,18 @@ def paper_account() -> dict[str, Any]:
 def paper_orders_list(limit: int = Query(100, ge=1, le=500)) -> dict[str, Any]:
     """Return paper orders from the local DB (most recent first)."""
     rows = get_paper_orders(limit=limit)
+    return {"count": len(rows), "orders": rows}
+
+
+@router.get("/paper/orders/for-tickers")
+def paper_orders_for_tickers(
+    tickers: str = Query(..., description="Comma-separated ticker list")
+) -> dict[str, Any]:
+    """Return all orders for the given tickers — used to match open positions with bracket data."""
+    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    if not ticker_list:
+        return {"count": 0, "orders": []}
+    rows = get_paper_orders_for_tickers(ticker_list)
     return {"count": len(rows), "orders": rows}
 
 

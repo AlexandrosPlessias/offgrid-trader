@@ -31,11 +31,13 @@ const RETRY_DELAY_MS = 10_000;
 function easternOffset() {
   // Compare UTC time vs ET time to derive the offset.
   const now = new Date();
+  // hourCycle "h23" (not hour12:false) — en-US defaults to h24, which renders
+  // midnight as "24" and would skew the offset by a full day at 00:xx UTC.
   const etParts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
     hour: "numeric",
     minute: "numeric",
-    hour12: false,
+    hourCycle: "h23",
   }).formatToParts(now);
   const utcH = now.getUTCHours();
   const etH = parseInt(etParts.find((p) => p.type === "hour").value, 10);
@@ -53,14 +55,22 @@ function easternOffset() {
  * for each action is honoured per Eastern offset.
  */
 function resolveAction(cron, offset) {
+  // Match on minute+hour only, never the whole expression. The five schedules have
+  // distinct times, so the slot alone identifies the action — and matching this way
+  // cannot be broken by how the day-of-week field happens to be rendered back to us.
+  // Matching the full string previously meant any change in that field turned every
+  // action into a silent no-op.
+  const [minute, hour] = String(cron).trim().split(/\s+/);
+  const slot = `${minute} ${hour}`;
+
   // Start uses dual twins — honour only the matching season to avoid double-starts.
-  if (cron === "30 12 * * 1-5") return offset === "-0400" ? "start" : "noop";
-  if (cron === "30 13 * * 1-5") return offset === "-0500" ? "start" : "noop";
+  if (slot === "30 12") return offset === "-0400" ? "start" : "noop";
+  if (slot === "30 13") return offset === "-0500" ? "start" : "noop";
   // Evening jobs use a single EDT cron — fire regardless of offset.
   // In EST they fire 1 h early but still after market close.
-  if (cron === "5 21 * * 1-5")  return "eod";
-  if (cron === "30 21 * * 1-5") return "stop";
-  if (cron === "25 21 * * 5")   return "weekly";
+  if (slot === "5 21") return "eod";
+  if (slot === "25 21") return "weekly";
+  if (slot === "30 21") return "stop";
   return "noop";
 }
 
@@ -141,15 +151,82 @@ async function listMachines(env) {
   }
 }
 
-/** Start all stopped machines. */
+/** Get the image ref from the latest successful release. */
+async function getLatestImage(env) {
+  const r = await callFly(env, "GET", `/apps/${env.FLY_APP}/releases?status=successful&limit=1`);
+  if (!r.ok) return null;
+  try {
+    const releases = JSON.parse(r.body);
+    const latest = Array.isArray(releases) ? releases[0] : releases;
+    return latest?.image_ref ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Most recent machine (including destroyed ones) to use as a creation template.
+ *
+ * A machine built from a hand-written config would be missing the volume mount,
+ * the [[services]] port handlers, and the [env] block — it would boot but serve
+ * no traffic and have no database. Cloning the last known-good config keeps all
+ * of that intact; only the image is refreshed to the newest release.
+ */
+async function getMachineTemplate(env) {
+  const r = await callFly(env, "GET", `/apps/${env.FLY_APP}/machines?include_deleted=true`);
+  if (!r.ok) return null;
+  try {
+    const machines = JSON.parse(r.body);
+    if (!Array.isArray(machines) || !machines.length) return null;
+    const withConfig = machines.filter((m) => m?.config);
+    if (!withConfig.length) return null;
+    withConfig.sort((a, b) => new Date(b.created_at ?? 0) - new Date(a.created_at ?? 0));
+    return withConfig[0];
+  } catch (err) {
+    console.error(`[cron] getMachineTemplate parse error: ${err}`);
+    return null;
+  }
+}
+
+/** Start all stopped machines, or recreate one from the last known config if none exist. */
 async function startApp(env) {
   const machines = await listMachines(env);
+
   if (!machines.length) {
-    console.warn("[cron] startApp: no machines found.");
+    console.warn("[cron] startApp: no live machines — recreating from last known config.");
+    const template = await getMachineTemplate(env);
+    if (!template) {
+      console.error("[cron] startApp: no machine template found — run `fly deploy` manually.");
+      return;
+    }
+    const config = { ...template.config, auto_destroy: false, restart: { policy: "no" } };
+    const image = await getLatestImage(env);
+    if (image) config.image = image;
+
+    // Refuse to create a machine without the SQLite volume — a machine with no
+    // mount silently loses every trade, signal and report the app has recorded.
+    if (!Array.isArray(config.mounts) || !config.mounts.length) {
+      console.error("[cron] startApp: template has no volume mount — aborting. Run `fly deploy`.");
+      return;
+    }
+    console.log(
+      `[cron] startApp: creating machine image=${config.image} region=${template.region} ` +
+        `mounts=${config.mounts.length} services=${config.services?.length ?? 0}`
+    );
+    const r = await callFly(env, "POST", `/apps/${env.FLY_APP}/machines`, {
+      region: template.region,
+      config,
+    });
+    console.log(`[cron] startApp: machine create → ${r.status}: ${r.body.slice(0, 300)}`);
     return;
   }
-  console.log(`[cron] startApp: attempting to start ${machines.length} machine(s).`);
+
+  console.log(`[cron] startApp: starting ${machines.length} machine(s).`);
   for (const m of machines) {
+    if (m.state === "started") {
+      console.log(`[cron] machine ${m.id} already running — skipping.`);
+      continue;
+    }
     console.log(`[cron] starting machine ${m.id} (state: ${m.state})`);
     const r = await callFly(env, "POST", `/apps/${env.FLY_APP}/machines/${m.id}/start`);
     console.log(`[cron] machine ${m.id} start → ${r.status}`);
@@ -202,11 +279,14 @@ export default {
       return;
     }
 
-    // ── EoD report ────────────────────────────────────────────────────────────
+    // ── EoD reports (orders + frac, sequential so both notifications land) ──────
     if (action === "eod") {
-      console.log("[cron] Sending EoD report…");
-      const eod = await callBackend(env, "GET", "/reports/eod");
-      console.log(`[cron] EoD result: ok=${eod.ok} status=${eod.status}`);
+      console.log("[cron] Sending EoD orders report…");
+      const eodOrders = await callBackend(env, "GET", "/reports/eod/orders");
+      console.log(`[cron] EoD orders result: ok=${eodOrders.ok} status=${eodOrders.status}`);
+      console.log("[cron] Sending EoD frac report…");
+      const eodFrac = await callBackend(env, "GET", "/reports/eod/frac");
+      console.log(`[cron] EoD frac result: ok=${eodFrac.ok} status=${eodFrac.status}`);
       console.log(`[cron] action eod completed in ${Date.now() - startedAt}ms`);
       return;
     }
@@ -221,9 +301,12 @@ export default {
 
     // ── Weekly LLM summary ────────────────────────────────────────────────────
     if (action === "weekly") {
-      console.log("[cron] Sending weekly LLM summary…");
-      const r = await callBackend(env, "GET", "/reports/llm-summary?period=weekly");
-      console.log(`[cron] Weekly summary result: ok=${r.ok} status=${r.status}`);
+      console.log("[cron] Sending weekly orders report…");
+      const weeklyOrders = await callBackend(env, "GET", "/reports/weekly/orders");
+      console.log(`[cron] Weekly orders result: ok=${weeklyOrders.ok} status=${weeklyOrders.status}`);
+      console.log("[cron] Sending weekly frac report…");
+      const weeklyFrac = await callBackend(env, "GET", "/reports/weekly/frac");
+      console.log(`[cron] Weekly frac result: ok=${weeklyFrac.ok} status=${weeklyFrac.status}`);
       console.log(`[cron] action weekly completed in ${Date.now() - startedAt}ms`);
       return;
     }

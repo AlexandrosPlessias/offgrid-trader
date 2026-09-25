@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
 from backend.database import get_setting, get_usage_stats
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -104,7 +107,11 @@ async def provider_quota() -> dict[str, Any]:
                 )
             )
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Groq quota probe failed: {exc}") from exc
+            _log.exception("Groq quota probe failed")
+            raise HTTPException(
+                status_code=502,
+                detail="Groq quota probe failed — see the application logs for details.",
+            ) from exc
 
         h = resp.headers
         return {

@@ -129,6 +129,43 @@ curl https://offgrid-trader.fly.dev/health
 
 ---
 
+## Machine lifecycle — the cron owns start/stop
+
+`fly.toml` sets both `auto_start_machines` and `auto_stop_machines` to **false** on every
+service, with `min_machines_running = 0`. That is deliberate: the
+[Cloudflare Workers cron](cloudflare-cron.md) starts the machine at 8:30 AM ET and stops
+it after the close, and nothing else should override that.
+
+Leaving `auto_start_machines = true` would let any inbound HTTP request wake the
+machine — including the ntfy sidecar's own WebSocket reconnects from your phone, which
+would silently keep the machine running (and billable) around the clock. For the same
+reason ntfy's auto-start is disabled.
+
+### Build stamping — knowing what triggered a start
+
+`scripts/cloud-deploy/deploy.sh` passes two docker build args:
+
+| Build arg | Value | Purpose |
+|---|---|---|
+| `BUILD_SHA` | `git rev-parse HEAD` | Identifies the exact commit in the image |
+| `BUILD_SOURCE` | `github-actions` in CI, else `manual-deploy` | Identifies who built it |
+
+On startup the app compares **both** the image's `BUILD_SHA` and its `FLY_MACHINE_ID`
+against the last values it saw. Either one changing means a deploy; both unchanged means
+the same machine restarted on the same image — a scheduled cron wake. That is what lets
+the startup notification say `🚀 MarketSage is live · Scheduled Trigger` versus
+`· Manual Deploy (a3f7c12)`.
+
+The machine id is what makes **redeploying an unchanged commit** detectable. A deploy
+always replaces the machine, whereas a cron wake restarts the existing one — so comparing
+the SHA alone reported same-commit redeploys as scheduled wakes.
+
+Because the SHA is read from git at build time, deploying with **uncommitted changes**
+stamps the image with a commit that does not contain them. Commit before deploying if you
+want that label to be meaningful.
+
+---
+
 ## Part 2 — Vercel (frontend)
 
 ### 1. Create a Vercel account

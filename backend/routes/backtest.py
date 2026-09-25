@@ -329,7 +329,10 @@ async def backtest_compare(
         raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
     except Exception as exc:
         _log.exception("backtest_compare error: %s", _log_safe(str(exc)))
-        raise HTTPException(status_code=503, detail=f"Compare failed: {exc}") from exc
+        raise HTTPException(
+            status_code=503,
+            detail="Compare failed — see the application logs for details.",
+        ) from exc
 
     cleaned = raw.strip()
     if cleaned.startswith("```"):
@@ -462,8 +465,11 @@ async def backtest_experiment_advisor(run_id: int) -> dict[str, Any]:
     except LLMError as exc:
         raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
     except Exception as exc:
-        _log.error("backtest_experiment_advisor error for run %d", run_id)
-        raise HTTPException(status_code=503, detail=f"Experiment Advisor failed: {exc}") from exc
+        _log.exception("backtest_experiment_advisor error for run %d", int(run_id))
+        raise HTTPException(
+            status_code=503,
+            detail="Experiment Advisor failed — see the application logs for details.",
+        ) from exc
 
     cleaned = raw.strip()
     if cleaned.startswith("```"):
@@ -670,8 +676,11 @@ async def backtest_review(run_id: int) -> dict[str, Any]:
     except LLMError as exc:
         raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
     except Exception as exc:
-        _log.error("backtest_review error for run %d", run_id)
-        raise HTTPException(status_code=503, detail=f"Review failed: {exc}") from exc
+        _log.exception("backtest_review error for run %d", int(run_id))
+        raise HTTPException(
+            status_code=503,
+            detail="Review failed — see the application logs for details.",
+        ) from exc
 
     cleaned = raw.strip()
     if cleaned.startswith("```"):

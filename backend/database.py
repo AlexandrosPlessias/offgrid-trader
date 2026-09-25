@@ -314,6 +314,10 @@ CREATE TABLE IF NOT EXISTS reports (
     channels          TEXT,                     -- JSON of per-channel delivery results
     llm               INTEGER NOT NULL DEFAULT 0,
     model             TEXT,                      -- LLM model that generated the analysis
+    llm_provider      TEXT,                      -- provider that generated the analysis
+    prompt_tokens     INTEGER,
+    completion_tokens INTEGER,
+    context_json      TEXT,                      -- structured data used by charts in the UI
     created_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_reports_created ON reports(created_at);
@@ -395,6 +399,7 @@ def init_db(db_path: str | None = None) -> None:
             ("signal_confidence", "REAL"),
             ("signal_source", "TEXT"),
             ("signal_timestamp", "TEXT"),
+            ("exit_price", "REAL"),
         ]:
             if _col not in existing_po_cols:
                 conn.execute(f"ALTER TABLE paper_orders ADD COLUMN {_col} {_def}")
@@ -418,18 +423,64 @@ def init_db(db_path: str | None = None) -> None:
             "CREATE INDEX IF NOT EXISTS idx_bt_floor_suggests_run"
             " ON backtest_floor_suggests(run_id)"
         )
-        # reports: add model column if missing (records which LLM generated the analysis).
+        # reports: add columns if missing.
         existing_report_cols = {
             row[1] for row in conn.execute("PRAGMA table_info(reports)").fetchall()
         }
         if "model" not in existing_report_cols:
             conn.execute("ALTER TABLE reports ADD COLUMN model TEXT")
+        if "llm_provider" not in existing_report_cols:
+            conn.execute("ALTER TABLE reports ADD COLUMN llm_provider TEXT")
+        if "prompt_tokens" not in existing_report_cols:
+            conn.execute("ALTER TABLE reports ADD COLUMN prompt_tokens INTEGER")
+        if "completion_tokens" not in existing_report_cols:
+            conn.execute("ALTER TABLE reports ADD COLUMN completion_tokens INTEGER")
+        if "context_json" not in existing_report_cols:
+            conn.execute("ALTER TABLE reports ADD COLUMN context_json TEXT")
         conn.commit()
 
 
 # --------------------------------------------------------------------------- #
 # Writes
 # --------------------------------------------------------------------------- #
+def get_todays_signal(
+    ticker: str, sig_type: str, db_path: str | None = None
+) -> tuple[int, float] | None:
+    """Return ``(id, confidence)`` of today's signal for this ticker+type, else None.
+
+    Mirrors the dedup key used by :func:`save_signal`. Callers use it to tell a
+    first sighting from a repeat so a ticker that stays actionable all session
+    produces one alert rather than one per scan cycle. The confidence is the one
+    last alerted on, so callers can re-alert when it climbs materially.
+    """
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT id, confidence FROM signals
+            WHERE ticker = ? AND type = ?
+              AND date(created_at) = date('now')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (ticker, sig_type),
+        ).fetchone()
+    return (row[0], float(row[1] or 0.0)) if row else None
+
+
+def update_signal_confidence(signal_id: int, confidence: float, db_path: str | None = None) -> None:
+    """Overwrite a signal's confidence — called when a re-alert is issued.
+
+    Keeps the stored value equal to the last alerted value, so the next
+    comparison measures the climb since the most recent notification rather
+    than since the first sighting of the day.
+    """
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE signals SET confidence = ? WHERE id = ?",
+            (float(confidence), signal_id),
+        )
+
+
 def save_signal(
     opportunity: dict[str, Any],
     llm_provider: str | None = None,
@@ -629,6 +680,17 @@ def get_usage_stats(days: int = 30, db_path: str | None = None) -> dict[str, Any
                COALESCE(llm_model,    'unknown') AS llm_model,
                'backtest_compare' AS source
         FROM backtest_compares
+        WHERE (prompt_tokens > 0 OR completion_tokens > 0)
+
+        UNION ALL
+
+        SELECT created_at,
+               prompt_tokens,
+               completion_tokens,
+               COALESCE(llm_provider, 'unknown') AS llm_provider,
+               COALESCE(model, 'unknown') AS llm_model,
+               'report' AS source
+        FROM reports
         WHERE (prompt_tokens > 0 OR completion_tokens > 0)
     """
 
@@ -1122,7 +1184,13 @@ def save_event(
         with _connect(db_path) as conn:
             conn.execute(
                 "INSERT INTO events (ts, category, level, message, meta) VALUES (?, ?, ?, ?, ?)",
-                (_now_iso(), category, level, message, json.dumps(meta) if meta else None),
+                (
+                    _now_iso(),
+                    category,
+                    level,
+                    message,
+                    json.dumps(meta) if meta else None,
+                ),
             )
             # Bound the table so the feed can't grow without limit.
             conn.execute(
@@ -1169,6 +1237,44 @@ def get_events(
     return out
 
 
+def get_blocked_event_counts(since_date: str, db_path: str | None = None) -> dict[str, int]:
+    """Return counts of blocked-trade events since *since_date* (ISO date prefix).
+
+    Keys: ``position_cap_hits``, ``budget_cap_hits``, ``insufficient_funds_hits``,
+    ``untradable_dropped``.  Used to give the LLM analyst visibility into missed
+    opportunities that never appear in P&L data.
+    """
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT meta FROM events WHERE category = 'order_blocked' AND ts >= ?",
+            (since_date,),
+        ).fetchall()
+        scan_dropped = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE category = 'scan' AND level = 'warning' AND ts >= ?",
+            (since_date,),
+        ).fetchone()[0]
+
+    counts: dict[str, int] = {
+        "position_cap_hits": 0,
+        "budget_cap_hits": 0,
+        "insufficient_funds_hits": 0,
+        "untradable_dropped": int(scan_dropped),
+    }
+    for (meta_str,) in rows:
+        try:
+            meta = json.loads(meta_str) if meta_str else {}
+        except (ValueError, TypeError):
+            meta = {}
+        reason = meta.get("reason", "")
+        if reason == "position_cap":
+            counts["position_cap_hits"] += 1
+        elif reason == "budget_cap":
+            counts["budget_cap_hits"] += 1
+        elif reason == "insufficient_funds":
+            counts["insufficient_funds_hits"] += 1
+    return counts
+
+
 # --------------------------------------------------------------------------- #
 # Reports — persisted EoD / weekly reports (notification + full versions)
 # --------------------------------------------------------------------------- #
@@ -1182,13 +1288,19 @@ def save_report_record(
     channels: dict[str, Any] | None = None,
     llm: bool = False,
     model: str | None = None,
+    llm_provider: str | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    context_json: str | None = None,
     db_path: str | None = None,
 ) -> int:
     """Persist a generated report; returns its new row id."""
     with _connect(db_path) as conn:
         cur = conn.execute(
             "INSERT INTO reports (type, report_date, headline, notification_body, "
-            "full_body, channels, llm, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "full_body, channels, llm, model, llm_provider, prompt_tokens, "
+            "completion_tokens, context_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 report_type,
                 report_date,
@@ -1198,6 +1310,10 @@ def save_report_record(
                 json.dumps(channels) if channels else None,
                 1 if llm else 0,
                 model,
+                llm_provider,
+                prompt_tokens or None,
+                completion_tokens or None,
+                context_json,
                 _now_iso(),
             ),
         )
@@ -1219,7 +1335,8 @@ def get_report_records(
     with _connect(db_path) as conn:
         rows = conn.execute(
             f"SELECT id, type, report_date, headline, notification_body, full_body, "  # noqa: S608
-            f"channels, llm, model, created_at FROM reports {where} ORDER BY id DESC LIMIT ?",
+            f"channels, llm, model, context_json, created_at FROM reports {where} "
+            "ORDER BY id DESC LIMIT ?",
             params,
         ).fetchall()
     out: list[dict[str, Any]] = []
@@ -2015,6 +2132,7 @@ def update_paper_order_status(
         "filled_at",
         "closed_at",
         "realized_pnl",
+        "exit_price",
     }
     fields = {k: v for k, v in updates.items() if k in allowed and v is not None}
     if not fields:
@@ -2028,6 +2146,32 @@ def update_paper_order_status(
             values,
         )
         conn.commit()
+
+
+def get_paper_orders_for_tickers(tickers: list[str], db_path: str | None = None) -> list[dict]:
+    """Return all paper orders for the given tickers (most recent first per ticker).
+
+    Used to match open Alpaca positions with their bracket order data (stop/target)
+    without being constrained by a global row limit.
+    """
+    if not tickers:
+        return []
+    placeholders = ",".join("?" * len(tickers))
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT po.*,
+                   COALESCE(po.signal_confidence, s.confidence) AS signal_confidence,
+                   COALESCE(po.signal_source,     s.source)     AS signal_source,
+                   COALESCE(po.signal_timestamp,  s.timestamp)  AS signal_timestamp
+            FROM paper_orders po
+            LEFT JOIN signals s ON s.id = po.signal_id
+            WHERE po.ticker IN ({placeholders})
+            ORDER BY po.created_at DESC
+            """,  # noqa: S608
+            tickers,
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_paper_order_by_signal(signal_id: int, db_path: str | None = None) -> dict | None:
@@ -2279,7 +2423,10 @@ def update_discovery_run(
         )
     elif status == "error":
         save_event(
-            "discovery", f"Discovery run error: {error}", level="error", meta={"run_id": run_id}
+            "discovery",
+            f"Discovery run error: {error}",
+            level="error",
+            meta={"run_id": run_id},
         )
 
 

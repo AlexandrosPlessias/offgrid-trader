@@ -99,7 +99,7 @@ docker compose -f infra/docker-compose.yml ps
 
 | URL | Service | Purpose |
 |---|---|---|
-| http://localhost:5174 | React UI | Dashboard · Explorer · Learn · Settings |
+| http://localhost:5174 | React UI | Dashboard · Trading · Discovery · Explorer · Activity · Reports · Learn · Schedule · Backtesting · Settings |
 | http://localhost:8010 | Backend API | REST API root |
 | http://localhost:8010/docs | Backend API | OpenAPI interactive docs |
 | http://localhost:8010/health | Backend API | Liveness + scheduler status |
@@ -141,8 +141,14 @@ Full reference with request/response shapes: [docs/wiki/api.md](docs/wiki/api.md
 
 - **Dashboard** — watchlist management, recent signals table with filters (side, confidence, ticker), per-row delete
 - **Explorer** — ad-hoc analysis: live pipeline stepper, price snapshot, 3-month chart, RSI/MACD/EMA charts, AI reasoning, raw indicator table, collapsible Analysis History panel
+- **Trading** — paper-trading dashboard: account metrics, equity curve, open positions, full orders table; separate **Fractional** tab
+- **Discovery** — trending-candidate scanning, scoring, and watchlist auto-add
+- **Activity** — the in-app event log; notification rows expand to show the exact text that was sent
+- **Reports** — the four LLM reports (EoD/weekly × orders/frac), with history and manual generate
 - **Learn** — in-app wiki: pipeline, indicators, fundamentals/macro/balance sheet, opportunity rules, trading glossary, further reading
-- **Settings** (⚙) — scheduler toggle + interval, alerts toggle, Ollama model/timeout override, data-reset button
+- **Schedule** — the trading week as a timeline: wake, scans, discovery, reports, stop
+- **Backtesting** — historical replay with the confidence-floor sweep and runs comparator
+- **Settings** (⚙) — scheduler toggle + interval, alerts, AI provider/model (incl. per-report models), paper & fractional trading, notifications, data reset
 
 ### curl examples
 

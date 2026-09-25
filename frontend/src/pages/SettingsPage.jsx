@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, createContext, useContext } from 'react'
 import { API, getAuthHeaders } from '../utils/api'
 import UsageSection from './UsageSection'
 import InfoTip from '../components/shared/InfoTip'
@@ -6,10 +6,9 @@ import InfoTip from '../components/shared/InfoTip'
 const SETTINGS_GROUPS = [
   { label: 'Signals', icon: '📡', children: [
     { id: 'settings-signal',        icon: '📡', label: 'Signal Config' },
-    { id: 'settings-notifications', icon: '🔔', label: 'Notifications' },
     { id: 'settings-discovery',     icon: '🔥', label: 'Discovery' },
   ]},
-  { label: 'Trading', icon: '📈', children: [
+  { label: 'Trading', icon: '💹', children: [
     { id: 'settings-paper',         icon: '📈', label: 'Order Trading' },
     { id: 'settings-frac',          icon: '🪙', label: 'Live / Fractional' },
     { id: 'settings-autotrade',     icon: '🤖', label: 'Autonomous' },
@@ -19,17 +18,40 @@ const SETTINGS_GROUPS = [
     { id: 'settings-usage',         icon: '⚡', label: 'AI Usage' },
     { id: 'settings-perf',          icon: '🚀', label: 'Performance' },
   ]},
-  { label: 'Data', icon: '💾', children: [
+  { label: 'Data', icon: '🗄', children: [
     { id: 'settings-cache',         icon: '💾', label: 'Data Cache' },
     { id: 'settings-data',          icon: '🗑️', label: 'Data' },
   ]},
+  { label: 'Notifications', icon: '🔔', children: [
+    { id: 'settings-notifications', icon: '🔔', label: 'Notifications' },
+  ]},
 ]
 
+// Accordion state shared with every SettingSection card (which live across several
+// component boundaries), so the left-nav can expand a card and scroll to it.
+const AccordionCtx = createContext(null)
+
 function SettingSection({ id, title, icon, children }) {
+  const acc = useContext(AccordionCtx)
+  // When no provider is present (defensive), fall back to always-open.
+  const open = acc ? acc.isOpen(id) : true
   return (
-    <div id={id} className="settings-section">
-      <div className="settings-section-title">{icon} {title}</div>
-      {children}
+    <div id={id} className={`settings-section${open ? '' : ' collapsed'}`}>
+      <button
+        type="button"
+        className="settings-section-title"
+        onClick={() => acc?.toggle(id)}
+        aria-expanded={open}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          width: '100%', background: 'none', border: 'none', cursor: 'pointer',
+          textAlign: 'left', color: 'inherit', font: 'inherit', padding: 0,
+        }}
+      >
+        <span>{icon} {title}</span>
+        <span style={{ fontSize: 12, opacity: 0.6, marginLeft: 8 }}>{open ? '▾' : '▸'}</span>
+      </button>
+      {open && <div className="settings-section-body">{children}</div>}
     </div>
   )
 }
@@ -973,13 +995,16 @@ function AutonomousTradingSection() {
   const [saveStatus, setSaveStatus] = useState(null)
   const [saveErr,    setSaveErr]    = useState('')
 
-  const [confidenceFloor,   setConfidenceFloor]   = useState(75)
-  const [fracMinConf,       setFracMinConf]       = useState(85)
-  const [paperMinConf,      setPaperMinConf]      = useState(0)
-  const [maxPositions,      setMaxPositions]      = useState(5)
-  const [dropMode,          setDropMode]          = useState('untradable')
-  const [fracAllowLive,     setFracAllowLive]     = useState(false)
-  const [envDefaults,       setEnvDefaults]       = useState(null)
+  const [confidenceFloor,       setConfidenceFloor]       = useState(75)
+  const [fracMinConf,           setFracMinConf]           = useState(85)
+  const [paperMinConf,          setPaperMinConf]          = useState(0)
+  const [maxPositions,          setMaxPositions]          = useState(5)
+  const [dropMode,              setDropMode]              = useState('untradable')
+  const [fracAllowLive,         setFracAllowLive]         = useState(false)
+  const [rsiOversold,           setRsiOversold]           = useState(30)
+  const [rsiOverbought,         setRsiOverbought]         = useState(70)
+  const [volumeSpikeMultiplier, setVolumeSpikeMultiplier] = useState(2)
+  const [envDefaults,           setEnvDefaults]           = useState(null)
 
   useEffect(() => {
     fetch(`${API}/settings`, { headers: getAuthHeaders() })
@@ -991,6 +1016,9 @@ function AutonomousTradingSection() {
         setMaxPositions(d.paper_max_positions ?? 5)
         setDropMode(d.signal_drop_mode ?? 'untradable')
         setFracAllowLive(d.frac_autotrade_allow_live ?? false)
+        setRsiOversold(d.rsi_oversold ?? 30)
+        setRsiOverbought(d.rsi_overbought ?? 70)
+        setVolumeSpikeMultiplier(d.volume_spike_multiplier ?? 2)
         setEnvDefaults({
           confidence_floor: d.confidence_floor_env ?? 75,
           frac_min_confidence: d.frac_min_confidence_env ?? 85,
@@ -998,6 +1026,9 @@ function AutonomousTradingSection() {
           paper_max_positions: d.paper_max_positions_env ?? 5,
           signal_drop_mode: d.signal_drop_mode_env ?? 'untradable',
           frac_autotrade_allow_live: d.frac_autotrade_allow_live_env ?? false,
+          rsi_oversold: d.rsi_oversold_env ?? 30,
+          rsi_overbought: d.rsi_overbought_env ?? 70,
+          volume_spike_multiplier: d.volume_spike_multiplier_env ?? 2,
         })
       })
       .catch(() => setFetchErr(true))
@@ -1011,6 +1042,9 @@ function AutonomousTradingSection() {
     setMaxPositions(envDefaults.paper_max_positions)
     setDropMode(envDefaults.signal_drop_mode)
     setFracAllowLive(envDefaults.frac_autotrade_allow_live)
+    setRsiOversold(envDefaults.rsi_oversold)
+    setRsiOverbought(envDefaults.rsi_overbought)
+    setVolumeSpikeMultiplier(envDefaults.volume_spike_multiplier)
   }
 
   const save = async () => {
@@ -1026,6 +1060,9 @@ function AutonomousTradingSection() {
           paper_max_positions: Number(maxPositions),
           signal_drop_mode: dropMode,
           frac_autotrade_allow_live: fracAllowLive,
+          rsi_oversold: Number(rsiOversold),
+          rsi_overbought: Number(rsiOverbought),
+          volume_spike_multiplier: Number(volumeSpikeMultiplier),
         }),
       })
       if (!r.ok) throw new Error(await r.text())
@@ -1059,6 +1096,43 @@ function AutonomousTradingSection() {
           (from .env — CONFIDENCE_FLOOR / FRAC_MIN_CONFIDENCE / PAPER_MAX_POSITIONS / SIGNAL_DROP_MODE …)
         </span>
       </button>
+
+      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                    letterSpacing: '0.09em', marginBottom: 10 }}>📡 Signal Detection Thresholds</div>
+
+      <div className="settings-row">
+        <label className="settings-label">RSI oversold</label>
+        <input className="settings-input" type="number" min={0} max={100} step={1}
+               value={rsiOversold} onChange={e => setRsiOversold(e.target.value)}
+               style={{ width: 70 }} />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          RSI below this → long signal candidate (lower = rarer, stronger signal)
+        </span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">RSI overbought</label>
+        <input className="settings-input" type="number" min={0} max={100} step={1}
+               value={rsiOverbought} onChange={e => setRsiOverbought(e.target.value)}
+               style={{ width: 70 }} />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          RSI above this → short signal candidate (higher = rarer, stronger signal)
+        </span>
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Volume spike multiplier</label>
+        <input className="settings-input" type="number" min={0.1} max={20} step={0.1}
+               value={volumeSpikeMultiplier} onChange={e => setVolumeSpikeMultiplier(e.target.value)}
+               style={{ width: 70 }} />
+        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          Volume must be ×N above average to confirm the signal (raise to filter noise)
+        </span>
+      </div>
+
+      <div style={{ borderTop: '1px solid var(--border)', margin: '14px 0', opacity: 0.4 }} />
+      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                    letterSpacing: '0.09em', marginBottom: 10 }}>🎯 Confidence Gates</div>
 
       <div className="settings-row">
         <label className="settings-label">Signal / bracket confidence floor</label>
@@ -1147,14 +1221,33 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
     return next
   })
 
+  // Content-area accordion cards — all collapsed by default; multiple may be open.
+  const [openSections, setOpenSections] = useState(new Set())
+  const accordion = {
+    isOpen: (id) => openSections.has(id),
+    toggle: (id) => setOpenSections(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    }),
+    open: (id) => setOpenSections(prev => new Set(prev).add(id)),
+  }
+
+  // Expand a section's card and scroll to it (used by the left-nav links).
+  const revealSection = (id) => {
+    setOpenSections(prev => new Set(prev).add(id))
+    // Let the card expand before scrolling so the header lands at the top.
+    setTimeout(() => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60)
+  }
+
   // Scroll to a specific section when opened from another page (e.g. Trending → Discovery)
   useEffect(() => {
     if (!initialSection) return
-    // Auto-expand the group that contains the deep-linked section.
+    // Auto-expand the group that contains the deep-linked section + its card.
     const grp = SETTINGS_GROUPS.find(g => g.children.some(c => c.id === initialSection))
     if (grp) setOpenGroups(new Set([grp.label]))
-    const el = document.getElementById(initialSection)
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    setOpenSections(new Set([initialSection]))
+    setTimeout(() => document.getElementById(initialSection)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60)
     onInitialSectionConsumed?.()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1167,15 +1260,30 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
   const [showLlmApiKey, setShowLlmApiKey] = useState(false)
   const [llmStatus,    setLlmStatus]    = useState(null)
   const [llmErr,       setLlmErr]       = useState('')
+  const [llmTestState, setLlmTestState] = useState(null)  // null | 'testing' | 'ok' | 'error'
+  const [llmTestMsg,   setLlmTestMsg]   = useState('')
   const [useEnvDefaults, setUseEnvDefaults] = useState(false)
   const [llmModelEnvDefault,   setLlmModelEnvDefault]   = useState('')
   const [llmBaseUrlEnvDefault, setLlmBaseUrlEnvDefault] = useState('')
   const [llmApiKeyEnvSet,      setLlmApiKeyEnvSet]      = useState(false)
   const [llmReasoningEffort,   setLlmReasoningEffort]   = useState('none')
   const [providerModels,       setProviderModels]       = useState([])
+  const [providerModelLists,   setProviderModelLists]   = useState({})  // provider → string[]
   const [modelChoice,          setModelChoice]          = useState('')
   const [llmFallbackProvider,  setLlmFallbackProvider]  = useState('')
   const [llmFallbackModel,     setLlmFallbackModel]     = useState('')
+  const [fallbackSelection,    setFallbackSelection]    = useState(null)  // null=not loaded; ""=disabled; "p:m"=set
+  const [fallbackCustomModel,  setFallbackCustomModel]  = useState('')
+  const [changingApiKey,       setChangingApiKey]       = useState(false)
+  const [providerModelPrefs,   setProviderModelPrefs]   = useState({})   // provider → active/default model
+  const [providerSavedModels,  setProviderSavedModels]  = useState({})   // provider → [saved model profiles]
+  const [providerKeyStatus,    setProviderKeyStatus]    = useState({})
+
+  // ── Per-report-type model overrides ────────────────────────────────────────
+  const [reportModelEodFrac,      setReportModelEodFrac]      = useState('')
+  const [reportModelEodOrders,    setReportModelEodOrders]    = useState('')
+  const [reportModelWeeklyFrac,   setReportModelWeeklyFrac]   = useState('')
+  const [reportModelWeeklyOrders, setReportModelWeeklyOrders] = useState('')
 
   // ── Signal-scan LLM switch ──────────────────────────────────────────────────
   const [signalLlmEnabled,     setSignalLlmEnabled]     = useState(true)
@@ -1199,14 +1307,8 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
     }
   }
 
-  const cloudModelSuggestions = {
-    groq: ['qwen/qwen3.6-27b'],
-    gemini: ['gemini-3.5-flash-lite', 'gemini-3.5-flash'],
-    mistral: ['mistral-small-latest', 'mistral-large-latest'],
-  }
   const REASONING_OPTIONS = ['none', 'low', 'medium', 'high']
   const supportsReasoning = ['groq', 'gemini', 'mistral'].includes(llmProvider)
-  const ollamaModelSuggestions = ['qwen2.5:3b', 'qwen2.5:7b', 'qwen2.5:14b']
   const envDefaultsActive = useEnvDefaults && llmProvider !== 'custom'
 
   // ── Ollama model + timeout ──────────────────────────────────────────────────
@@ -1215,17 +1317,31 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
   const [timeout, setTimeout_] = useState('')
   const [ollamaStatus, setOllamaStatus] = useState(null)
   const [ollamaErr,    setOllamaErr]    = useState('')
+
+  // Model lists come entirely from the backend: cloud lists from GROQ_MODEL /
+  // GEMINI_MODEL / MISTRAL_MODEL env vars (comma-separated), Ollama from a live
+  // /api/tags query. No hardcoded fallbacks — if a list is empty the dropdown
+  // just offers "type your own".
+  const ALL_PROVIDER_MODELS = [
+    { provider: 'groq',    icon: '⚡', label: 'Groq',    models: providerModelLists.groq    ?? [] },
+    { provider: 'gemini',  icon: '✨', label: 'Gemini',  models: providerModelLists.gemini  ?? [] },
+    { provider: 'mistral', icon: '🌬️', label: 'Mistral', models: providerModelLists.mistral ?? [] },
+    { provider: 'ollama',  icon: '🖥️', label: 'Ollama',  models: models },
+  ]
   const modelValue = envDefaultsActive ? llmModelEnvDefault : (llmProvider === 'ollama' ? model : llmModel)
-  const modelOptions = [...new Set(
-    llmProvider === 'ollama'
-      ? [...ollamaModelSuggestions, ...models]
-      : [...(providerModels.length ? providerModels : (cloudModelSuggestions[llmProvider] ?? []))]
-  )]
-  const modelSelectValue = modelChoice || (modelOptions.includes(modelValue) ? modelValue : '__custom__')
+  const modelOptions = [...new Set([
+    ...(llmProvider === 'ollama'
+      ? models
+      : (providerModels.length ? providerModels : (providerModelLists[llmProvider] ?? []))),
+    // always include the env-default model so custom .env values appear as a selectable option
+    ...(llmModelEnvDefault ? [llmModelEnvDefault] : []),
+  ])]
+  // Only treat the current value as "custom" when the user has actually typed
+  // something that isn't in the list — not when modelValue is empty (provider just switched).
+  const modelSelectValue = modelChoice || (modelValue && modelOptions.includes(modelValue) ? modelValue : (modelValue ? '__custom__' : ''))
   const customModelEntry = llmProvider === 'custom' || modelSelectValue === '__custom__'
   // Show dots whenever a key is known — either saved in DB or present in .env,
   // regardless of whether the "Use .env defaults" checkbox is ticked.
-  const savedApiKeyMask = (llmApiKeySet || llmApiKeyEnvSet) ? '••••••••••••' : ''
 
   // ── Paper trading settings ──────────────────────────────────────────────────
   const [paperProfileName,         setPaperProfileName]         = useState('')
@@ -1439,7 +1555,14 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
     Promise.all([
       fetch(`${API}/settings`, { headers: getAuthHeaders() }).then(r => r.json()),
       fetch(`${API}/settings/models`, { headers: getAuthHeaders() }).then(r => r.json()),
-    ]).then(([cfg, m]) => {
+      // Fetch model lists for all cloud providers at once so ALL_PROVIDER_MODELS is populated
+      ...['groq', 'gemini', 'mistral'].map(p =>
+        fetch(`${API}/settings/models?provider=${p}`, { headers: getAuthHeaders() })
+          .then(r => r.json()).then(d => ({ provider: p, models: d.models ?? [] }))
+          .catch(() => ({ provider: p, models: [] }))
+      ),
+    ]).then(([cfg, m, ...provLists]) => {
+      setProviderModelLists(Object.fromEntries(provLists.map(x => [x.provider, x.models])))
       // LLM provider
       setLlmProvider(cfg.llm_provider ?? 'ollama')
       setLlmApiKeySet(cfg.llm_api_key_set ?? false)
@@ -1470,6 +1593,18 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
       setAlpacaSecretEnvSet(cfg.alpaca_secret_env_set ?? false)
       setPaperPositionSize(cfg.paper_trade_position_size ?? 500)
       if (cfg.paper_trade_min_confidence != null) setPaperMinConf(cfg.paper_trade_min_confidence)
+      // Fallback — must be loaded here so saveLlm doesn't overwrite it with ""
+      if (cfg.llm_fallback_provider) {
+        setFallbackSelection(`${cfg.llm_fallback_provider}:${cfg.llm_fallback_model ?? ''}`)
+        setLlmFallbackProvider(cfg.llm_fallback_provider)
+        setLlmFallbackModel(cfg.llm_fallback_model ?? '')
+      } else {
+        setFallbackSelection('')
+      }
+      // Per-provider model prefs + saved profiles + env key status
+      if (cfg.provider_model_prefs)  setProviderModelPrefs(cfg.provider_model_prefs)
+      if (cfg.provider_saved_models) setProviderSavedModels(cfg.provider_saved_models)
+      if (cfg.provider_key_status)   setProviderKeyStatus(cfg.provider_key_status)
     }).catch(() => {})
     loadCacheStats()
     loadPerfSettings()
@@ -1482,7 +1617,11 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
       fetch(`${API}/settings/models${query}`, { headers: getAuthHeaders() }).then(r => r.json()),
     ])
     setLlmApiKeySet(cfg.llm_api_key_set ?? false)
-    setLlmModel(cfg.llm_model ?? '')
+    // Use this provider's saved model pref, not the globally-active model (which belongs to whoever was primary)
+    setLlmModel(cfg.provider_model_prefs?.[provider] || cfg.llm_model || '')
+    if (cfg.provider_model_prefs)  setProviderModelPrefs(cfg.provider_model_prefs)
+    if (cfg.provider_saved_models) setProviderSavedModels(cfg.provider_saved_models)
+    setModelChoice('')   // always reset custom-entry mode on provider switch
     setLlmBaseUrl(cfg.llm_base_url ?? '')
     setLlmModelEnvDefault(cfg.llm_model_env_default ?? '')
     setLlmBaseUrlEnvDefault(cfg.llm_base_url_env_default ?? '')
@@ -1490,6 +1629,16 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
     setLlmReasoningEffort(cfg.llm_reasoning_effort ?? 'none')
     setLlmFallbackProvider(cfg.llm_fallback_provider ?? '')
     setLlmFallbackModel(cfg.llm_fallback_model ?? '')
+    // Build unified "provider:model" selection for the combined dropdown
+    if (cfg.llm_fallback_provider) {
+      setFallbackSelection(`${cfg.llm_fallback_provider}:${cfg.llm_fallback_model ?? ''}`)
+    } else {
+      setFallbackSelection('')
+    }
+    setReportModelEodFrac(cfg.llm_model_eod_frac ?? '')
+    setReportModelEodOrders(cfg.llm_model_eod_orders ?? '')
+    setReportModelWeeklyFrac(cfg.llm_model_weekly_frac ?? '')
+    setReportModelWeeklyOrders(cfg.llm_model_weekly_orders ?? '')
     if (provider === 'ollama') setModels(modelData.models ?? [])
     else setProviderModels(modelData.models ?? [])
   }
@@ -1508,14 +1657,46 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
         if (llmBaseUrl) body.base_url = llmBaseUrl
       }
       if (supportsReasoning) body.reasoning_effort = llmReasoningEffort
-      body.fallback_provider = llmFallbackProvider
-      body.fallback_model    = llmFallbackModel
+      // Decode unified "provider:model" fallback selector — skip if not yet loaded (null)
+      if (fallbackSelection !== null) {
+        if (fallbackSelection === '__custom__') {
+          body.fallback_provider = llmFallbackProvider
+          body.fallback_model    = fallbackCustomModel || llmFallbackModel
+        } else if (fallbackSelection) {
+          const colonIdx = fallbackSelection.indexOf(':')
+          body.fallback_provider = colonIdx > 0 ? fallbackSelection.slice(0, colonIdx) : fallbackSelection
+          body.fallback_model    = colonIdx > 0 ? fallbackSelection.slice(colonIdx + 1) : ''
+          setLlmFallbackProvider(body.fallback_provider)
+          setLlmFallbackModel(body.fallback_model)
+        } else {
+          body.fallback_provider = ''
+          body.fallback_model    = ''
+          setLlmFallbackProvider(''); setLlmFallbackModel('')
+        }
+      }
+      body.llm_model_eod_frac       = reportModelEodFrac
+      body.llm_model_eod_orders     = reportModelEodOrders
+      body.llm_model_weekly_frac    = reportModelWeeklyFrac
+      body.llm_model_weekly_orders  = reportModelWeeklyOrders
+      // Persist the active provider's current model choice as a per-provider pref.
+      // The saved model becomes this provider's default and is appended as a new pill.
+      const activeModel = envDefaultsActive ? '' : (llmModel || model || '')
+      if (activeModel) {
+        body.provider_model_overrides = { [llmProvider]: activeModel }
+        setProviderModelPrefs(prev => ({ ...prev, [llmProvider]: activeModel }))
+        setProviderSavedModels(prev => {
+          const existing = prev[llmProvider] ?? []
+          return existing.includes(activeModel)
+            ? prev
+            : { ...prev, [llmProvider]: [...existing, activeModel] }
+        })
+      }
       const r = await fetch(`${API}/settings/llm`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify(body),
       })
       if (!r.ok) throw new Error(await r.text())
-      if (llmApiKey) { setLlmApiKey(''); setLlmApiKeySet(true) }
+      if (llmApiKey) { setLlmApiKey(''); setLlmApiKeySet(true); setProviderKeyStatus(prev => ({ ...prev, [llmProvider]: true })) }
       if (envDefaultsActive) { setLlmApiKeySet(false); setLlmModel(''); setLlmBaseUrl('') }
       setLlmStatus('ok')
       onHealthRefresh?.()   // refresh header chip immediately — no page reload needed
@@ -1640,6 +1821,7 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
 
 
   return (
+    <AccordionCtx.Provider value={accordion}>
     <div className="settings-layout">
       {/* ── Sticky TOC sidebar ─────────────────────────────────────────────── */}
       <nav className="settings-toc">
@@ -1667,7 +1849,7 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
                   key={s.id}
                   className="settings-toc-link"
                   style={{ paddingLeft: 26 }}
-                  onClick={() => document.getElementById(s.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                  onClick={() => revealSection(s.id)}
                 >
                   {s.icon} {s.label}
                 </button>
@@ -1756,6 +1938,9 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
         {signalLlmSaveStatus === 'ok'     && <span className="settings-ok" style={{ marginTop: 8, display: 'block' }}>✓ Saved</span>}
         {signalLlmSaveStatus === 'error'  && <span className="settings-err" style={{ marginTop: 8, display: 'block' }}>✗ Failed</span>}
       </SettingSection>
+
+      {/* ── Discovery ────────────────────────────────────────────────────── */}
+      <DiscoverySettingsSection />
 
       {/* ── Paper Trading ─────────────────────────────────────────────────── */}
       <SettingSection id="settings-paper" title="Paper Trading" icon="📈">
@@ -1957,19 +2142,19 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
           Changes take effect immediately, no restart needed.
         </p>
 
+        {/* ── Provider dropdown ────────────────────────────────────────────── */}
         <div className="settings-field">
           <label className="settings-label">Provider</label>
           <select
             value={llmProvider}
             onChange={e => {
-              // Reset per-provider fields so a model/key typed for one
-              // provider can never be silently saved against another.
               const provider = e.target.value
               setLlmProvider(provider)
               setUseEnvDefaults(false)
               setModelChoice('')
-              setLlmModel('')
+              setLlmModel(providerModelPrefs[provider] || '')
               setLlmApiKey('')
+              setChangingApiKey(false)
               setLlmBaseUrl('')
               setLlmApiKeySet(false)
               setLlmReasoningEffort('none')
@@ -1978,12 +2163,87 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
             className="settings-select"
           >
             <option value="ollama">🖥️ Ollama (local)</option>
-            <option value="groq">⚡ Groq Cloud — free · console.groq.com</option>
-            <option value="gemini">✨ Google Gemini — free · ai.google.dev</option>
-            <option value="mistral">🌬️ Mistral AI · console.mistral.ai</option>
+            <option value="groq">⚡ Groq Cloud</option>
+            <option value="gemini">✨ Google Gemini</option>
+            <option value="mistral">🌬️ Mistral AI</option>
             <option value="custom">🔧 Custom OpenAI-compatible endpoint</option>
           </select>
         </div>
+
+        {/* ── Saved model profiles for the selected provider ───────────────── */}
+        {(() => {
+          const saved = providerSavedModels[llmProvider] ?? []
+          const defaultModel = providerModelPrefs[llmProvider] || ''
+          const providerLabel = { groq: 'Groq', gemini: 'Gemini', mistral: 'Mistral', ollama: 'Ollama', custom: 'Custom' }[llmProvider] || llmProvider
+
+          const deleteModel = async (m) => {
+            if (!window.confirm(`Remove saved model "${m}" from ${providerLabel}?`)) return
+            try {
+              const r = await fetch(`${API}/settings/provider/${llmProvider}/model?model=${encodeURIComponent(m)}`, {
+                method: 'DELETE', headers: getAuthHeaders(),
+              })
+              if (!r.ok) throw new Error(await r.text())
+              const remaining = saved.filter(x => x !== m)
+              setProviderSavedModels(prev => ({ ...prev, [llmProvider]: remaining }))
+              if (defaultModel === m) {
+                const next = remaining[0] || ''
+                setProviderModelPrefs(prev => ({ ...prev, [llmProvider]: next }))
+                setLlmModel(next); setModelChoice('')
+              }
+              setLlmStatus('ok'); setTimeout(() => setLlmStatus(null), 2000)
+            } catch { setLlmErr('Remove failed'); setLlmStatus('error') }
+          }
+
+          return (
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: 'var(--dim)', fontWeight: 700,
+                            textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 7 }}>
+                {providerLabel} — saved models
+              </div>
+              {saved.length ? (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  {saved.map(m => {
+                    const isDefault = m === defaultModel
+                    const modelShort = m.length > 26 ? m.slice(0, 24) + '…' : m
+                    return (
+                      <button
+                        key={m}
+                        type="button"
+                        title={isDefault ? `${m} (default)` : `Set "${m}" as default`}
+                        onClick={() => {
+                          setModelChoice(''); setLlmModel(m)
+                          setProviderModelPrefs(prev => ({ ...prev, [llmProvider]: m }))
+                        }}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 6,
+                          border: isDefault ? '1px solid var(--accent)' : '1px solid rgba(255,255,255,0.15)',
+                          borderRadius: 20, padding: '4px 10px',
+                          background: isDefault ? 'rgba(59,130,246,.12)' : 'rgba(255,255,255,0.04)',
+                          fontSize: 12, whiteSpace: 'nowrap', cursor: 'pointer',
+                        }}
+                      >
+                        {isDefault && <span style={{ color: 'var(--accent)', fontSize: 9 }}>●</span>}
+                        <span style={{ fontWeight: isDefault ? 600 : 400 }}>{modelShort}</span>
+                        {isDefault && <span style={{ fontSize: 10, color: 'var(--dim)' }}>default</span>}
+                        <span
+                          role="button"
+                          title={`Remove ${m}`}
+                          onClick={e => { e.stopPropagation(); deleteModel(m) }}
+                          style={{ cursor: 'pointer', fontSize: 13, color: 'var(--dim)',
+                                   lineHeight: 1, opacity: 0.6, marginLeft: 2 }}
+                        >×</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : (
+                <span style={{ fontSize: 12, color: 'var(--dim)', fontStyle: 'italic' }}>
+                  No saved models for {providerLabel} — pick a model below and Save to add one.
+                </span>
+              )}
+            </div>
+          )
+        })()}
 
         {llmProvider !== 'custom' && (
           <button
@@ -2006,35 +2266,42 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
           <>
             <div className="settings-field">
               <label className="settings-label">API Key</label>
-              <div className="settings-secret-field">
-                <input
-                  type={showLlmApiKey ? 'text' : 'password'}
-                  value={llmApiKey || savedApiKeyMask}
-                  onFocus={() => { if (!llmApiKey && savedApiKeyMask) setLlmApiKey('') }}
-                  onChange={e => setLlmApiKey(e.target.value)}
-                  disabled={envDefaultsActive}
-                  placeholder={
-                    envDefaultsActive
-                      ? (llmApiKeyEnvSet ? 'Using key from .env' : 'No key set in .env')
-                      : (llmApiKeySet ? 'Key saved — focus to replace it' : 'Paste your API key here')
-                  }
-                  className="settings-select"
-                  autoComplete="new-password"
-                />
-                <button
-                  type="button"
-                  className="settings-secret-toggle"
-                  onClick={() => setShowLlmApiKey(v => !v)}
-                  title={showLlmApiKey ? 'Hide API key' : 'Show/hide typed key'}
-                  aria-label={showLlmApiKey ? 'Hide API key' : 'Show API key'}
-                >
-                  {showLlmApiKey ? 'Hide' : 'Show'}
-                </button>
-              </div>
-              {!envDefaultsActive && llmApiKeySet && !llmApiKey && (
-                <span className="text-dim" style={{ fontSize: 12, marginTop: 4, display: 'block' }}>
-                  ✓ API key is set — to rotate it, paste a new key above and save
-                </span>
+              {!changingApiKey && (llmApiKeySet || llmApiKeyEnvSet) && !envDefaultsActive ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0' }}>
+                  <span style={{ fontSize: 13, color: 'var(--green, #22c55e)' }}>
+                    {llmApiKeyEnvSet && !llmApiKeySet ? '✓ Key from .env' : '✓ API key saved'}
+                  </span>
+                  <button type="button" className="settings-back-link"
+                          onClick={() => { setChangingApiKey(true); setLlmApiKey('') }}>
+                    Change key
+                  </button>
+                </div>
+              ) : (
+                <div className="settings-secret-field">
+                  <input
+                    type={showLlmApiKey ? 'text' : 'password'}
+                    value={llmApiKey}
+                    onChange={e => setLlmApiKey(e.target.value)}
+                    disabled={envDefaultsActive}
+                    placeholder={
+                      envDefaultsActive
+                        ? (llmApiKeyEnvSet ? 'Using key from .env' : 'No key set in .env')
+                        : 'Paste your API key here'
+                    }
+                    className="settings-select"
+                    autoComplete="new-password"
+                  />
+                  <button type="button" className="settings-secret-toggle"
+                          onClick={() => setShowLlmApiKey(v => !v)}>
+                    {showLlmApiKey ? 'Hide' : 'Show'}
+                  </button>
+                  {changingApiKey && (
+                    <button type="button" className="settings-back-link" style={{ marginLeft: 4 }}
+                            onClick={() => { setChangingApiKey(false); setLlmApiKey('') }}>
+                      Cancel
+                    </button>
+                  )}
+                </div>
               )}
             </div>
 
@@ -2174,48 +2441,183 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
           </>
         )}
 
-        {/* ── Fallback provider (auto-used on HTTP 429 / quota) ──────────── */}
+        {/* ── Fallback (auto-used on HTTP 429 / quota) ────────────────────── */}
         <div className="settings-field" style={{ marginTop: 18, borderTop: '1px solid var(--border)', paddingTop: 14 }}>
           <label className="settings-label">
-            Fallback provider
+            Fallback model
             <span className="text-dim" style={{ fontSize: 12, marginLeft: 6 }}>
               (auto-used when primary returns quota / HTTP 429)
             </span>
           </label>
           <select
-            value={llmFallbackProvider}
-            onChange={e => setLlmFallbackProvider(e.target.value)}
+            value={fallbackSelection ?? ''}
+            onChange={e => setFallbackSelection(e.target.value)}
             className="settings-select"
           >
             <option value="">— disabled —</option>
-            <option value="ollama">🖥️ Ollama (local)</option>
-            <option value="groq">⚡ Groq Cloud</option>
-            <option value="gemini">✨ Google Gemini</option>
-            <option value="mistral">🌬️ Mistral AI</option>
-            <option value="custom">🔧 Custom endpoint</option>
+            {/* Configured profiles — exclude the active primary provider (same provider can't rescue a 429) */}
+            {(() => {
+              const configured = ALL_PROVIDER_MODELS.filter(g =>
+                g.provider !== llmProvider &&
+                (providerModelPrefs[g.provider] || providerKeyStatus[g.provider])
+              )
+              if (!configured.length) return null
+              return (
+                <optgroup label="── Configured profiles">
+                  {configured.map(g => {
+                    const m = providerModelPrefs[g.provider] || g.models[0] || ''
+                    return (
+                      <option key={`profile:${g.provider}`} value={`${g.provider}:${m}`}>
+                        {g.icon} {g.label} — {m}
+                      </option>
+                    )
+                  })}
+                </optgroup>
+              )
+            })()}
+            {/* Model list — only show models for the currently selected fallback provider */}
+            {(() => {
+              const sel = fallbackSelection ?? ''
+              const selProv = sel && sel !== '__custom__' ? sel.split(':')[0] : null
+              const g = selProv ? ALL_PROVIDER_MODELS.find(x => x.provider === selProv) : null
+              if (!g) return null
+              return (
+                <optgroup label={`── ${g.icon} ${g.label} models`}>
+                  {g.models.map(m => (
+                    <option key={`${g.provider}:${m}`} value={`${g.provider}:${m}`}>
+                      {m}
+                    </option>
+                  ))}
+                </optgroup>
+              )
+            })()}
+            <option value="__custom__">✏️ Type your own…</option>
           </select>
         </div>
-        {llmFallbackProvider && llmFallbackProvider !== llmProvider && (
+        {fallbackSelection === '__custom__' && (
           <div className="settings-field">
             <label className="settings-label">
-              Fallback model
-              <span className="text-dim" style={{ fontSize: 12, marginLeft: 6 }}>(leave blank for provider default)</span>
+              Fallback provider
             </label>
+            <select
+              value={llmFallbackProvider}
+              onChange={e => setLlmFallbackProvider(e.target.value)}
+              className="settings-select"
+              style={{ marginBottom: 6 }}
+            >
+              <option value="">— select provider —</option>
+              <option value="groq">⚡ Groq</option>
+              <option value="gemini">✨ Gemini</option>
+              <option value="mistral">🌬️ Mistral</option>
+              <option value="ollama">🖥️ Ollama</option>
+              <option value="custom">🔧 Custom</option>
+            </select>
             <input
               type="text"
-              value={llmFallbackModel}
-              onChange={e => setLlmFallbackModel(e.target.value)}
-              placeholder="e.g. gemini-3.5-flash-lite"
+              value={fallbackCustomModel}
+              onChange={e => setFallbackCustomModel(e.target.value)}
+              placeholder="model name, e.g. mistral-large-latest"
               className="settings-select"
             />
           </div>
         )}
 
-        <SaveRow
-          status={llmStatus} errMsg={llmErr}
-          onSave={llmProvider === 'ollama' ? saveOllama : saveLlm}
-          label="Save AI provider settings"
-        />
+        {/* ── Report model overrides ─────────────────────────────────────────── */}
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                        letterSpacing: '0.08em', marginBottom: 4 }}>
+            Report models
+          </div>
+          <p className="text-dim" style={{ fontSize: 12, marginBottom: 12 }}>
+            Assign a specific provider + model per report type. Leave blank to use the primary model.
+            Weekly reports benefit from a larger model (e.g. Mistral Large, Gemini Flash).
+          </p>
+          {[
+            ['EoD Orders',    reportModelEodOrders,    setReportModelEodOrders],
+            ['EoD Frac',      reportModelEodFrac,      setReportModelEodFrac],
+            ['Weekly Orders', reportModelWeeklyOrders, setReportModelWeeklyOrders],
+            ['Weekly Frac',   reportModelWeeklyFrac,   setReportModelWeeklyFrac],
+          ].map(([label, value, setter]) => (
+            <div key={label} className="settings-field" style={{ marginBottom: 10 }}>
+              <label className="settings-label">{label}</label>
+              <select
+                value={value}
+                onChange={e => setter(e.target.value)}
+                className="settings-select"
+              >
+                <option value="">— same as primary model —</option>
+                {/* Configured profiles first */}
+                {(() => {
+                  const configured = ALL_PROVIDER_MODELS.filter(g =>
+                    providerModelPrefs[g.provider] || providerKeyStatus[g.provider]
+                  )
+                  if (!configured.length) return null
+                  return (
+                    <optgroup label="── Configured profiles">
+                      {configured.map(g => {
+                        const m = providerModelPrefs[g.provider] || g.models[0] || ''
+                        return (
+                          <option key={`profile:${g.provider}`} value={`${g.provider}:${m}`}>
+                            {g.icon} {g.label} — {m}
+                          </option>
+                        )
+                      })}
+                    </optgroup>
+                  )
+                })()}
+                {/* Models for the selected provider only */}
+                {(() => {
+                  const selProv = value ? value.split(':')[0] : null
+                  const g = selProv ? ALL_PROVIDER_MODELS.find(x => x.provider === selProv) : null
+                  if (!g) return null
+                  return (
+                    <optgroup label={`── ${g.icon} ${g.label} models`}>
+                      {g.models.map(m => (
+                        <option key={`${g.provider}:${m}`} value={`${g.provider}:${m}`}>{m}</option>
+                      ))}
+                    </optgroup>
+                  )
+                })()}
+                {value && !ALL_PROVIDER_MODELS.some(g => g.models.some(m => `${g.provider}:${m}` === value)) && (
+                  <option value={value}>{value}</option>
+                )}
+              </select>
+            </div>
+          ))}
+        </div>
+
+        <div className="settings-save-row" style={{ gap: 10, flexWrap: 'wrap' }}>
+          <button className="btn-primary btn-sm"
+            onClick={llmProvider === 'ollama' ? saveOllama : saveLlm}
+            disabled={llmStatus === 'saving'}>
+            {llmStatus === 'saving' ? 'Saving…' : 'Save AI provider settings'}
+          </button>
+          <button className="btn-secondary btn-sm"
+            disabled={llmTestState === 'testing'}
+            onClick={async () => {
+              setLlmTestState('testing'); setLlmTestMsg('')
+              try {
+                const r = await fetch(`${API}/settings/llm/test`, {
+                  method: 'POST', headers: getAuthHeaders(),
+                })
+                const d = await r.json()
+                if (d.ok) {
+                  setLlmTestState('ok')
+                  setLlmTestMsg(`✓ ${d.model ?? 'Connected'} — "${d.response?.slice(0, 60) ?? ''}"`)
+                } else {
+                  setLlmTestState('error')
+                  setLlmTestMsg(d.error || 'Test failed')
+                }
+              } catch (e) { setLlmTestState('error'); setLlmTestMsg(e.message) }
+              setTimeout(() => { setLlmTestState(null); setLlmTestMsg('') }, 6000)
+            }}>
+            {llmTestState === 'testing' ? '⏳ Testing…' : '⚡ Test connection'}
+          </button>
+          {llmStatus === 'ok'    && <span className="settings-ok">✓ Saved</span>}
+          {llmStatus === 'error' && <span className="settings-err">✗ {llmErr || 'Failed'}</span>}
+          {llmTestState === 'ok'    && <span className="settings-ok" style={{ fontSize: 12 }}>{llmTestMsg}</span>}
+          {llmTestState === 'error' && <span className="settings-err" style={{ fontSize: 12 }}>✗ {llmTestMsg}</span>}
+        </div>
       </SettingSection>
 
       {/* ── AI Usage ─────────────────────────────────────────────────────── */}
@@ -2310,12 +2712,6 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
           </tbody>
         </table>
       </SettingSection>
-
-      {/* ── Discovery ────────────────────────────────────────────────────── */}
-      <DiscoverySettingsSection />
-
-      {/* ── Notifications (all channels) ─────────────────────────────────── */}
-      <NotificationsSection />
 
       <SettingSection id="settings-cache" title="Data Cache" icon="💾">
         <p className="text-dim" style={{ fontSize: 13, marginBottom: 14 }}>
@@ -2566,7 +2962,11 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
         </div>
       </SettingSection>
 
+      {/* ── Notifications (all channels) ─────────────────────────────────── */}
+      <NotificationsSection />
+
       </div>
     </div>
+    </AccordionCtx.Provider>
   )
 }

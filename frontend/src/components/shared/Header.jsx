@@ -9,6 +9,7 @@ const NAV_PRIMARY = [
   { view: 'events',    label: 'Activity',  icon: '📋' },
   { view: 'reports',   label: 'Reports',   icon: '📑' },
   { view: 'education', label: 'Learn',     icon: '📚' },
+  { view: 'schedule',  label: 'Schedule',  icon: '🗓' },
 ]
 const NAV_SECONDARY = [
   { view: 'backtest', label: 'Backtesting', icon: '🧪' },
@@ -84,6 +85,7 @@ export default function Header({ health, usage, btTodayTokens = 0, activeView, o
             <button className={`nav-tab ${activeView === 'events'    ? 'active' : ''}`} onClick={() => onViewChange('events')}>Activity</button>
             <button className={`nav-tab ${activeView === 'reports'   ? 'active' : ''}`} onClick={() => onViewChange('reports')}>Reports</button>
             <button className={`nav-tab ${activeView === 'education' ? 'active' : ''}`} onClick={() => onViewChange('education')}>Learn</button>
+            <button className={`nav-tab ${activeView === 'schedule' ? 'active' : ''}`} onClick={() => onViewChange('schedule')}>Schedule</button>
           </nav>
         </div>
         <div className="header-right">

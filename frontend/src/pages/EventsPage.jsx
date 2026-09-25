@@ -37,6 +37,12 @@ export default function EventsPage() {
   // usePolling handles fetch + auth (getAuthHeaders) internally — just pass the path.
   const { data, error, reload } = usePolling('/events?limit=100', 5000)
   const [filter, setFilter] = useState('all')
+  const [expandedMsgs, setExpandedMsgs] = useState(new Set())
+  const toggleMsg = (id) => setExpandedMsgs(prev => {
+    const next = new Set(prev)
+    next.has(id) ? next.delete(id) : next.add(id)
+    return next
+  })
 
   const events = data?.events ?? []
   const shown  = filter === '__errors__' ? events.filter(e => e.level === 'error' || e.level === 'warn')
@@ -174,14 +180,37 @@ export default function EventsPage() {
                   {ev.category}
                 </span>
 
-                {/* Message — red on error, amber on warn; meta on hover */}
-                <span
-                  title={ev.meta ? JSON.stringify(ev.meta) : undefined}
-                  style={{ fontSize: 13, color: lc ?? 'var(--text)', flex: 1, minWidth: 0, wordBreak: 'break-word' }}
-                >
+                {/* Message — red on error, amber on warn; expandable if meta exists */}
+                <span style={{ fontSize: 13, color: lc ?? 'var(--text)', flex: 1, minWidth: 0 }}>
                   {ev.level === 'warn'  && <span style={{ marginRight: 5 }}>⚠</span>}
                   {ev.level === 'error' && <span style={{ marginRight: 5 }}>⛔</span>}
-                  {ev.message}
+                  <span>{ev.message}</span>
+                  {ev.meta && Object.keys(ev.meta).length > 0 && (
+                    <>
+                      <button
+                        onClick={() => toggleMsg(ev.id)}
+                        style={{
+                          marginLeft: 8, fontSize: 10, padding: '1px 6px',
+                          borderRadius: 4, border: '1px solid var(--border)',
+                          background: 'transparent', color: 'var(--dim)',
+                          cursor: 'pointer', verticalAlign: 'middle',
+                        }}
+                      >
+                        {expandedMsgs.has(ev.id) ? 'hide ↑' : 'details ↓'}
+                      </button>
+                      {expandedMsgs.has(ev.id) && (
+                        <pre style={{
+                          margin: '6px 0 0', padding: '8px 10px',
+                          background: 'color-mix(in srgb, var(--accent) 6%, var(--surface))',
+                          border: '1px solid var(--border)',
+                          borderRadius: 6, fontSize: 12, color: 'var(--text)',
+                          whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.6,
+                        }}>
+                          {ev.meta.notification_msg ?? JSON.stringify(ev.meta, null, 2)}
+                        </pre>
+                      )}
+                    </>
+                  )}
                 </span>
               </div>
             )

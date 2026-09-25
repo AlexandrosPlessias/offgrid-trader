@@ -540,11 +540,16 @@ def call_cloud_llm(
     *,
     model: str | None = None,
     ticker: str | None = None,
+    _provider_override: str | None = None,
 ) -> tuple[str, str, int, int]:
     """Send a chat request to a cloud OpenAI-compatible endpoint.
 
     Reads provider / api_key / base_url from DB settings first, then falls
     back to env-var config (``settings.llm``).
+
+    *_provider_override* routes the call to a specific provider regardless of the DB
+    setting — used by the fallback chain so a secondary provider (e.g. groq) actually
+    reaches groq's endpoint rather than the primary provider's endpoint.
 
     Returns ``(raw_content, model_used)``.
     Raises :class:`LLMError` on connectivity, auth, or HTTP errors.
@@ -567,9 +572,16 @@ def call_cloud_llm(
     _db_timeout = _get_db_setting("ollama_timeout", "")  # reuse existing UI knob
     _db_reasoning_effort = _get_db_setting("llm_reasoning_effort", "none")
 
-    provider = _db_provider or settings.llm.provider
-    api_key = _db_api_key or settings.llm.api_key_for(provider)
-    base_url = _db_base_url or settings.llm.base_url_for(provider)
+    if _provider_override:
+        # Fallback / per-report-type provider: credentials come from env vars only
+        # (DB llm_api_key / llm_base_url belong to the primary provider).
+        provider = _provider_override
+        api_key = settings.llm.api_key_for(provider)
+        base_url = settings.llm.base_url_for(provider)
+    else:
+        provider = _db_provider or settings.llm.provider
+        api_key = _db_api_key or settings.llm.api_key_for(provider)
+        base_url = _db_base_url or settings.llm.base_url_for(provider)
     _model = model or _db_model or settings.llm.default_model_for(provider)
     _timeout = int(_db_timeout) if _db_timeout else settings.llm.cloud_timeout
 
@@ -625,6 +637,9 @@ def call_cloud_llm(
                     {"role": "user", "content": user_prompt},
                 ],
                 "temperature": 0.2,
+                # Reasoning models spend tokens thinking before the JSON; without a
+                # generous cap the completion truncates and JSON mode rejects it.
+                "max_tokens": settings.llm.cloud_max_tokens,
             }
             if provider in ("groq", "gemini", "mistral", "custom"):
                 request["response_format"] = {"type": "json_object"}
@@ -653,11 +668,32 @@ def call_cloud_llm(
         except _openai.RateLimitError as exc:
             # Must come before APIStatusError — RateLimitError is a subclass of it.
             span.set_attribute("error", "HTTP 429 rate-limit / quota")
+            # Estimate prompt size to help distinguish RPM vs TPM limits.
+            # ~4 chars/token is a rough universal heuristic; exact counts need a tokeniser.
+            _prompt_chars = len(system_prompt) + len(user_prompt)
+            _est_tokens = _prompt_chars // 4
+            _log.warning(
+                "call_llm: 429 from %r — prompt ~%d tok (%d chars sys + %d usr) — provider msg: %s",
+                provider,
+                _est_tokens,
+                len(system_prompt),
+                len(user_prompt),
+                exc.message[:300],
+            )
             raise QuotaError(
-                f"{provider} quota/rate-limit (HTTP 429): {exc.message[:300]}"
+                f"{provider} quota/rate-limit (HTTP 429) "
+                f"prompt~{_est_tokens}tok: {exc.message[:300]}"
             ) from exc
         except _openai.APIStatusError as exc:
             span.set_attribute("error", f"HTTP {exc.status_code}")
+            # 400 = bad request (wrong model name / params); 401 = auth failed;
+            # 403 = tier/model not allowed. All mean "this provider cannot serve
+            # this request" → flow to fallback rather than hard-failing.
+            if exc.status_code in (400, 401, 403):
+                raise QuotaError(
+                    f"{provider} returned HTTP {exc.status_code} "
+                    f"(falling back): {exc.message[:300]}"
+                ) from exc
             raise LLMError(
                 f"{provider} returned HTTP {exc.status_code}: {exc.message[:300]}"
             ) from exc
@@ -731,12 +767,22 @@ def _call_provider(
     system_prompt: str,
     model: str | None,
     ticker: str | None,
+    *,
+    is_primary: bool = True,
 ) -> tuple[str, str, int, int]:
     """Dispatch a single call to *provider*.  Raises :class:`LLMError` on failure."""
     if provider == "ollama":
         return call_ollama(user_prompt, system_prompt, model=model, ticker=ticker)
     if provider in ("groq", "gemini", "mistral", "custom"):
-        return call_cloud_llm(user_prompt, system_prompt, model=model, ticker=ticker)
+        # Pass provider_override when this is NOT the primary so call_cloud_llm
+        # routes to the right API endpoint (base_url, api_key) for that provider.
+        return call_cloud_llm(
+            user_prompt,
+            system_prompt,
+            model=model,
+            ticker=ticker,
+            _provider_override=None if is_primary else provider,
+        )
     raise LLMError(
         f"Unknown LLM_PROVIDER={provider!r}. Valid values: ollama, groq, gemini, mistral, custom."
     )
@@ -749,6 +795,7 @@ def call_llm(
     model: str | None = None,
     ticker: str | None = None,
     use_fallback: bool = True,
+    _primary_provider_override: str | None = None,
 ) -> tuple[str, str, int, int]:
     """Route to the configured LLM provider.
 
@@ -763,8 +810,11 @@ def call_llm(
     Non-quota :class:`LLMError` values (auth failure, network error, bad JSON)
     are re-raised immediately — only quota errors trigger the chain.
     If all providers in the chain fail, the last :class:`QuotaError` is re-raised.
+
+    *_primary_provider_override* routes the call through a specific provider instead of
+    the DB-configured primary — used by per-report-type model routing.
     """
-    primary_provider = _effective_provider()
+    primary_provider = _primary_provider_override or _effective_provider()
 
     # Resolve fallback: DB first, then env-var (via LLMConfig fields).
     fallback_provider = (
@@ -779,12 +829,28 @@ def call_llm(
         chain.append((fallback_provider, fallback_model))
 
     last_exc: LLMError = LLMError("No providers configured.")
-    for prov, mdl in chain:
+    for idx, (prov, mdl) in enumerate(chain):
         try:
-            return _call_provider(prov, user_prompt, system_prompt, mdl, ticker)
+            return _call_provider(
+                prov, user_prompt, system_prompt, mdl, ticker, is_primary=(idx == 0)
+            )
         except QuotaError as exc:
             # Only quota errors flow to the next provider; all other LLMErrors propagate.
             _log.warning("call_llm: provider %r quota hit (%s), trying next in chain.", prov, exc)
+            from .database import save_event as _save_event
+
+            # Extract estimated prompt tokens from the error message if present.
+            _err_str = str(exc)
+            _prompt_tok_hint = ""
+            if "prompt~" in _err_str:
+                _prompt_tok_hint = " (" + _err_str.split("prompt~")[1].split(":")[0] + ")"
+            _save_event(
+                "report",
+                f"Primary LLM quota/rate-limit [{prov}]{_prompt_tok_hint} — "
+                f"trying fallback: {_err_str[:200]}",
+                level="warn",
+                meta={"provider": prov, "error": _err_str[:400]},
+            )
             last_exc = exc
         except LLMError:
             raise  # auth failures, network errors, bad JSON — fail fast

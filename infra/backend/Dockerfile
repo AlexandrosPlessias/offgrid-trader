@@ -23,8 +23,12 @@ COPY --from=binwiederhier/ntfy:v2.28.0 /usr/bin/ntfy /usr/local/bin/ntfy
 COPY infra/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+ARG BUILD_SHA=""
+ARG BUILD_SOURCE=""
 ENV PYTHONUNBUFFERED=1 \
-    DATABASE_PATH=/app/data/offgrid_trader.db
+    DATABASE_PATH=/app/data/offgrid_trader.db \
+    BUILD_SHA=$BUILD_SHA \
+    BUILD_SOURCE=$BUILD_SOURCE
 
 EXPOSE 8000 18880
 

@@ -45,20 +45,43 @@ fi
 # ── 1. Backend → Fly.io ───────────────────────────────────────────────────────
 echo
 info "Deploying backend → Fly.io (app: ${FLY_APP})"
-flyctl deploy --remote-only -a "$FLY_APP"
+BUILD_SHA=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+BUILD_SOURCE="${GITHUB_ACTIONS:+github-actions}"
+BUILD_SOURCE="${BUILD_SOURCE:-manual-deploy}"
+flyctl deploy --remote-only -a "$FLY_APP" \
+  --build-arg "BUILD_SHA=${BUILD_SHA}" \
+  --build-arg "BUILD_SOURCE=${BUILD_SOURCE}"
 ok "Backend deployed → https://${FLY_APP}.fly.dev"
 
-# ── Quick health check ────────────────────────────────────────────────────────
-info "Checking backend health..."
-for i in 1 2 3 4 5; do
+# ── Start machine ─────────────────────────────────────────────────────────────
+info "Starting Fly machine…"
+MACHINE_IDS=$(flyctl machine list -a "$FLY_APP" --json 2>/dev/null \
+  | python3 -c "import json,sys; [print(m['id']) for m in json.load(sys.stdin) if m.get('state') != 'started']" \
+  2>/dev/null || true)
+
+if [[ -n "$MACHINE_IDS" ]]; then
+  while IFS= read -r mid; do
+    flyctl machine start "$mid" -a "$FLY_APP"
+    ok "Machine $mid started"
+  done <<< "$MACHINE_IDS"
+else
+  ok "Machine already running"
+fi
+
+# ── Health check (wait for the machine to accept requests) ────────────────────
+info "Waiting for backend to be healthy…"
+HEALTHY=false
+for i in 1 2 3 4 5 6 7 8 9 10; do
     STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://${FLY_APP}.fly.dev/health" || true)
     if [[ "$STATUS" == "200" ]]; then
         ok "Backend is healthy (/health → 200)"
+        HEALTHY=true
         break
     fi
-    echo "  attempt $i/5 — got $STATUS, retrying in 5s..."
+    echo "  attempt $i/10 — got $STATUS, retrying in 5s…"
     sleep 5
 done
+[[ "$HEALTHY" == "false" ]] && echo "  ⚠️  Backend did not respond after 50s — check: fly logs -a $FLY_APP"
 
 # ── 2. Frontend → Vercel ──────────────────────────────────────────────────────
 echo

@@ -27,6 +27,19 @@ def _log_safe(value: str) -> str:
     return value.replace("\r", "").replace("\n", "")
 
 
+def _safe_error_text(msg: str, limit: int = 200) -> str:
+    """Flatten and bound an error string before returning it over the API.
+
+    Only for messages we author ourselves. Collapsing control characters turns a
+    multi-line traceback into one line, and the cap stops a large or structured
+    upstream response being echoed back wholesale. Raw text from an unexpected
+    exception should not be sent to a caller at all — log it and return a generic
+    message instead, since it can carry file paths, config values or stack detail.
+    """
+    flat = " ".join(str(msg).split())
+    return flat[:limit] + "…" if len(flat) > limit else flat
+
+
 def _sse_frame(payload: dict[str, Any]) -> str:
     """Encode *payload* as a single SSE data frame (``data: ...\\n\\n``)."""
     return f"data: {json.dumps(payload)}\n\n"

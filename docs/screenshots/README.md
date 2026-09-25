@@ -26,8 +26,9 @@ Captured with headless Chromium via [Playwright](https://playwright.dev).
 
 | File | Content |
 |---|---|
-| `13-trading-page.png` | Trading tab — account metrics tiles, equity curve chart, and positions table |
-| `13b-fractional-trading.png` | Trading tab → Fractional Trading sub-tab — notional tiles and open fractional positions |
+| `13-trading-page.png` | Trading tab — account metrics tiles and equity curve chart |
+| `13c-open-positions.png` | Open Positions table — stop/target, Proximity slider, and the ⏳ SELLING indicator on a position whose exit is queued |
+| `13b-fractional-trading.png` | Trading tab → Fractional Trading sub-tab — notional tiles, icon-only State column, and the Proximity slider |
 | `14-trading-orders.png` | Trading tab — Orders table with first row expanded showing fill details |
 | `15-signal-card-order.png` | Dashboard — Signal card with order status badge |
 
@@ -43,8 +44,9 @@ Captured with headless Chromium via [Playwright](https://playwright.dev).
 
 | File | Content |
 |---|---|
-| `20-reports.png` | Reports tab — EoD/weekly history list, full/notification toggle, 🧠 model chip, Generate buttons |
-| `21-activity.png` | Activity tab — live event feed with category chips, the ⛔ Errors filter, and a red error row |
+| `20-reports.png` | Reports tab — Orders/Fractional tabs, history list, full/notification toggle, 🧠 model chip, Generate buttons, blocked-events banner |
+| `24-schedule.png` | Schedule tab — the trading week as a timeline: wake, scans, discovery, EoD/EoW reports, stop |
+| `21-activity.png` | Activity tab — live event feed with category chips, the ⛔ Errors filter, and a notification row expanded to show the exact text sent |
 
 ### Backtesting
 
@@ -57,7 +59,7 @@ Captured with headless Chromium via [Playwright](https://playwright.dev).
 
 | File | Content |
 |---|---|
-| `08-settings-ai-provider.png` | Settings → AI Provider — provider selector + model/key fields |
+| `08-settings-ai-provider.png` | Settings → AI Provider — provider profiles, per-provider model lists, and per-report model overrides |
 | `09-settings-ai-usage.png` | Settings → AI Usage — 30-day token usage |
 | `10-settings-ai-usage-quota.png` | Settings → AI Usage — provider quota box |
 | `19-settings-fractional.png` | Settings → Live / Fractional profile |
@@ -126,7 +128,7 @@ node capture.mjs
 node docs/screenshots/capture.mjs
 ```
 
-All 34 screenshots are written to `docs/screenshots/` next to the script.
+All 36 screenshots are written to `docs/screenshots/` next to the script.
 Existing files are overwritten — safe to re-run any time.
 
 ### What the script does

@@ -27,6 +27,20 @@ def _cfg_event(section: str, changes: dict) -> None:
         pass
 
 
+def _saved_models_for(provider: str) -> list[str]:
+    """Saved model profiles for a provider (one pill each in the UI).
+
+    Backfills from the single-model pref for configs saved before multi-profile
+    support, so an existing ``llm_model_pref_*`` still shows up as one pill.
+    """
+    raw = get_setting(f"llm_models_{provider}", "") or ""
+    saved = [m.strip() for m in raw.split(",") if m.strip()]
+    if saved:
+        return saved
+    pref = get_setting(f"llm_model_pref_{provider}", "") or ""
+    return [pref] if pref else []
+
+
 class AlertsSettingRequest(BaseModel):
     enabled: bool = Field(..., description="Enable or disable alert dispatch")
 
@@ -56,6 +70,22 @@ class LLMSettingRequest(BaseModel):
     fallback_model: str | None = Field(
         None, description="Fallback model override (empty = fallback provider default)"
     )
+    llm_model_eod_frac: str | None = Field(
+        None, description="Model for eod_frac reports (empty = use primary model)"
+    )
+    llm_model_eod_orders: str | None = Field(
+        None, description="Model for eod_orders reports (empty = use primary model)"
+    )
+    llm_model_weekly_frac: str | None = Field(
+        None, description="Model for weekly_frac reports (empty = use primary model)"
+    )
+    llm_model_weekly_orders: str | None = Field(
+        None, description="Model for weekly_orders reports (empty = use primary model)"
+    )
+    provider_model_overrides: dict[str, str] | None = Field(
+        None,
+        description="Per-provider model prefs, kept apart from the active model",
+    )
 
 
 class SchedulerSettingRequest(BaseModel):
@@ -80,6 +110,13 @@ class AutoTradeSettingRequest(BaseModel):
     paper_trade_min_confidence: float | None = Field(None, ge=0, le=100)
     frac_autotrade_allow_live: bool | None = None
     discovery_autoadd_enabled: bool | None = None
+    rsi_oversold: float | None = Field(None, ge=0, le=100)
+    rsi_overbought: float | None = Field(None, ge=0, le=100)
+    volume_spike_multiplier: float | None = Field(None, ge=0)
+    paper_trade_position_size: float | None = Field(None, ge=0)
+    frac_position_size: float | None = Field(None, ge=0)
+    frac_budget: float | None = Field(None, ge=0)
+    frac_poll_seconds: int | None = Field(None, ge=10)
 
 
 @router.post("/settings/alerts")
@@ -147,6 +184,20 @@ def set_autotrade(request: AutoTradeSettingRequest) -> dict[str, Any]:
             "discovery_autoadd_enabled",
             "true" if request.discovery_autoadd_enabled else "false",
         )
+    if request.rsi_oversold is not None:
+        set_setting("rsi_oversold", str(request.rsi_oversold))
+    if request.rsi_overbought is not None:
+        set_setting("rsi_overbought", str(request.rsi_overbought))
+    if request.volume_spike_multiplier is not None:
+        set_setting("volume_spike_multiplier", str(request.volume_spike_multiplier))
+    if request.paper_trade_position_size is not None:
+        set_setting("paper_trade_position_size", str(request.paper_trade_position_size))
+    if request.frac_position_size is not None:
+        set_setting("frac_position_size", str(request.frac_position_size))
+    if request.frac_budget is not None:
+        set_setting("frac_budget", str(request.frac_budget))
+    if request.frac_poll_seconds is not None:
+        set_setting("frac_poll_seconds", str(request.frac_poll_seconds))
     _cfg_event("autotrade", {k: v for k, v in request.model_dump().items() if v is not None})
     return {"saved": True}
 
@@ -295,6 +346,43 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
         "discovery_autoadd_enabled_env": cfg.discovery.autoadd_enabled,
         "frac_min_confidence_env": cfg.autotrade.frac_min_confidence,
         "paper_trade_min_confidence_env": cfg.autotrade.paper_trade_min_confidence,
+        "paper_trade_position_size_env": 500.0,
+        "rsi_oversold": float(get_setting("rsi_oversold", "") or cfg.thresholds.rsi_oversold),
+        "rsi_oversold_env": cfg.thresholds.rsi_oversold,
+        "rsi_overbought": float(get_setting("rsi_overbought", "") or cfg.thresholds.rsi_overbought),
+        "rsi_overbought_env": cfg.thresholds.rsi_overbought,
+        "volume_spike_multiplier": float(
+            get_setting("volume_spike_multiplier", "") or cfg.thresholds.volume_spike_multiplier
+        ),
+        "volume_spike_multiplier_env": cfg.thresholds.volume_spike_multiplier,
+        "market_hours": {
+            "timezone": cfg.market_hours.timezone,
+            "open": f"{cfg.market_hours.open_hour:02d}:{cfg.market_hours.open_minute:02d}",
+            "close": f"{cfg.market_hours.close_hour:02d}:{cfg.market_hours.close_minute:02d}",
+            "trading_days": list(cfg.market_hours.trading_days),
+        },
+        # Per-report-type model overrides (empty string = use primary llm_model)
+        "llm_model_eod_frac": get_setting("llm_model_eod_frac", ""),
+        "llm_model_eod_orders": get_setting("llm_model_eod_orders", ""),
+        "llm_model_weekly_frac": get_setting("llm_model_weekly_frac", ""),
+        "llm_model_weekly_orders": get_setting("llm_model_weekly_orders", ""),
+        # Per-provider active/default model (used at call time when the provider is primary)
+        "provider_model_prefs": {
+            p: (get_setting(f"llm_model_pref_{p}", "") or cfg.llm.default_model_for(p))
+            for p in ("groq", "gemini", "mistral", "ollama")
+        },
+        # Per-provider saved-model profiles (one pill each) — a provider can hold several.
+        # Backfills from the single-model pref for configs saved before multi-profile support.
+        "provider_saved_models": {
+            p: _saved_models_for(p) for p in ("groq", "gemini", "mistral", "ollama")
+        },
+        # Per-provider env key status (True when env var is set, regardless of active provider)
+        "provider_key_status": {
+            "groq": bool(cfg.llm.api_key_for("groq")),
+            "gemini": bool(cfg.llm.api_key_for("gemini")),
+            "mistral": bool(cfg.llm.api_key_for("mistral")),
+            "ollama": True,
+        },
     }
 
 
@@ -374,12 +462,137 @@ def set_llm_settings(request: LLMSettingRequest) -> dict[str, Any]:
         set_setting("llm_fallback_provider", request.fallback_provider)
     if request.fallback_model is not None:
         set_setting("llm_fallback_model", request.fallback_model)
+    for _key in (
+        "llm_model_eod_frac",
+        "llm_model_eod_orders",
+        "llm_model_weekly_frac",
+        "llm_model_weekly_orders",
+    ):
+        _val = getattr(request, _key, None)
+        if _val is not None:
+            set_setting(_key, _val)
+    if request.provider_model_overrides:
+        valid_prov = {"groq", "gemini", "mistral", "ollama", "custom"}
+        for _prov, _mdl in request.provider_model_overrides.items():
+            if _prov in valid_prov and _mdl:
+                # The newly-saved model becomes this provider's active/default pref …
+                set_setting(f"llm_model_pref_{_prov}", _mdl)
+                # … and is appended to the provider's saved-model list (dedup, keep order)
+                _existing = [
+                    m.strip()
+                    for m in (get_setting(f"llm_models_{_prov}", "") or "").split(",")
+                    if m.strip()
+                ]
+                if _mdl not in _existing:
+                    _existing.append(_mdl)
+                set_setting(f"llm_models_{_prov}", ",".join(_existing))
     active_provider = get_setting("llm_provider", "") or get_settings().llm.provider
     _cfg_event(
         "llm",
         {k: v for k, v in request.model_dump(exclude={"api_key"}).items() if v is not None},
     )
     return {"ok": True, "provider": active_provider}
+
+
+@router.delete("/settings/provider/{provider}")
+def clear_provider_settings(provider: str) -> dict[str, Any]:
+    """Clear all DB overrides for a specific provider (model pref + API key if primary).
+
+    Env-var defaults are preserved — only DB settings are removed.
+    If the provider being cleared is also the active primary, the primary is reset
+    to '' (falls back to the env-var LLM_PROVIDER default on next request).
+    """
+    valid_providers = {"ollama", "groq", "gemini", "mistral", "custom"}
+    if provider not in valid_providers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid provider '{provider}'. Valid: {sorted(valid_providers)}",
+        )
+    set_setting(f"llm_model_pref_{provider}", "")
+    set_setting(f"llm_models_{provider}", "")
+    active_provider = get_setting("llm_provider", "")
+    if active_provider == provider:
+        set_setting("llm_provider", "")
+        set_setting("llm_api_key", "")
+        set_setting("llm_model", "")
+        set_setting("llm_base_url", "")
+    _cfg_event("llm", {"cleared_provider": provider})
+    return {"ok": True, "cleared": provider}
+
+
+@router.delete("/settings/provider/{provider}/model")
+def delete_provider_model(provider: str, model: str = Query(...)) -> dict[str, Any]:
+    """Remove a single saved model profile from a provider's list.
+
+    If the removed model was the active/default pref, the next remaining model
+    becomes the default (or it's cleared when none remain).
+    """
+    valid_providers = {"ollama", "groq", "gemini", "mistral", "custom"}
+    if provider not in valid_providers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid provider '{provider}'. Valid: {sorted(valid_providers)}",
+        )
+    saved = [
+        m.strip()
+        for m in (get_setting(f"llm_models_{provider}", "") or "").split(",")
+        if m.strip() and m.strip() != model
+    ]
+    set_setting(f"llm_models_{provider}", ",".join(saved))
+    # If the deleted model was the active default, promote the first remaining one.
+    if get_setting(f"llm_model_pref_{provider}", "") == model:
+        new_default = saved[0] if saved else ""
+        set_setting(f"llm_model_pref_{provider}", new_default)
+        if get_setting("llm_provider", "") == provider:
+            set_setting("llm_model", new_default)
+    _cfg_event("llm", {"provider": provider, "removed_model": model})
+    return {"ok": True, "provider": provider, "removed": model, "remaining": saved}
+
+
+@router.post("/settings/llm/test")
+def test_llm_connection() -> dict[str, Any]:
+    """Send a minimal prompt to the configured LLM and return success/error.
+
+    Uses the currently saved DB settings (provider + model + key).
+    """
+    from backend.analysis import LLMError, QuotaError, call_llm
+
+    try:
+        # Prompt must contain "json" when response_format=json_object is active (Groq rule).
+        raw, model, _pt, _ct = call_llm(
+            'Return this exact JSON and nothing else: {"status": "ok"}',
+            system_prompt="You are a connectivity test assistant. Reply only with valid JSON.",
+            use_fallback=False,
+        )
+        ok = "ok" in raw.lower()
+        return {"ok": ok, "model": model, "response": raw[:120]}
+    except QuotaError:
+        # Constant strings only. Deriving the response from the exception — even
+        # truncated — keeps provider text and stack detail on a path to the client,
+        # so the cause is logged and the caller gets a fixed message per category.
+        _log.warning("LLM connection test hit a quota/rate limit", exc_info=True)
+        return {
+            "ok": False,
+            "error": "Rate limit or quota exceeded for this provider — try again later.",
+        }
+    except LLMError:
+        _log.warning("LLM connection test failed", exc_info=True)
+        return {
+            "ok": False,
+            "error": (
+                "Could not complete the test — check the API key, model name and base URL "
+                "for this provider. The exact error is in the application logs."
+            ),
+        }
+    except Exception:  # noqa: BLE001
+        # Anything else is an unexpected internal fault whose text may carry file
+        # paths, config values or stack detail. Log it in full; tell the caller
+        # nothing beyond the fact that it failed.
+        _log.exception("LLM connection test raised an unexpected error")
+        return {
+            "ok": False,
+            "error": "Unexpected server error — see the application logs for details.",
+        }
 
 
 @router.get("/settings/models")
@@ -395,26 +608,32 @@ def list_llm_models(provider: str | None = Query(None)) -> dict[str, Any]:
     provider = provider or get_setting("llm_provider", "") or cfg.llm.provider
 
     if provider != "ollama":
-        # Static list of known free-tier models per provider.
+        # Model lists sourced from env vars (GROQ_MODEL, GEMINI_MODEL, MISTRAL_MODEL).
+        # Comma-separated: GROQ_MODEL=qwen/qwen3.8-27b,llama-3.3-70b-versatile
+        # Falls back to built-in defaults when env var is not set.
         cloud_models: dict[str, list[str]] = {
-            "groq": [
-                "qwen/qwen3.6-27b",
-            ],
-            "gemini": [
-                "gemini-3.5-flash-lite",
-                "gemini-3.5-flash",
-            ],
-            "mistral": [
-                "mistral-small-latest",
-                "mistral-large-latest",
-            ],
+            "groq": cfg.llm.groq_models,
+            "gemini": cfg.llm.gemini_models,
+            "mistral": cfg.llm.mistral_models,
             "custom": [],
         }
-        active = get_setting("llm_model", "") or cfg.llm.default_model_for(provider)
+        models = list(cloud_models.get(provider, []))
+        # Ensure this provider's own saved model is present (per-provider pref, not the
+        # globally-active one — so querying Gemini's list while Groq is active doesn't
+        # leak Groq's model into it).
+        active_provider = get_setting("llm_provider", "") or cfg.llm.provider
+        if provider == active_provider:
+            own_model = get_setting("llm_model", "") or get_setting(
+                f"llm_model_pref_{provider}", ""
+            )
+        else:
+            own_model = get_setting(f"llm_model_pref_{provider}", "")
+        if own_model and own_model not in models:
+            models = [own_model, *models]
         return {
             "provider": provider,
-            "models": cloud_models.get(provider, []),
-            "active": active,
+            "models": models,
+            "active": own_model,
         }
 
     # Ollama — query local /api/tags
@@ -682,7 +901,13 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
         results["ntfy"] = (
             "sent"
             if post_ntfy(
-                server, topic, subject, body, tags="bell", priority="default", actions=actions
+                server,
+                topic,
+                subject,
+                body,
+                tags="bell",
+                priority="default",
+                actions=actions,
             )
             else "failed"
         )
@@ -700,6 +925,35 @@ def test_notifications(request: NtfyTestRequest) -> dict[str, Any]:
             detail="No channel accepted the test. Enable and configure at least one channel.",
         )
     return {"ok": True, "results": results, "token": token, "ttl": 60}
+
+
+_RESETTABLE_KEYS = {
+    "confidence_floor",
+    "paper_max_positions",
+    "frac_min_confidence",
+    "paper_trade_min_confidence",
+    "rsi_oversold",
+    "rsi_overbought",
+    "volume_spike_multiplier",
+    "paper_trade_position_size",
+    "frac_position_size",
+    "frac_budget",
+    "frac_poll_seconds",
+    "scan_interval_minutes",
+}
+
+
+@router.delete("/settings/key/{key}")
+def reset_setting_key(key: str) -> dict[str, Any]:
+    """Clear a DB override for the given key, reverting it to the env-var default.
+    Only whitelisted keys are allowed — arbitrary key deletion is not permitted.
+    """
+    if key not in _RESETTABLE_KEYS:
+        raise HTTPException(
+            status_code=400, detail=f"Key '{key}' is not resettable via this endpoint."
+        )
+    set_setting(key, "")
+    return {"reset": key}
 
 
 @router.get("/settings/export")
