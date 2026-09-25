@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -11,6 +12,9 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from backend.database import clear_all_data as _clear_all_data
+from backend.routes._models import _safe_error_text
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -185,8 +189,15 @@ async def import_data(request: Request) -> dict[str, Any]:
 
     try:
         payload = await request.json()
+    except ValueError as exc:
+        # A decode error describes the caller's own payload ("Expecting value:
+        # line 1 column 1"), so echoing it is helpful rather than leaky.
+        raise HTTPException(
+            status_code=400, detail=f"Invalid JSON: {_safe_error_text(str(exc))}"
+        ) from exc
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+        _log.exception("import_data: could not read request body")
+        raise HTTPException(status_code=400, detail="Could not read request body.") from exc
 
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Payload must be a JSON object.")

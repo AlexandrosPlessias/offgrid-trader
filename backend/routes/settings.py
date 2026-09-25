@@ -555,7 +555,7 @@ def test_llm_connection() -> dict[str, Any]:
 
     Uses the currently saved DB settings (provider + model + key).
     """
-    from backend.analysis import LLMError, call_llm
+    from backend.analysis import LLMError, QuotaError, call_llm
 
     try:
         # Prompt must contain "json" when response_format=json_object is active (Groq rule).
@@ -566,10 +566,33 @@ def test_llm_connection() -> dict[str, Any]:
         )
         ok = "ok" in raw.lower()
         return {"ok": ok, "model": model, "response": raw[:120]}
-    except LLMError as exc:
-        return {"ok": False, "error": str(exc)}
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"Unexpected error: {exc}"}
+    except QuotaError:
+        # Constant strings only. Deriving the response from the exception — even
+        # truncated — keeps provider text and stack detail on a path to the client,
+        # so the cause is logged and the caller gets a fixed message per category.
+        _log.warning("LLM connection test hit a quota/rate limit", exc_info=True)
+        return {
+            "ok": False,
+            "error": "Rate limit or quota exceeded for this provider — try again later.",
+        }
+    except LLMError:
+        _log.warning("LLM connection test failed", exc_info=True)
+        return {
+            "ok": False,
+            "error": (
+                "Could not complete the test — check the API key, model name and base URL "
+                "for this provider. The exact error is in the application logs."
+            ),
+        }
+    except Exception:  # noqa: BLE001
+        # Anything else is an unexpected internal fault whose text may carry file
+        # paths, config values or stack detail. Log it in full; tell the caller
+        # nothing beyond the fact that it failed.
+        _log.exception("LLM connection test raised an unexpected error")
+        return {
+            "ok": False,
+            "error": "Unexpected server error — see the application logs for details.",
+        }
 
 
 @router.get("/settings/models")
