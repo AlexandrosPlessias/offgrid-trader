@@ -95,6 +95,46 @@ def _setup_otel(app: FastAPI) -> None:
 # --------------------------------------------------------------------------- #
 # App + lifespan
 # --------------------------------------------------------------------------- #
+def _detect_startup_trigger() -> str:
+    """Return a human-readable label for what triggered this startup.
+
+    - No FLY_APP_NAME → local dev / manual run
+    - New machine id, or a changed BUILD_SHA → a deploy
+    - Same machine restarted on the same image → scheduled cron wake
+
+    The machine id is what makes redeploying an *unchanged* commit detectable: a
+    deploy always replaces the machine, whereas a cron wake restarts the existing
+    one. Checking the SHA alone reported those redeploys as scheduled wakes.
+    """
+    if not os.getenv("FLY_APP_NAME"):
+        return "Manual (local dev)"
+    current_sha = os.getenv("BUILD_SHA", "")
+    current_machine = os.getenv("FLY_MACHINE_ID", "")
+    try:
+        stored_sha = get_setting("_last_build_sha", "")
+        stored_machine = get_setting("_last_machine_id", "")
+        sha_changed = bool(current_sha) and current_sha != stored_sha
+        machine_changed = bool(current_machine) and current_machine != stored_machine
+
+        if sha_changed or machine_changed:
+            from backend.database import set_setting
+
+            if current_sha:
+                set_setting("_last_build_sha", current_sha)
+            if current_machine:
+                set_setting("_last_machine_id", current_machine)
+            # A first-ever boot has nothing stored to compare against, so it would
+            # otherwise masquerade as a deploy.
+            if not stored_sha and not stored_machine:
+                return "Scheduled Trigger"
+            source = os.getenv("BUILD_SOURCE", "")
+            label = "GitHub Actions Deploy" if source == "github-actions" else "Manual Deploy"
+            return f"{label} ({current_sha[:7]})" if current_sha else label
+    except Exception:  # noqa: BLE001,S110 - detection must never block startup
+        pass
+    return "Scheduled Trigger"
+
+
 async def _fire_system_event(
     prefix: str, *, tags: str | None = None, priority: str | None = None
 ) -> None:
@@ -139,12 +179,13 @@ async def lifespan(app: FastAPI):
     if auto_scan:
         scheduler.start()
 
+    trigger = _detect_startup_trigger()
     save_event(
         "system",
         f"App started — v{__version__}",
-        meta={"auto_scan": auto_scan, "version": __version__},
+        meta={"auto_scan": auto_scan, "version": __version__, "trigger": trigger},
     )
-    await _fire_system_event("🚀 MarketSage is live", tags="rocket", priority="low")
+    await _fire_system_event(f"🚀 MarketSage is live · {trigger}", tags="rocket", priority="low")
 
     try:
         yield

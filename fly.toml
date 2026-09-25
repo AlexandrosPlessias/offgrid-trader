@@ -45,8 +45,8 @@ primary_region = "lhr"
 [[services]]
   internal_port        = 8000
   protocol             = "tcp"
-  auto_stop_machines   = "stop"
-  auto_start_machines  = false   # Cloudflare Worker cron owns start — disable HTTP-triggered wake
+  auto_stop_machines   = false    # cron worker stops via Fly Machines API at 21:30 UTC; Fly must not auto-stop on HTTP inactivity
+  auto_start_machines  = false    # cron worker starts via Fly Machines API; HTTP traffic must not wake machine
   min_machines_running = 0
 
   [[services.ports]]
@@ -58,21 +58,20 @@ primary_region = "lhr"
     handlers    = ["http"]
     force_https = true
 
-  [[services.http_checks]]
-    grace_period = "20s"
-    interval     = "15s"
-    method       = "get"
-    path         = "/health"
-    timeout      = "5s"
-
 # ── ntfy push sidecar (:18880) — subscribe at https://<app>.fly.dev:18880/<topic> ──
 # Handler is "tls" ONLY (not "http"): Fly terminates TLS and forwards the raw
 # stream to ntfy, which speaks HTTP/1.1 and handles the WebSocket upgrade itself.
 # Adding "http" makes Fly negotiate HTTP/2, which breaks the WS upgrade (the
 # ntfy app fails with "websocket upgrade failed / 404").
+# auto_start_machines MUST be false here: ntfy WebSocket reconnects from the mobile
+# app or browser would otherwise wake the machine on their own, bypassing the
+# Cloudflare-cron-owns-start policy set on the API service above.
 [[services]]
-  internal_port = 18880
-  protocol      = "tcp"
+  internal_port        = 18880
+  protocol             = "tcp"
+  auto_stop_machines   = false    # same policy — cron owns stop
+  auto_start_machines  = false
+  min_machines_running = 0
 
   [[services.ports]]
     port     = 18880

@@ -1,4 +1,5 @@
 import { useState, Fragment } from 'react'
+import PriceSlider from '../components/shared/PriceSlider'
 import {
   ResponsiveContainer, AreaChart, Area, BarChart, Bar, Cell,
   XAxis, YAxis, Tooltip, CartesianGrid,
@@ -15,8 +16,33 @@ const detailGrid = { display: 'grid', gridTemplateColumns: 'max-content max-cont
 
 const money = (v) => (v == null ? '—' : `$${Number(v).toFixed(2)}`)
 const pnlColor = (v) => (v > 0 ? 'var(--green)' : v < 0 ? 'var(--red)' : 'var(--dim)')
-// Show the actual held fraction, e.g. 0.5 / 0.073 — round to 6 dp and drop trailing zeros.
-const fmtQty = (q) => (q == null ? '—' : String(+Number(q).toFixed(6)))
+const fmtQty = (q, notional, entryPrice) => {
+  if (q != null) return String(+Number(q).toFixed(6))
+  // Derive from notional / entry_price when Alpaca fill was never synced
+  if (notional != null && entryPrice != null && Number(entryPrice) > 0)
+    return `~${(Number(notional) / Number(entryPrice)).toFixed(6)}`
+  return '—'
+}
+
+const fmtDuration = (openedAt, closedAt) => {
+  if (!openedAt || !closedAt) return '—'
+  const ms = new Date(closedAt) - new Date(openedAt)
+  if (ms < 0) return '—'
+  const h = Math.floor(ms / 3_600_000)
+  const m = Math.floor((ms % 3_600_000) / 60_000)
+  if (h === 0) return `${m}m`
+  if (h < 24) return `${h}h ${m}m`
+  return `${Math.floor(h / 24)}d ${h % 24}h`
+}
+
+const EXIT_META = {
+  target:     { icon: '✅', label: 'Take-profit hit',   color: 'var(--green)' },
+  stop:       { icon: '🛑', label: 'Stop-loss triggered', color: 'var(--red)'   },
+  eod:        { icon: '🌙', label: 'End-of-day close',  color: 'var(--dim)'   },
+  manual:     { icon: '✋', label: 'Manual close',       color: 'var(--dim)'   },
+  reconciled: { icon: '🔄', label: 'Reconciled',         color: 'var(--dim)'   },
+}
+const exitMeta = (reason) => EXIT_META[reason] ?? { icon: '—', label: reason ?? '—', color: 'var(--dim)' }
 
 function Tile({ label, value, color }) {
   return (
@@ -38,6 +64,7 @@ export default function FracTradingPage() {
   const [closing, setClosing] = useState({})
   const [refreshing, setRefreshing] = useState(false)
   const [expandedPos, setExpandedPos] = useState(null)
+  const [expandedClosed, setExpandedClosed] = useState(null)
 
   const refreshAll = async () => {
     setRefreshing(true)
@@ -289,10 +316,10 @@ export default function FracTradingPage() {
                 <thead>
                   <tr>
                     <th></th>
-                    <th>State</th>
+                    <th style={{ width: 32 }}>State</th>
                     <th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th>
-                    <th>Market Value</th><th>Unreal. P&L</th><th>P&L %</th>
-                    <th>Stop</th><th>Target</th><th>Notional</th><th>Conf %</th><th></th>
+                    <th style={{ whiteSpace: 'nowrap' }}>Mkt Val</th><th>Unreal. P&L</th><th>P&L %</th>
+                    <th>Stop</th><th>Target</th><th style={{ minWidth: 140 }}>Proximity</th><th>Notional</th><th>Conf %</th><th></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -320,17 +347,16 @@ export default function FracTradingPage() {
                       <Fragment key={p.id}>
                         <tr style={{ cursor: 'pointer' }} onClick={() => setExpandedPos(isExp ? null : p.id)}>
                           <td style={{ width: 20, color: 'var(--dim)', fontSize: 11, userSelect: 'none' }}>{isExp ? '▾' : '▸'}</td>
-                          <td>
+                          <td style={{ width: 32, textAlign: 'center' }}>
                             <span title={stateLabel.text} style={{
-                              fontSize: 11, fontWeight: 600, borderRadius: 20, padding: '2px 8px', whiteSpace: 'nowrap',
-                              background: stateLabel.bg, border: `1px solid ${stateLabel.border}`, color: stateLabel.color,
+                              fontSize: 13, cursor: 'default',
                             }}>
-                              {stateLabel.icon} {stateLabel.text}
+                              {stateLabel.icon}
                             </span>
                           </td>
                           <td><span className="badge-ticker">{p.ticker}</span></td>
                           <td><span className={`badge ${isLong ? 'long' : 'short'}`}>{isLong ? '▲ LONG' : '▼ SHORT'}</span></td>
-                          <td>{fmtQty(p.qty)}</td>
+                          <td>{fmtQty(p.qty, p.notional, p.entry_price)}</td>
                           <td>{money(p.entry_price)}</td>
                           <td>{money(p.current_price)}</td>
                           <td>{money(p.market_value)}</td>
@@ -356,6 +382,7 @@ export default function FracTradingPage() {
                               </div>
                             ) : '—'}
                           </td>
+                          <td><PriceSlider stop={stop} target={target} current={p.current_price} /></td>
                           <td>{money(p.notional)}</td>
                           <td>{p.signal_confidence != null ? `${Number(p.signal_confidence).toFixed(0)}%` : '—'}</td>
                           <td onClick={e => e.stopPropagation()}>
@@ -378,7 +405,7 @@ export default function FracTradingPage() {
                                   <div style={sectLabel}>Position</div>
                                   <div style={detailGrid}>
                                     {[
-                                      ['Shares', <span style={{ fontWeight: 700 }}>{fmtQty(p.qty)}</span>],
+                                      ['Shares', <span style={{ fontWeight: 700 }}>{fmtQty(p.qty, p.notional, p.entry_price)}</span>],
                                       ['Entry', money(p.entry_price)],
                                       ['Current', money(p.current_price)],
                                       ['Mkt Value', money(p.market_value)],
@@ -428,7 +455,10 @@ export default function FracTradingPage() {
 
       {/* Closed trades */}
       <div className="card">
-        <div className="card-title">Closed trades ({closed.length})</div>
+        <div className="card-title">
+          Closed trades <span style={{ color: 'var(--dim)', fontWeight: 400 }}>({closed.length})</span>
+          {closed.length > 0 && <span style={{ fontSize: 10, color: 'var(--dim)', fontWeight: 400, marginLeft: 6 }}>· click a row for breakdown</span>}
+        </div>
         {closed.length === 0
           ? <div style={{ fontSize: 13, color: 'var(--dim)', padding: '8px 0' }}>No closed fractional trades yet.</div>
           : (
@@ -436,35 +466,120 @@ export default function FracTradingPage() {
               <table>
                 <thead>
                   <tr>
-                    <th>Ticker</th><th>Notional</th><th>Qty</th><th>Entry</th><th>Exit</th>
-                    <th>Exit reason</th><th>Realized P&L</th><th>Closed</th>
+                    <th></th>
+                    <th>Ticker</th><th>Outcome</th><th>Entry</th><th>Exit</th>
+                    <th>Proximity</th><th>P&L</th><th>P&L %</th><th>Held</th><th>Closed</th>
                   </tr>
                 </thead>
                 <tbody>
                   {closed.map(p => {
-                    const reasonMeta = {
-                      target:     { icon: '✅', color: 'var(--green)' },
-                      stop:       { icon: '🛑', color: 'var(--red)' },
-                      eod:        { icon: '🌙', color: 'var(--dim)' },
-                      reconciled: { icon: '🔄', color: 'var(--dim)' },
-                    }[p.exit_reason] ?? { icon: '—', color: 'var(--dim)' }
+                    const em = exitMeta(p.exit_reason)
+                    const entry = Number(p.entry_price ?? 0)
+                    const exit  = Number(p.exit_price  ?? 0)
+                    const qty   = Number(p.qty ?? 0)
+                    const notional = Number(p.notional ?? 0)
+                    const pnl   = p.realized_pnl != null ? Number(p.realized_pnl) : null
+                    const pnlPct = entry && exit ? ((exit - entry) / entry * 100) : null
+                    const stop   = p.stop_price        != null ? Number(p.stop_price)        : null
+                    const target = p.take_profit_price != null ? Number(p.take_profit_price) : null
+                    const stopInverted = p.exit_reason === 'stop' && stop != null && entry && stop >= entry
+                    const isExp = expandedClosed === p.id
                     return (
-                      <tr key={p.id}>
-                        <td><span className="badge-ticker">{p.ticker}</span></td>
-                        <td>{money(p.notional)}</td>
-                        <td style={{ fontSize: 12 }}>{fmtQty(p.qty)}</td>
-                        <td>{fmtN(p.entry_price)}</td>
-                        <td>{fmtN(p.exit_price)}</td>
-                        <td style={{ color: reasonMeta.color, fontWeight: 600 }}>
-                          {reasonMeta.icon} {p.exit_reason ?? '—'}
-                        </td>
-                        <td style={{ color: pnlColor(p.realized_pnl), fontWeight: 600 }}>
-                          {p.realized_pnl != null ? `${p.realized_pnl >= 0 ? '+' : ''}${money(p.realized_pnl)}` : '—'}
-                        </td>
-                        <td style={{ fontSize: 11, color: 'var(--dim)' }}>
-                          {p.closed_at ? new Date(p.closed_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
-                        </td>
-                      </tr>
+                      <Fragment key={p.id}>
+                        <tr style={{ cursor: 'pointer' }} onClick={() => setExpandedClosed(isExp ? null : p.id)}>
+                          <td style={{ width: 20, color: 'var(--dim)', fontSize: 11, userSelect: 'none' }}>{isExp ? '▾' : '▸'}</td>
+                          <td><span className="badge-ticker">{p.ticker}</span></td>
+                          <td style={{ color: em.color, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                            {em.icon} {em.label}
+                            {stopInverted && <span title="Stop was above entry — possible data error" style={{ marginLeft: 5, color: '#fbbf24' }}>⚠</span>}
+                          </td>
+                          <td>{money(p.entry_price)}</td>
+                          <td>{money(p.exit_price)}</td>
+                          <td><PriceSlider stop={stop} target={target} current={exit} /></td>
+                          <td style={{ color: pnlColor(pnl), fontWeight: 600 }}>
+                            {pnl != null ? `${pnl >= 0 ? '+' : ''}${money(pnl)}` : '—'}
+                          </td>
+                          <td style={{ color: pnlColor(pnlPct) }}>
+                            {pnlPct != null ? `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%` : '—'}
+                          </td>
+                          <td style={{ fontSize: 11, color: 'var(--dim)' }}>{fmtDuration(p.opened_at, p.closed_at)}</td>
+                          <td style={{ fontSize: 11, color: 'var(--dim)' }}>
+                            {p.closed_at ? new Date(p.closed_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
+                          </td>
+                        </tr>
+
+                        {isExp && (
+                          <tr style={{ background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
+                            <td colSpan={10} style={{ padding: '12px 18px' }}>
+                              <div style={{ display: 'flex', gap: 0, flexWrap: 'wrap', fontSize: 11 }}>
+
+                                {/* Performance */}
+                                <div style={{ paddingRight: 24, minWidth: 160 }}>
+                                  <div style={sectLabel}>Performance</div>
+                                  <div style={detailGrid}>
+                                    {[
+                                      ['Outcome', <span style={{ color: em.color, fontWeight: 700 }}>{em.icon} {em.label}</span>],
+                                      ['Entry', money(p.entry_price)],
+                                      ['Exit', <span style={{ fontWeight: 700 }}>{money(p.exit_price)}</span>],
+                                      ['Move', pnlPct != null ? <span style={{ color: pnlColor(pnlPct), fontWeight: 700 }}>{pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%</span> : '—'],
+                                      ['P&L', pnl != null ? <span style={{ color: pnlColor(pnl), fontWeight: 700 }}>{pnl >= 0 ? '+' : ''}{money(pnl)}</span> : '—'],
+                                      ['Deployed', money(p.notional)],
+                                      ['Qty', fmtQty(p.qty, p.notional, p.entry_price)],
+                                    ].map(([l, v], i) => (<Fragment key={i}><span style={{ color: 'var(--dim)' }}>{l}</span><span>{v}</span></Fragment>))}
+                                  </div>
+                                </div>
+
+                                {/* Exit plan (was) */}
+                                <div style={{ paddingLeft: 24, paddingRight: 24, borderLeft: '1px solid var(--border)', minWidth: 160 }}>
+                                  <div style={sectLabel}>Exit Plan (was)</div>
+                                  <div style={detailGrid}>
+                                    {(() => {
+                                      const plannedLoss = stop != null && entry ? Math.abs((entry - stop) * qty) : null
+                                      const plannedGain = target != null && entry ? Math.abs((target - entry) * qty) : null
+                                      const rr = plannedLoss && plannedGain ? (plannedGain / plannedLoss).toFixed(1) : null
+                                      const achievedRR = plannedLoss && pnl != null ? (pnl / plannedLoss).toFixed(2) : null
+                                      return [
+                                        ['Stop', stop != null
+                                          ? <span style={{ color: 'var(--red)' }}>{money(stop)}{stopInverted ? ' ⚠' : ''}</span>
+                                          : '—'],
+                                        ['Target', <span style={{ color: 'var(--green)' }}>{money(target)}</span>],
+                                        ['Max Loss', plannedLoss != null ? <span style={{ color: 'var(--red)' }}>−{money(plannedLoss)}</span> : '—'],
+                                        ['Max Gain', plannedGain != null ? <span style={{ color: 'var(--green)' }}>+{money(plannedGain)}</span> : '—'],
+                                        ['Planned R:R', rr ? `${rr}×` : '—'],
+                                        ['Achieved R:R', achievedRR != null ? <span style={{ color: pnlColor(Number(achievedRR)), fontWeight: 700 }}>{achievedRR}×</span> : '—'],
+                                      ].map(([l, v], i) => (<Fragment key={i}><span style={{ color: 'var(--dim)' }}>{l}</span><span>{v}</span></Fragment>))
+                                    })()}
+                                  </div>
+                                </div>
+
+                                {/* Timeline & signal */}
+                                <div style={{ paddingLeft: 24, borderLeft: '1px solid var(--border)', minWidth: 160 }}>
+                                  <div style={sectLabel}>Timeline & Signal</div>
+                                  <div style={detailGrid}>
+                                    {[
+                                      ['Opened', p.opened_at ? new Date(p.opened_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'],
+                                      ['Closed', p.closed_at ? new Date(p.closed_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'],
+                                      ['Hold time', fmtDuration(p.opened_at, p.closed_at)],
+                                      ['Confidence', p.signal_confidence != null ? `${Number(p.signal_confidence).toFixed(0)}%` : '—'],
+                                      ['Source', p.signal_source ?? '—'],
+                                      ['Mode', <span style={{ textTransform: 'uppercase' }}>{p.mode ?? mode}</span>],
+                                    ].map(([l, v], i) => (<Fragment key={i}><span style={{ color: 'var(--dim)' }}>{l}</span><span>{v}</span></Fragment>))}
+                                  </div>
+                                </div>
+
+                              </div>
+                              {stopInverted && (
+                                <div style={{
+                                  marginTop: 10, padding: '6px 10px', borderRadius: 6, fontSize: 11,
+                                  background: 'rgba(251,191,36,0.10)', border: '1px solid rgba(251,191,36,0.35)', color: '#fbbf24',
+                                }}>
+                                  ⚠ The stop-loss was set above the entry price — this indicates a signal classification error. The inverted-stop guard has since been deployed to prevent this.
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
                     )
                   })}
                 </tbody>
@@ -508,7 +623,7 @@ export default function FracTradingPage() {
                       <td><span className="badge-ticker">{p.ticker}</span></td>
                       <td><span className="badge long">▲ BUY</span></td>
                       <td>{money(p.notional)}</td>
-                      <td style={{ fontSize: 12 }}>{fmtQty(p.qty)}</td>
+                      <td style={{ fontSize: 12 }}>{fmtQty(p.qty, p.notional, p.entry_price)}</td>
                       <td>{money(p.entry_price)}</td>
                       <td style={{ fontSize: 11, textTransform: 'uppercase', fontWeight: 600 }}>{p.mode ?? mode}</td>
                       <td style={{ fontSize: 12, color: stateColor, fontWeight: 600 }}>{posState}</td>

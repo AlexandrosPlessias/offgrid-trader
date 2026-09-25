@@ -8,6 +8,7 @@ import {
 } from 'recharts'
 import { API, getAuthHeaders } from '../utils/api'
 import InfoTip from '../components/shared/InfoTip'
+import PriceSlider from '../components/shared/PriceSlider'
 
 // ─── Paper Trading Page ───────────────────────────────────────────────────────
 
@@ -15,11 +16,11 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
   const [account,      setAccount]      = useState(null)
   const [positions,    setPositions]    = useState([])
   const [orders,       setOrders]       = useState([])
+  const [positionOrders, setPositionOrders] = useState([])
   const [history,      setHistory]      = useState(null)
   const [profileName,  setProfileName]  = useState('')
   const [loading,      setLoading]      = useState(false)
   const [error,        setError]        = useState(null)
-  const [orderFilter,    setOrderFilter]    = useState('all') // 'all' or any distinct status value
   const [cancelling,     setCancelling]     = useState({})
   const [expandedOrder,  setExpandedOrder]  = useState(null)
   const [expandedPos,    setExpandedPos]    = useState(null) // expanded open-position row
@@ -64,8 +65,18 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
         fetch(`${API}/settings`, { headers: getAuthHeaders() }),
       ])
       if (accR.ok) { const d = await accR.json(); setAccount(d.account ?? null) }
-      if (posR.ok) setPositions((await posR.json()).positions ?? [])
+      const posList = posR.ok ? ((await posR.json()).positions ?? []) : []
+      setPositions(posList)
       if (ordR.ok) setOrders((await ordR.json()).orders ?? [])
+      // Fetch orders scoped to open position tickers for stop/target matching —
+      // avoids the global limit problem where old positions fall outside the 200-row window.
+      if (posList.length > 0) {
+        const tickers = [...new Set(posList.map(p => p.symbol ?? p.ticker))].join(',')
+        const posOrdR = await fetch(`${API}/paper/orders/for-tickers?tickers=${tickers}`, { headers: getAuthHeaders() })
+        if (posOrdR.ok) setPositionOrders((await posOrdR.json()).orders ?? [])
+      } else {
+        setPositionOrders([])
+      }
       if (hisR.ok) setHistory(await hisR.json())
       if (cfgR.ok) { const d = await cfgR.json(); setProfileName(d.paper_profile_name ?? '') }
     } catch { setError('Failed to load paper trading data') }
@@ -149,12 +160,18 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
   // Derive distinct status values present in the actual orders data.
   // "canceled" is Alpaca's alternate spelling; normalise to "cancelled" for display.
   const normaliseStatus = s => s === 'canceled' ? 'cancelled' : s
-  const distinctStatuses = [...new Set(orders.map(o => normaliseStatus(o.status ?? 'unknown')))]
-    .sort()  // stable alphabetical order
 
-  const filteredOrders = orders.filter(o =>
-    orderFilter === 'all' || normaliseStatus(o.status) === orderFilter
-  )
+  const ACTIVE_STATUSES = new Set(['new','pending_new','accepted','held','partially_filled'])
+  const activeOrders = orders.filter(o => ACTIVE_STATUSES.has(o.status))
+  const closedOrders = orders
+    .filter(o => {
+      if (ACTIVE_STATUSES.has(o.status)) return false
+      // Bracket entries (notional set) with no realized_pnl = position still open,
+      // exit leg hasn't fired yet — already shown in Open Positions, skip here.
+      if (o.status === 'filled' && o.notional != null && o.realized_pnl == null) return false
+      return true
+    })
+    .sort((a, b) => new Date(b.filled_at || b.closed_at || b.created_at) - new Date(a.filled_at || a.closed_at || a.created_at))
 
   return (
     <div style={{ maxWidth: 1100, margin: '0 auto', padding: '24px 20px', display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -760,7 +777,7 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                     <th></th>
                     <th>Ticker</th><th>Side</th><th>Qty</th><th>Avg Entry</th>
                     <th>Current Price</th><th>Market Value</th><th>Unrealised P&L</th><th>P&L %</th>
-                    <th>Stop</th><th>Target</th><th>Conf %</th><th></th>
+                    <th>Stop</th><th>Target</th><th>Proximity</th><th>Conf %</th><th></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -768,10 +785,10 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                     const ticker   = p.symbol ?? p.ticker
                     const isLong   = parseFloat(p.qty ?? 0) >= 0
                     const side     = isLong ? 'buy' : 'sell'
-                    // Find the most-recent matching order for stop/target/signal info
-                    const matchOrd = orders.find(o => o.ticker === ticker && o.side === side &&
+                    // Use positionOrders (scoped fetch by ticker, no row-limit) for stop/target/signal info
+                    const matchOrd = positionOrders.find(o => o.ticker === ticker && o.side === side &&
                       ['new','pending_new','accepted','held','partially_filled'].includes(o.status))
-                      ?? orders.find(o => o.ticker === ticker && o.side === side)
+                      ?? positionOrders.find(o => o.ticker === ticker && o.side === side)
                     const isExpPos = expandedPos === i
                     const qty      = Math.abs(parseFloat(p.qty ?? 0))
                     // qty_available = 0 when shares are locked in a pending bracket order's
@@ -780,6 +797,12 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                     const isLocked = qtyAvail <= 0
                     // Also treat a 'new' status match-order as locked (order not yet sent to exchange)
                     const hasPendingNew = matchOrd?.status === 'new'
+                    // A live order on the *opposite* side is the exit. While it sits unfilled the
+                    // position still shows as open even though it is already on its way out —
+                    // most often because the target was hit outside regular trading hours.
+                    const pendingExit = positionOrders.find(o => o.ticker === ticker &&
+                      o.side === (isLong ? 'sell' : 'buy') &&
+                      ['new','pending_new','accepted','held','partially_filled'].includes(o.status))
                     const upnl     = parseFloat(p.unrealized_pl ?? 0)
                     const upnlPct  = p.unrealized_plpc != null ? parseFloat(p.unrealized_plpc) * 100 : null
                     const upnlColor = upnl >= 0 ? 'var(--green)' : 'var(--red)'
@@ -797,7 +820,29 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                           <td style={{ width: 20, color: 'var(--dim)', fontSize: 11, userSelect: 'none' }}>
                             {matchOrd ? (isExpPos ? '▾' : '▸') : ''}
                           </td>
-                          <td><span className="badge-ticker">{ticker}</span></td>
+                          <td>
+                            <span className="badge-ticker">{ticker}</span>
+                            {pendingExit && (
+                              // Block-level wrapper forces the badge onto its own line; the inner
+                              // span stays inline-block so the pill hugs its text instead of
+                              // stretching the cell and widening the column.
+                              <div style={{ marginTop: 3 }}>
+                                <span
+                                  title={`Exit order is queued (status: ${pendingExit.status}) but has not filled yet.`
+                                    + ' Limit legs only execute during regular trading hours, so an exit'
+                                    + ' triggered after the close fills at the next market open.'}
+                                  style={{
+                                    display: 'inline-block', fontSize: 9, fontWeight: 700,
+                                    padding: '0 4px', borderRadius: 4, cursor: 'help', lineHeight: 1.5,
+                                    whiteSpace: 'nowrap',
+                                    background: 'color-mix(in srgb, var(--yellow) 16%, transparent)',
+                                    color: 'var(--yellow)',
+                                    border: '1px solid color-mix(in srgb, var(--yellow) 40%, transparent)',
+                                  }}
+                                >⏳ SELLING</span>
+                              </div>
+                            )}
+                          </td>
                           <td><span className={`badge ${isLong ? 'long' : 'short'}`}>{isLong ? '▲ LONG' : '▼ SHORT'}</span></td>
                           <td>{qty}</td>
                           <td>{fmtMoney(p.avg_entry_price)}</td>
@@ -827,6 +872,11 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                               </div>
                             ) : '—'}
                           </td>
+                          <td>
+                            {matchOrd?.stop_price && matchOrd?.take_profit_price && p.current_price
+                              ? <PriceSlider stop={matchOrd.stop_price} target={matchOrd.take_profit_price} current={p.current_price} />
+                              : <span style={{ color: 'var(--dim)' }}>—</span>}
+                          </td>
                           <td>{matchOrd?.signal_confidence != null ? `${matchOrd.signal_confidence.toFixed(0)}%` : '—'}</td>
                           {/* Close Position action */}
                           <td onClick={e => e.stopPropagation()} style={{ minWidth: 120 }}>
@@ -835,9 +885,14 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                               <div style={{ fontSize: 10, color: 'var(--dim)', lineHeight: 1.4 }}>
                                 <span title={hasPendingNew
                                   ? 'Order is still being sent to the exchange (NEW). Wait a moment then refresh.'
-                                  : 'All shares are reserved in a pending stop-loss or take-profit order. The cashout will be available once those orders settle or are cancelled.'
+                                  : pendingExit
+                                    ? `Exit order queued (${pendingExit.status}). It fills at the next market open —`
+                                      + ' limit legs do not execute outside regular trading hours.'
+                                    : 'All shares are reserved in a pending stop-loss or take-profit order. The cashout will be available once those orders settle or are cancelled.'
                                 }>
-                                  🔒 {hasPendingNew ? 'Order pending…' : 'Shares locked'}
+                                  {hasPendingNew
+                                    ? '🔒 Order pending…'
+                                    : pendingExit ? '⏳ Exit queued' : '🔒 Shares locked'}
                                 </span>
                               </div>
                             ) : closeConfirm === ticker ? (
@@ -988,25 +1043,11 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
         }
       </div>
 
-      {/* Orders table */}
+      {/* Active Orders */}
       <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '14px 16px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 12, fontWeight: 700 }}>Orders</span>
-          <span style={{ fontSize: 11, color: 'var(--dim)' }}>({filteredOrders.length})</span>
-          <div style={{ display: 'flex', gap: 4, marginLeft: 'auto' }}>
-            {['all', ...distinctStatuses].map(f => (
-              <button key={f} onClick={() => setOrderFilter(f)}
-                style={{
-                  fontSize: 10, padding: '2px 9px', borderRadius: 12, cursor: 'pointer',
-                  textTransform: 'uppercase', letterSpacing: '0.03em',
-                  background: orderFilter === f ? 'var(--accent)' : 'transparent',
-                  color: orderFilter === f ? '#fff' : (f === 'all' ? 'var(--dim)' : statusColor(f)),
-                  border: `1px solid ${orderFilter === f ? 'var(--accent)' : 'var(--border)'}`,
-                  fontWeight: orderFilter === f ? 700 : 400,
-                }}
-              >{f === 'all' ? 'All' : f.replace(/_/g, ' ')}</button>
-            ))}
-          </div>
+          <span style={{ fontSize: 12, fontWeight: 700 }}>🟡 Active Orders</span>
+          <span style={{ fontSize: 11, color: 'var(--dim)' }}>({activeOrders.length})</span>
         </div>
 
         {/* ── Order status legend — open by default so users see it without clicking ── */}
@@ -1054,8 +1095,8 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
           </div>
         </details>
 
-        {filteredOrders.length === 0
-          ? <div style={{ fontSize: 12, color: 'var(--dim)' }}>No orders yet.</div>
+        {activeOrders.length === 0
+          ? <div style={{ fontSize: 12, color: 'var(--dim)' }}>No active orders.</div>
           : (
             <div className="table-wrap">
               <table>
@@ -1069,7 +1110,7 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredOrders.map(o => {
+                  {activeOrders.map(o => {
                     const isOpen = ['pending_new','accepted','held','partially_filled'].includes(o.status)
                     // Derive whole-share qty (same formula used when placing the order).
                     // No max(1,...) here — if floor < 1 the order should never have been placed.
@@ -1250,6 +1291,188 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                           </td>
                         </tr>
                       )}
+                      </Fragment>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )
+        }
+      </div>
+
+      {/* Closed Orders */}
+      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '14px 16px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+          <span style={{ fontSize: 12, fontWeight: 700 }}>✅ Closed Orders</span>
+          <span style={{ fontSize: 11, color: 'var(--dim)' }}>({closedOrders.length})</span>
+        </div>
+
+        {closedOrders.length === 0
+          ? <div style={{ fontSize: 12, color: 'var(--dim)' }}>No closed orders yet.</div>
+          : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th>Ticker</th><th>Direction</th><th>Status</th>
+                    <th>Entry</th><th>Stop</th><th>Target</th>
+                    <th>Filled @</th><th>Proximity</th><th>Realised P&L</th>
+                    <th>Conf %</th><th>Source</th><th>Closed</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {closedOrders.map(o => {
+                    const isLong  = o.side === 'buy'
+                    const sharesQty  = o.qty != null
+                      ? parseFloat(o.qty)
+                      : (o.entry_price ? Math.floor((o.notional ?? 500) / o.entry_price) : null)
+                    const actualCost = sharesQty != null && o.entry_price ? sharesQty * o.entry_price : null
+                    // Close orders (notional==null) have no stop/target — look up the entry order
+                    const isCloseOrder = o.notional == null
+                    const entryOrd = isCloseOrder
+                      ? orders.find(e => e.ticker === o.ticker && e.side !== o.side
+                          && e.stop_price != null && e.take_profit_price != null && e.notional != null
+                          && new Date(e.created_at) <= new Date(o.created_at))
+                      : null
+                    const proxStop   = o.stop_price   ?? entryOrd?.stop_price
+                    const proxTarget = o.take_profit_price ?? entryOrd?.take_profit_price
+                    // Exit price for proximity: use stored exit_price, derive from P&L/qty for
+                    // historical rows before the column existed, or filled_avg_price for cashouts.
+                    const direction = o.side === 'buy' ? 1 : -1
+                    const proxCurrent = isCloseOrder
+                      ? (o.filled_avg_price)   // cashout: filled_avg IS the exit
+                      : (o.exit_price           // bracket: stored exit price (new rows)
+                          ?? (o.realized_pnl != null && sharesQty
+                              ? o.filled_avg_price + o.realized_pnl / (sharesQty * direction)
+                              : o.filled_avg_price))  // fallback: entry fill (will be inaccurate)
+                    const riskPer = o.entry_price != null && o.stop_price != null
+                      ? Math.abs(o.entry_price - o.stop_price) : null
+                    const rewPer  = o.entry_price != null && o.take_profit_price != null
+                      ? Math.abs(o.take_profit_price - o.entry_price) : null
+                    const maxLoss = riskPer != null && sharesQty != null ? riskPer * sharesQty : null
+                    const maxGain = rewPer  != null && sharesQty != null ? rewPer  * sharesQty : null
+                    const rr      = maxLoss && maxGain ? (maxGain / maxLoss).toFixed(1) : null
+                    const isExpanded = expandedOrder === o.id
+                    const fmtTs = (iso) => iso ? new Date(iso).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '—'
+                    const closedAt = o.filled_at || o.closed_at
+                    return (
+                      <Fragment key={o.id}>
+                        <tr style={{ cursor: 'pointer' }} onClick={() => setExpandedOrder(isExpanded ? null : o.id)}>
+                          <td style={{ width: 20, color: 'var(--dim)', fontSize: 11, userSelect: 'none' }}>
+                            {isExpanded ? '▾' : '▸'}
+                          </td>
+                          <td><span className="badge-ticker">{o.ticker}</span></td>
+                          <td>
+                            {isCloseOrder
+                              ? <span style={{
+                                  fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 4,
+                                  background: 'color-mix(in srgb, var(--dim) 12%, transparent)',
+                                  border: '1px solid color-mix(in srgb, var(--dim) 30%, transparent)',
+                                  color: 'var(--dim)', letterSpacing: '0.04em',
+                                }}>↩ CASHOUT</span>
+                              : <span className={`badge ${isLong ? 'long' : 'short'}`}>
+                                  {isLong ? '▲ LONG' : '▼ SHORT'}
+                                </span>
+                            }
+                          </td>
+                          <td>
+                            <span style={{ fontSize: 10, fontWeight: 700, color: statusColor(o.status), textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                              {normaliseStatus(o.status ?? '—').replace(/_/g, ' ')}
+                            </span>
+                          </td>
+                          <td>{fmtMoney(isCloseOrder ? (entryOrd?.filled_avg_price ?? entryOrd?.entry_price) : o.entry_price)}</td>
+                          <td><span style={{ color: 'var(--red)' }}>{fmtMoney(isCloseOrder ? proxStop : o.stop_price)}</span></td>
+                          <td><span style={{ color: 'var(--green)' }}>{fmtMoney(isCloseOrder ? proxTarget : o.take_profit_price)}</span></td>
+                          <td>
+                            <div style={{ lineHeight: 1.4 }}>
+                              {fmtMoney(o.filled_avg_price)}
+                              {rr != null && <div style={{ fontSize: 10, color: 'var(--dim)' }}>R:R {rr}×</div>}
+                            </div>
+                          </td>
+                          <td>
+                            {proxStop && proxTarget && proxCurrent
+                              ? <PriceSlider stop={proxStop} target={proxTarget} current={proxCurrent} width={80} />
+                              : <span style={{ color: 'var(--dim)' }}>—</span>}
+                          </td>
+                          <td>{fmtPnl(o.realized_pnl)}</td>
+                          <td>{o.signal_confidence != null ? `${o.signal_confidence.toFixed(0)}%` : '—'}</td>
+                          <td className="text-dim" style={{ fontSize: 10 }}>
+                            {(o.signal_source ?? '—').split('+').map((s, i) => <div key={i}>{s.trim()}</div>)}
+                          </td>
+                          <td className="ts" style={{ fontSize: 10, lineHeight: 1.4 }}>
+                            {closedAt ? (
+                              <>
+                                <div>{new Date(closedAt).toLocaleDateString([], { month:'short', day:'numeric' })}</div>
+                                <div>{new Date(closedAt).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}</div>
+                              </>
+                            ) : '—'}
+                          </td>
+                        </tr>
+                        {isExpanded && (
+                          <tr style={{ background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
+                            <td colSpan={13} style={{ padding: '10px 18px' }}>
+                              <div style={{ display: 'flex', gap: 0, flexWrap: 'wrap', fontSize: 11 }}>
+                                <div style={{ paddingRight: 24 }}>
+                                  <div style={{ fontSize: 9, color: 'var(--dim)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 5 }}>Trade Math</div>
+                                  <div style={{ display: 'grid', gridTemplateColumns: 'max-content max-content', columnGap: 8, rowGap: 2 }}>
+                                    {[
+                                      ['Shares',     <span style={{ fontWeight: 700 }}>{sharesQty ?? '—'}</span>],
+                                      ['Invested',   fmtMoney(actualCost)],
+                                      ['Risk/share', <span style={{ color: 'var(--red)' }}>{riskPer != null ? `−${fmtMoney(riskPer)}` : '—'}</span>],
+                                      ['Reward/shr', <span style={{ color: 'var(--green)' }}>{rewPer != null ? `+${fmtMoney(rewPer)}` : '—'}</span>],
+                                      ['Max loss',   <span style={{ color: 'var(--red)', fontWeight: 700 }}>{maxLoss != null ? `−${fmtMoney(maxLoss)}` : '—'}</span>],
+                                      ['Max gain',   <span style={{ color: 'var(--green)', fontWeight: 700 }}>{maxGain != null ? `+${fmtMoney(maxGain)}` : '—'}</span>],
+                                      ['R:R',        <span style={{ fontWeight: 700 }}>{rr != null ? `${rr}×` : '—'}</span>],
+                                    ].map(([label, val], idx) => (
+                                      <Fragment key={idx}>
+                                        <span style={{ color: 'var(--dim)', paddingTop: idx === 4 ? 4 : undefined, borderTop: idx === 4 ? '1px solid var(--border)' : undefined }}>{label}</span>
+                                        <span style={{ paddingTop: idx === 4 ? 4 : undefined, borderTop: idx === 4 ? '1px solid var(--border)' : undefined }}>{val}</span>
+                                      </Fragment>
+                                    ))}
+                                  </div>
+                                </div>
+                                <div style={{ paddingLeft: 24, paddingRight: 24, borderLeft: '1px solid var(--border)' }}>
+                                  <div style={{ fontSize: 9, color: 'var(--dim)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 5 }}>Order</div>
+                                  <div style={{ display: 'grid', gridTemplateColumns: 'max-content max-content', columnGap: 8, rowGap: 2 }}>
+                                    {[
+                                      ['Alpaca ID', <span style={{ fontFamily: 'monospace', fontSize: 10 }} title={o.alpaca_order_id}>{o.alpaca_order_id ? o.alpaca_order_id.slice(0,8) + '…' : '—'}</span>],
+                                      ['Signal',    `#${o.signal_id ?? '—'}`],
+                                      ['Placed',    fmtTs(o.created_at)],
+                                      ['Filled',    fmtTs(o.filled_at)],
+                                      ['Closed',    fmtTs(o.closed_at)],
+                                    ].map(([label, val], idx) => (
+                                      <Fragment key={idx}><span style={{ color: 'var(--dim)' }}>{label}</span><span>{val}</span></Fragment>
+                                    ))}
+                                  </div>
+                                </div>
+                                <div style={{ paddingLeft: 24, borderLeft: '1px solid var(--border)' }}>
+                                  <div style={{ fontSize: 9, color: 'var(--dim)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 5 }}>Signal</div>
+                                  <div style={{ display: 'grid', gridTemplateColumns: 'max-content max-content', columnGap: 8, rowGap: 2 }}>
+                                    {(() => {
+                                      const hasAi = (o.signal_source ?? '').split('+').some(s => s.trim() === 'ai')
+                                      return [
+                                        ['Conf',    <span style={{ fontWeight: 700 }}>{o.signal_confidence != null ? `${o.signal_confidence.toFixed(0)}%` : '—'}</span>],
+                                        ['Mode',    <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', padding: '1px 5px', borderRadius: 3,
+                                          background: hasAi ? 'color-mix(in srgb, var(--accent) 15%, transparent)' : 'color-mix(in srgb, var(--dim) 10%, transparent)',
+                                          color: hasAi ? 'var(--accent)' : 'var(--dim)',
+                                          border: `1px solid ${hasAi ? 'color-mix(in srgb, var(--accent) 30%, transparent)' : 'color-mix(in srgb, var(--dim) 20%, transparent)'}`,
+                                        }}>{hasAi ? '🤖 LLM' : '📐 Rules'}</span>],
+                                        ['Sources', <span style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                                          {(o.signal_source ?? '—').split('+').map((s, i) => <span key={i}>{s.trim()}</span>)}
+                                        </span>],
+                                        ['At',      fmtTs(o.signal_timestamp)],
+                                      ].map(([label, val], idx) => (
+                                        <Fragment key={idx}><span style={{ color: 'var(--dim)' }}>{label}</span><span>{val}</span></Fragment>
+                                      ))
+                                    })()}
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
                       </Fragment>
                     )
                   })}
