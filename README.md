@@ -41,7 +41,7 @@ nav drawer. Code split into focused modules: 9 backend route files, 31 frontend 
 
 - **Autonomous trading** — a hands-off loop turns signals into orders without a tap: a **tradability gate** drops permanently un-actionable signals, confidence floors and a position cap govern placement, and a paper-only safety rail guards live fractional buys. All knobs are env defaults with live Settings → Autonomous overrides. See [docs/wiki/paper-trading.md](docs/wiki/paper-trading.md#autonomous-trading)
 - **Discovery auto-add** — high-score tradable candidates from Trending Discovery can be auto-added to the watchlist (capped per run)
-- **Reports** — persisted **EoD & weekly** reports combine deterministic account figures with an LLM analyst narrative (commentary, patterns, and parameter-tuning suggestions), viewable on the Reports tab and delivered to your channels. See [docs/wiki/reports.md](docs/wiki/reports.md)
+- **Reports** — four persisted report types (**end-of-day** and **weekly**, each split across **bracket orders** and **fractional**) combine deterministic account figures with an LLM analyst narrative (commentary, patterns, and parameter-tuning suggestions), viewable on the Reports tab and delivered to your channels. See [docs/wiki/reports.md](docs/wiki/reports.md)
 - **Activity feed** — an in-app event log (scan / order / discovery / notification / scheduler / report / system) with an Errors filter, for at-a-glance history without an external service. See [docs/wiki/observability.md](docs/wiki/observability.md#activity-feed-in-app-event-log)
 
 ### Mobile responsiveness
@@ -178,7 +178,7 @@ Then open the services:
 
 | URL | What |
 |---|---|
-| http://localhost:5174 | React UI — Dashboard · Analysis Explorer · Learn · Settings |
+| http://localhost:5174 | React UI — Dashboard · Trading · Discovery · Explorer · Activity · Reports · Learn · Schedule · Backtesting · Settings |
 | http://localhost:5174/docs | FastAPI interactive docs (via nginx proxy) |
 | http://localhost:8010/docs | FastAPI interactive docs (direct) |
 | http://localhost:18889 | Aspire — traces, metrics, structured logs |

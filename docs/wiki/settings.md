@@ -32,10 +32,27 @@ Data. Changing the provider clears the current provider's API key, model, base
 URL, `.env` toggle, and reasoning selection before loading the new provider's
 options. This prevents, for example, a Gemini model from being saved for Mistral.
 
-The model field is a free-text input with provider-specific suggestions. Choose
-one from the dropdown or type any valid model ID; the empty suggestion means
-"type your own model". For Ollama, suggestions include `qwen2.5:3b`,
-`qwen2.5:7b`, and `qwen2.5:14b`.
+Each provider keeps its own saved model list, sourced from the provider's `*_MODELS`
+environment variable and extendable from the UI — a model you type in is appended to
+that provider's list, so switching providers back and forth preserves each one's
+choices independently.
+
+### Per-report model overrides
+
+The four report types can each run on a different model — useful for sending the
+heavier weekly cross-week analysis to a stronger model while keeping the daily reports
+on a fast, cheap one. An empty value means "use the primary model".
+
+| DB setting | Applies to |
+|---|---|
+| `llm_model_eod_orders` | `GET /reports/eod/orders` |
+| `llm_model_eod_frac` | `GET /reports/eod/frac` |
+| `llm_model_weekly_orders` | `GET /reports/weekly/orders` |
+| `llm_model_weekly_frac` | `GET /reports/weekly/frac` |
+
+A value may be a bare model name, or `provider:model` to route that report to a
+different provider entirely. The generated report records — and the badge on the
+Reports page — show the model that actually produced it.
 
 For non-custom providers, **Use `.env` defaults** fills the key/model from the
 environment-derived configuration and clears saved UI overrides when saved.
@@ -93,6 +110,7 @@ docker exec ollama ollama pull qwen2.5:14b
 | `VOLUME_SPIKE_MULTIPLIER` | `2.0` | Volume must be this many times the 20-day average to trigger volume-spike rule |
 | `SIGNIFICANT_MOVE_PCT` | `2.0` | Day price move (%) required alongside a volume spike |
 | `CONFIDENCE_FLOOR` | `75` | Minimum 0–100 confidence for a signal to be stored and alerted. Runtime-mutable via **Settings → Autonomous**. |
+| `signal_realert_delta` (DB setting only) | `10` | Points of confidence a **repeat** signal must gain before it alerts again on the same day. `0` disables re-alerts entirely. See [Alert deduplication](notifications.md#alert-deduplication). |
 
 The RSI / volume / move thresholds are read-only from the UI — edit `.env` then `make up` to recreate the container. `CONFIDENCE_FLOOR` is also a live DB override (Settings → Autonomous).
 

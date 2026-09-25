@@ -182,10 +182,17 @@ backend/
 │   ├── data.py       # /data/*
 │   ├── discovery.py  # /discovery/*, /settings/discovery*
 │   ├── usage.py      # /usage, /provider/quota
-│   └── backtest.py   # /backtest*
+│   ├── backtest.py   # /backtest*
+│   ├── reports.py    # /reports/{eod,weekly}/{orders,frac}, /reports, DELETE /reports/{id}
+│   ├── frac.py       # /frac/*
+│   ├── events.py     # /events
+│   └── notifications.py  # /notifications/*
 ├── config.py
 ├── database.py
 ├── alpaca.py         # AlpacaClient (HTTP wrapper, not routes)
+├── notifications/    # pluggable channel registry (ntfy); dispatch() fans out + logs
+├── prompts/          # externalised LLM prompts (report_*, signal_scan_*, backtest_*)
+├── skills/           # the per-ticker pipeline skills (see Agentic pipeline)
 ... (rest unchanged)
 ```
 
@@ -204,7 +211,7 @@ frontend/src/
 ├── components/
 │   ├── analysis/         # AnalysisResult, AnalysisStepper, AnalyzePanel, IndicatorTable, LLMReasoning
 │   ├── charts/           # BalanceSheetChart, EmaChart, MacdChart, MarketCharts, PriceHistoryChart, RsiChart
-│   ├── shared/           # AnalysisHistoryPanel, Header, InfoTip, LoginScreen, PaperOrdersPanel, WatchlistCard
+│   ├── shared/           # AnalysisHistoryPanel, Header, InfoTip, LoginScreen, PaperOrdersPanel, PriceSlider, WatchlistCard
 │   └── signals/          # SignalCard, SignalsTable
 ├── hooks/
 │   ├── useAnalyzeStream.js
@@ -212,9 +219,14 @@ frontend/src/
 ├── pages/
 │   ├── BacktestPage.jsx
 │   ├── EducationPage.jsx
+│   ├── EventsPage.jsx        # Activity feed
 │   ├── ExplorerPage.jsx
-│   ├── PaperTradingPage.jsx
+│   ├── FracTradingPage.jsx   # Fractional tab
+│   ├── PaperTradingPage.jsx  # Bracket-orders tab
+│   ├── ReportsPage.jsx
+│   ├── SchedulePage.jsx
 │   ├── SettingsPage.jsx
+│   ├── TradingPage.jsx       # shell hosting the Paper / Fractional tabs
 │   ├── TrendingPage.jsx
 │   └── UsageSection.jsx
 └── utils/

@@ -1,82 +1,143 @@
-# Reports — EoD & Weekly
+# Reports — 4 focused types with missed-opportunity diagnostics
 
-MarketSage generates **end-of-day** and **weekly** performance reports that combine
-deterministic account figures with an LLM analyst narrative. Reports are persisted,
-browsable in-app on the **📑 Reports** tab, and delivered to your notification
-channels (ntfy + Telegram).
+MarketSage generates **4 focused report types** — one EoD and one weekly each for
+fractional trades and bracket orders — that combine deterministic account figures with
+an LLM analyst narrative. Reports are persisted, browsable in-app on the **📑 Reports**
+tab (split into Frac / Orders tabs), and delivered to your notification channels
+(ntfy + Telegram).
 
 > ⚠️ **Not financial advice.** Reports summarise a paper-trading account for
 > educational use only.
 
 ---
 
+## Report types
+
+| `report_type` | Trigger | Data scope |
+|---|---|---|
+| `eod_orders` | `GET /reports/eod/orders` | Today's bracket (paper) orders + cap hits |
+| `weekly_orders` | `GET /reports/weekly/orders` | 7-day bracket history + cross-week patterns |
+| `eod_frac` | `GET /reports/eod/frac` | Today's fractional trades + budget cap hits |
+| `weekly_frac` | `GET /reports/weekly/frac` | 7-day frac history + cross-week patterns |
+
+Legacy types (`eod`, `daily`, `weekly`) remain in the DB and appear in the Orders tab.
+
+---
+
 ## What a report contains
 
-Every report is built **compute-then-narrate**: all numbers are computed in Python
-(the model never does arithmetic), then the LLM writes the prose around them. A single
-LLM call produces two versions, stored separately:
+Every report is **compute-then-narrate**: numbers are computed in Python (the LLM
+never does arithmetic), then the model writes prose. One LLM call produces two
+versions, both stored:
 
-- **Notification version** — a short, phone-sized summary sent to ntfy / Telegram.
-- **Full version** — the deterministic digest (bracket + fractional economics,
-  the period's signals, orders, and fractional exits) followed by an **AI analysis**
-  block: commentary, observed patterns, concrete suggestions, and **parameter-tuning
-  recommendations**.
+- **Notification** — a short, phone-sized summary for ntfy / Telegram, including the
+  single most actionable insight.
+- **Full report** — the deterministic digest followed by an **AI analysis** block:
+  commentary, observed patterns, concrete suggestions, and parameter-tuning
+  recommendations.
+
+### Missed-opportunity diagnostics (key feature)
+
+When the position cap (`PAPER_MAX_POSITIONS`) or budget cap (`FRAC_BUDGET`) is
+reached during a scan, the system now **persists a `order_blocked` event** to the
+activity log. These events are counted and passed to the LLM so every report can say:
+
+> "12 orders were blocked by the position cap this week — consider raising
+> `PAPER_MAX_POSITIONS` from 5 to 8."
+
+If cap hits occurred, the full report shows an **⚠️ yellow banner** above the
+commentary, and the tuning block always includes a fix recommendation.
+
+### Cross-week patterns (weekly reports only)
+
+Weekly reports analyse patterns that a single day can't reveal:
+- **Confidence drift** — is average signal confidence trending up or down?
+- **Win/loss streaks** — are losses clustered by day or ticker?
+- **Top/bottom performers** — which tickers had the best and worst realized P&L?
+- **Signal recurrence** — which tickers appeared 3+ days in a row?
+- **Stop vs target ratio** (orders) — are entries too aggressive?
+- **Budget utilisation** (frac) — what % of `FRAC_BUDGET` was deployed?
 
 ### Parameter-tuning recommendations
 
-The analyst is given the current effective value of every tunable knob
-(`RSI_OVERSOLD`, `RSI_OVERBOUGHT`, `VOLUME_SPIKE_MULTIPLIER`, `SIGNIFICANT_MOVE_PCT`,
-`CONFIDENCE_FLOOR`, `FRAC_MIN_CONFIDENCE`, `PAPER_TRADE_MIN_CONFIDENCE`,
-`PAPER_MAX_POSITIONS`, `SIGNAL_DROP_MODE`, `DISCOVERY_MIN_SCORE`,
-`DISCOVERY_AUTOADD_ENABLED`, `DISCOVERY_AUTOADD_TOP_N`). Each recommendation is a
-`setting → suggested value` pair with a one-line rationale tied to the session's
-data. The model is instructed to suggest changes only when the data justifies them
-and never to echo the current value. See [Settings](settings.md) and
-[Paper Trading § Autonomous trading](paper-trading.md#autonomous-trading) for the
-knobs themselves.
+The analyst receives every tunable knob and its current value. Frac reports reference
+`FRAC_BUDGET`, `FRAC_POSITION_SIZE`, `FRAC_MIN_CONFIDENCE`, `FRAC_POLL_SECONDS`.
+Orders reports reference `PAPER_MAX_POSITIONS`, `PAPER_TRADE_MIN_CONFIDENCE`,
+`CONFIDENCE_FLOOR`, `RSI_OVERSOLD`, `RSI_OVERBOUGHT`, `VOLUME_SPIKE_MULTIPLIER`.
+Each recommendation is a `setting → suggested value` pair with a one-line rationale
+tied to the actual data. The model only suggests changes the data justifies, never
+echoes the current value.
+
+### Per-type model selection
+
+Set a different LLM for each report type in **Settings → AI provider → Report models**
+(leave blank to use the primary model). Useful for routing cheap/fast models to EoD
+reports and a premium model (e.g. `mistral-large-latest`) to weekly insights.
 
 ### Model tag
 
-Each report records which LLM generated it (e.g. `gemini-3.5-flash-lite`). It appears
-as a 🧠 chip in the Reports viewer and as a `— generated by <model>` line at the
-bottom of the full body.
+Each report records which LLM generated it. It appears as a 🧠 chip in the viewer
+and as `— generated by <model>` at the bottom of the full body.
 
 ### Graceful degradation
 
-On any LLM or parse failure the report still sends: it falls back to the raw
-deterministic digest with an `⚠️ AI analysis unavailable` note, and is stored with
-`llm = false` (shown as a ⚠️ marker in the history list). A failure also logs a
-`report`-category error to the [Activity feed](observability.md#activity-feed-in-app-event-log).
+On LLM/parse failure the report still sends: it falls back to the raw deterministic
+digest with `⚠️ AI analysis unavailable`, stored with `llm = false`.
 
 ---
 
 ## The Reports page
 
-Open the **📑 Reports** tab from the top nav:
+Open **📑 Reports** from the top nav. The page has two tabs:
 
-- **History list** (left) — every persisted report, newest first, with a type chip
-  (EoD / Weekly), date, headline, and a ⚠️ marker if AI analysis was unavailable.
-  Each row has a 🗑 delete button.
-- **Viewer** (right) — the selected report with a **Full report / Notification**
-  toggle and the 🧠 model chip.
-- **Generate buttons** — `⟳ Generate EoD` and `⟳ Generate Weekly` trigger a report
-  on demand (async, with a loading state) and jump to the freshly-created report.
+- **📋 Orders** — `eod_orders`, `weekly_orders`, and legacy reports.
+- **🔢 Fractional** — `eod_frac`, `weekly_frac`.
 
-![Reports tab — history list, full/notification toggle, and model chip](../screenshots/20-reports.png)
+Each tab has:
+- **Generate buttons** — `⟳ EoD <mode>` and `⟳ Weekly <mode>` (async, with loading
+  state); jump to the fresh report on completion.
+- **History list** — newest first, with a colour-coded type chip, date, headline, ⚠️
+  marker if AI was unavailable, and a 🗑 delete button.
+- **Viewer** — Full report / Notification toggle, 🧠 model chip, yellow ⚠️ banner if
+  cap hits occurred, **Copy** button (copies full text to clipboard).
 
 ---
 
 ## Externalised prompts
 
-The analyst prompts live as editable files, not inline strings:
+Analyst prompts live as editable files — change tone or emphasis without touching code:
 
-- `backend/prompts/report_eod.md`
-- `backend/prompts/report_weekly.md`
+| File | Used for |
+|---|---|
+| `backend/prompts/report_eod_orders.md` | EoD bracket report |
+| `backend/prompts/report_weekly_orders.md` | Weekly bracket report (cross-week analysis) |
+| `backend/prompts/report_eod_frac.md` | EoD fractional report |
+| `backend/prompts/report_weekly_frac.md` | Weekly fractional report (cross-week analysis) |
+| `backend/prompts/report_eod.md` | Unused — unreachable fallback default (see note) |
+| `backend/prompts/report_weekly.md` | Unused — unreachable fallback default (see note) |
 
-Both use `{{TOKEN}}` placeholders (headline metrics, the JSON session snapshot, and
-the current `{{TUNING_CONFIG}}`) and return a fixed compact-JSON shape
+> The last two files are no longer loaded by any endpoint. They remain only as the
+> `prompt_file is None` fallback inside `_compose_report`, and every caller now passes
+> an explicit `report_{report_type}.md`, so that branch is never taken.
+
+All use `{{TOKEN}}` placeholders and return a fixed JSON shape
 (`headline`, `notification`, `commentary`, `patterns`, `suggestions`, `tuning`).
-Edit them to change tone or emphasis without touching code.
+
+---
+
+## Blocked-event logging
+
+When a trade is wanted but blocked, the system saves an `order_blocked` event:
+
+| Reason | Logged by | Meaning |
+|---|---|---|
+| `position_cap` | `PaperTradeSkill` | `PAPER_MAX_POSITIONS` was at the cap |
+| `budget_cap` | `FracTradeSkill` | `FRAC_BUDGET` was exhausted |
+| `insufficient_funds` | both skills | Alpaca rejected the order |
+| `untradable_dropped` | `TradabilityGateSkill` | Signal dropped as permanently unactionable |
+
+These events are visible in the [Activity feed](observability.md#activity-feed-in-app-event-log)
+and counted into every report's `blocked_events` context.
 
 ---
 
@@ -84,18 +145,24 @@ Edit them to change tone or emphasis without touching code.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /reports/eod` | Generate + dispatch the end-of-day report; persists and returns it. Returns **502** if no channel is configured (so an external cron can't silently deliver nothing). |
-| `GET /reports/llm-summary?period=daily\|weekly` | Generate + dispatch a daily or weekly LLM summary. |
-| `GET /reports?limit=&type=` | List persisted reports (newest first); `type` filters `eod\|weekly\|daily`. |
-| `DELETE /reports/{id}` | Delete a persisted report. |
+| `GET /reports/eod/orders` | Generate + dispatch today's bracket orders report |
+| `GET /reports/weekly/orders` | Generate + dispatch the 7-day bracket orders report |
+| `GET /reports/eod/frac` | Generate + dispatch today's fractional report |
+| `GET /reports/weekly/frac` | Generate + dispatch the 7-day fractional report |
+| `GET /reports?limit=&type=` | List persisted reports; `type` filters by `report_type` |
+| `DELETE /reports/{id}` | Delete a persisted report |
+
+> `GET /reports/eod` and `GET /reports/llm-summary` were **removed** when the reports
+> were split into the four focused types above. Stored rows from those older runs
+> (`report_type` of `eod`, `weekly` or `daily`) still list and display normally.
 
 ```bash
-# Trigger on demand (same calls the Cloudflare cron makes):
-curl -H "Authorization: Bearer <ADMIN_TOKEN>" "https://<your-backend>/reports/eod"
-curl -H "Authorization: Bearer <ADMIN_TOKEN>" "https://<your-backend>/reports/llm-summary?period=weekly"
+# Trigger on demand:
+curl -H "Authorization: Bearer <ADMIN_TOKEN>" "https://<your-backend>/reports/eod/orders"
+curl -H "Authorization: Bearer <ADMIN_TOKEN>" "https://<your-backend>/reports/weekly/frac"
 ```
 
 Reports are meant to be triggered on a schedule by the
 [Cloudflare Workers cron](cloudflare-cron.md); they can also be generated manually
-from the Reports page. Delivery details (channels, `<pre>` Telegram rendering) are in
-[Notifications § Periodic reports](notifications.md#periodic-reports--eod-digest--llm-summary).
+from the Reports page. Delivery details are in
+[Notifications § Periodic reports](notifications.md#periodic-reports).

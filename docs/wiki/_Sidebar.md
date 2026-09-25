@@ -15,6 +15,7 @@
 - [Trending Discovery](trending-discovery)
 - [Notifications](notifications)
 - [Reports](reports)
+- [Schedule](schedule)
 - [Glossary](glossary)
 - [Observability](observability)
 - [Cloudflare Cron](cloudflare-cron)

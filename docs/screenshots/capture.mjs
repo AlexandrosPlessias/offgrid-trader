@@ -33,8 +33,9 @@
  *   17-discovery-settings.png    ← Discovery settings — source pill toggles
  *   18-mobile-hamburger.png      ← Mobile 375px — hamburger nav drawer open
  *   19-settings-fractional.png   ← Settings → Live / Fractional profile
- *   20-reports.png               ← Reports tab — EoD/weekly history + viewer
- *   21-activity.png              ← Activity tab — live event feed + Errors filter
+ *   20-reports.png               ← Reports tab — Orders/Frac tabs, history + viewer
+ *   21-activity.png              ← Activity tab — event feed with a notification row expanded
+ *   24-schedule.png              ← Schedule tab — the trading week as a timeline
  *   22-settings-autonomous.png   ← Settings → Autonomous trading section
  *   23-settings-notifications.png← Settings → Notifications (ntfy + Telegram)
  *
@@ -168,6 +169,16 @@ await shot(page, '13-trading-page.png', async () => {
     await page.locator('text=Portfolio Value, text=Buying Power').first().waitFor({ timeout: 8000 });
   } catch {}
   await page.waitForTimeout(3000); // let charts render
+});
+
+// Open Positions table — shows the ⏳ SELLING / ⏳ Exit queued indicators, which
+// sit below the fold on 13-trading-page.png.
+await shot(page, '13c-open-positions.png', async () => {
+  try {
+    const heading = page.locator('text=click a row for order details').first();
+    await heading.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(1200);
+  } catch { console.warn('⚠  Open Positions table not found'); }
 });
 
 // Scroll to the orders table and expand the first row
@@ -389,6 +400,19 @@ await shot(page, '21-activity.png', async () => {
   await goto(page, BASE);
   try { await page.locator('.header-nav button:has-text("Activity")').click(); await page.waitForTimeout(2500); }
   catch { console.warn('⚠  Activity tab not found'); }
+  // Expand a notification row so the captured sent-text panel is visible.
+  try {
+    const details = page.locator('button:has-text("details")').first();
+    await details.waitFor({ timeout: 4000 });
+    await details.click();
+    await page.waitForTimeout(600);
+  } catch { console.warn('⚠  No expandable notification row found'); }
+});
+
+await shot(page, '24-schedule.png', async () => {
+  await goto(page, BASE);
+  try { await page.locator('.header-nav button:has-text("Schedule")').click(); await page.waitForTimeout(2500); }
+  catch { console.warn('⚠  Schedule tab not found'); }
 });
 
 // ── 9. Autonomous + Notifications settings sections ──────────────────────────

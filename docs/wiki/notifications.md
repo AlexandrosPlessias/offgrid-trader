@@ -1,8 +1,13 @@
 # Notifications
 
-MarketSage sends **one push alert per signal** as each scan cycle turns it up —
-one message per opportunity, with action buttons for placing a trade directly
-from your phone.
+MarketSage sends **one push alert per signal per day** — the first time a scan turns
+up a given ticker+direction — with action buttons for placing a trade directly from
+your phone. A ticker that stays actionable all session is announced once, not once
+per scan cycle. See [Alert deduplication](#alert-deduplication).
+
+Every notification is prefixed with the trade mode and category it belongs to, so the
+first thing you read tells you what it is: `[Order] [Placed]`, `[Frac] [Closed]`,
+`[Order/Frac] [Signal]`, `[Order] [Blocked]`.
 
 Three channels are available. All are off by default and independently
 enabled:
@@ -95,15 +100,16 @@ credentials → delivery → action routing → frontend feedback — in one cli
 
 A separate toggle — **Order & fractional notifications** (default **on**) — pushes a
 short message to your channels each time an order or fractional buy is placed
-(e.g. `🪙 Fractional buy placed — BUY AAPL · $15.00 · LIVE 💰`, or
-`📈 Order placed — BUY AAPL · $500.00 · paper`).
+(e.g. `[Frac] [Placed] 🪙 Fractional buy — BUY AAPL · $15.00 · LIVE 💰`, or
+`[Order] [Placed] 📈 Order placed — BUY AAPL · $500.00 · paper`).
 
 The same toggle also covers **blocked** and **failed** attempts, so the autonomous
 loop is never silent about an order it *wanted* to place but couldn't:
 
 - **Blocked (transient):** the position cap (`PAPER_MAX_POSITIONS`), the fractional
   budget cap (`FRAC_BUDGET`), or insufficient buying power —
-  e.g. `⚠️ Would buy AAPL $500.00 — position cap reached (5). Top up or free a slot.`
+  e.g. `[Order] [Blocked] ⚠️ Would buy AAPL · $500.00 — position cap reached — close a
+  position or raise the cap`
 - **Failed:** an Alpaca rejection that isn't a money/capacity issue.
 
 Every attempt — placed, blocked, or failed — produces exactly one notification and a
@@ -112,9 +118,28 @@ matching `order`-category [Activity event](observability.md#activity-feed-in-app
 ### System lifecycle notifications
 
 On startup and shutdown the backend fires a low-priority system alert to the same
-channels (`🚀 MarketSage is live — <ts>` / `🛑 MarketSage is shutting down — <ts>`)
-and logs a `system` Activity event. These never block startup/shutdown — a slow or
-failing channel is ignored.
+channels and logs a `system` Activity event. These never block startup/shutdown — a
+slow or failing channel is ignored.
+
+The startup message names **what triggered the start**, which distinguishes a scheduled
+cron wake from a deploy you just ran:
+
+```
+🚀 MarketSage is live · Scheduled Trigger — 2026-09-25 12:30:00 UTC
+🛑 MarketSage is shutting down — 2026-09-25 21:30:00 UTC
+```
+
+| Label | Means |
+|---|---|
+| `Manual (local dev)` | No `FLY_APP_NAME` — running outside Fly |
+| `Scheduled Trigger` | Same image as last boot — the Cloudflare cron woke the machine |
+| `Manual Deploy (<sha>)` | New image built from your terminal (`make deploy`) |
+| `GitHub Actions Deploy (<sha>)` | New image built in CI |
+
+Detection compares both the `BUILD_SHA` baked into the image and the `FLY_MACHINE_ID`
+against the last values seen — either changing means a deploy (a deploy replaces the
+machine, a cron wake reuses it), and `BUILD_SOURCE` says who built it. `BUILD_SHA` and
+`BUILD_SOURCE` are docker build args set by `scripts/cloud-deploy/deploy.sh`.
 
 For ntfy:
 1. Toggle **Enable** on.
@@ -167,11 +192,11 @@ After editing `.env` run `make up` to recreate the container.
 
 ### 5. Notification format
 
-MarketSage sends **one alert per signal**, the moment a scan cycle turns one up.
-Each alert looks like this on your phone:
+MarketSage sends **one alert per signal per day** — the first scan cycle that turns a
+given ticker+direction up. Each alert looks like this on your phone:
 
 ```
-Title:  MarketSage · LONG AAPL · 78% confidence
+Title:  [Order/Frac] [Signal] MarketSage · LONG AAPL · 78% confidence
 Body:
   Ticker:     AAPL
   Direction:  LONG
@@ -186,10 +211,11 @@ Body:
     - AI flagged long setup
     - RSI oversold on 4H, 1D
 
-  Not financial advice · Generated locally by MarketSage
-
   [Order AAPL BUY]   [Frac AAPL]
 ```
+
+A **SHORT** signal is tagged `[Order] [Signal]` instead — only the bracket-order button
+is offered, because fractional shorts aren't supported.
 
 Each alert carries up to **two from-phone trade actions**:
 
@@ -207,6 +233,29 @@ identical dedup, tradability, and budget-cap checks — no shortcuts.
 > ntfy tags each notification by kind — a chart icon on signal alerts, a
 > bar-chart on the end-of-day digest, a rocket on startup — so they're easy to
 > tell apart at a glance.
+
+### Alert deduplication
+
+A ticker that clears the confidence floor usually stays actionable for hours, and every
+scan cycle re-detects it. Without a guard that means a notification per cycle — a 15-minute
+interval over one session can produce a dozen identical alerts for the same ticker.
+
+Only the **first sighting of a ticker+direction per UTC day** sends an alert. The dedup key
+matches the one the `signals` table already uses, so the alert and the stored row agree.
+
+A repeat sends a second alert only if **confidence has climbed** by at least
+`signal_realert_delta` points since the last alert — the idea being that a setup
+strengthening from 62% to 80% is genuinely new information, while 62% → 65% is not.
+Each re-alert re-baselines, so the next comparison measures the climb from the most
+recent notification rather than from the first sighting.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `signal_realert_delta` | `10` | Points of confidence a repeat must gain to alert again |
+| `signal_realert_delta` | `0` | Disables re-alerts — exactly one alert per ticker+direction per day |
+
+Placement, blocked and closed notifications are **not** deduplicated this way — those are
+discrete events rather than a standing condition, and each one already fires exactly once.
 
 ### 6. Cloud (Fly.io) specifics
 
@@ -283,7 +332,7 @@ monospace `<pre>` block so the columns line up. Below each message sits an
 inline keyboard carrying the same **two trade actions** as ntfy:
 
 ```
-MarketSage · LONG AAPL · 78% confidence
+[Order/Frac] [Signal] MarketSage · LONG AAPL · 78% confidence
 
   Ticker:     AAPL
   Direction:  LONG
@@ -466,21 +515,46 @@ curl "http://localhost:18880/<your-topic>/json?poll=1&since=all"
 
 ---
 
-## Periodic reports — EoD digest & LLM summary
+## Periodic reports
 
-Two report endpoints fan out to **both** ntfy and Telegram (the Telegram side renders as a monospace `<pre>` block):
+Four report endpoints fan out to **both** ntfy and Telegram (the Telegram side renders as a monospace `<pre>` block):
 
-- **End-of-day digest** — `GET /reports/eod`. A deterministic summary of the day's economics, signals, and orders. Returns **502** if no channel is configured, so an external cron can't silently "succeed" while delivering nothing.
-- **LLM summary** — `GET /reports/llm-summary?period=daily|weekly`. A natural-language summary written by the configured LLM. Every figure is computed in Python and passed to the model as structured data (**compute-then-narrate** — the model never does arithmetic); on any LLM/parse failure it falls back to the deterministic EoD digest, so a report always sends.
+| Endpoint | Covers |
+|---|---|
+| `GET /reports/eod/orders` | Today's bracket (paper) orders |
+| `GET /reports/eod/frac` | Today's fractional trades |
+| `GET /reports/weekly/orders` | 7 days of bracket orders, with cross-week analysis |
+| `GET /reports/weekly/frac` | 7 days of fractional trades, with cross-week analysis |
 
-Both are meant to be triggered by an external scheduler (see BACKLOG item 8 — a Cloudflare Workers cron):
+Each is written by the configured LLM. Every figure is computed in Python and passed to
+the model as structured data (**compute-then-narrate** — the model never does arithmetic);
+on any LLM/parse failure it falls back to a deterministic digest, so a report always sends.
+Each returns **502** if no channel is configured, so a cron can't silently "succeed" while
+delivering nothing.
 
-```bash
-curl -H "Authorization: Bearer <ADMIN_TOKEN>" "https://<your-backend>/reports/eod"
-curl -H "Authorization: Bearer <ADMIN_TOKEN>" "https://<your-backend>/reports/llm-summary?period=weekly"
+The report notification carries the headline, the LLM's prose summary, its **top
+suggestion**, and its **top tuning hint**:
+
+```
+📊 Flat session — two stops hit, no targets reached
+
+Bracket P&L was -$2.16 across 9 closed trades (44% win rate)…
+
+💡 Tighten entries on low-volume names — 3 of 4 losses opened below average volume.
+
+⚙️ PAPER_MAX_POSITIONS: 5 → 8 — the cap blocked 12 signals this week.
 ```
 
-Both reports are **persisted** and browsable in-app on the **📑 Reports** tab, carry
+These are triggered by the [Cloudflare Workers cron](cloudflare-cron.md) — the EoD pair at
+5:05 PM ET weekdays, the weekly pair at 5:25 PM ET Friday — and can also be generated
+on demand:
+
+```bash
+curl -H "Authorization: Bearer <ADMIN_TOKEN>" "https://<your-backend>/reports/eod/orders"
+curl -H "Authorization: Bearer <ADMIN_TOKEN>" "https://<your-backend>/reports/weekly/frac"
+```
+
+All reports are **persisted** and browsable in-app on the **📑 Reports** tab, carry
 a model tag, and include parameter-tuning suggestions. See the dedicated
 [Reports](reports.md) page for the full feature (history, full/notification toggle,
 manual generate/delete, externalised prompts, `GET /reports`, `DELETE /reports/{id}`).

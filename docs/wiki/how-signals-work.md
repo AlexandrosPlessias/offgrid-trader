@@ -214,6 +214,22 @@ stack with at least two other sources to clear the floor.
 
 ---
 
+## Step 6 — Alert deduplication
+
+Clearing the floor makes a signal *storable*; it does not automatically make it
+*alertable*. A ticker that clears the floor typically keeps clearing it on every scan
+for hours, so a final gate decides whether to actually notify:
+
+- The **first** sighting of a ticker+direction on a given UTC day alerts.
+- Later sightings the same day stay silent, unless confidence has climbed by at least
+  `signal_realert_delta` points (default 10) since the last alert.
+
+The signal row itself is written once per ticker+direction per day regardless, so the
+stored history and the alerts you receive stay in agreement. Full detail in
+[Notifications § Alert deduplication](notifications.md#alert-deduplication).
+
+---
+
 ## What "long" and "short" mean
 
 | Signal | Interpretation |

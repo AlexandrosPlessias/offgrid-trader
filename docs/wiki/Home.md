@@ -31,8 +31,8 @@ MemoryLayer       → update ticker_memory for next scan
 The **Orchestrator** sorts watchlist tickers by scan staleness and caps concurrency at 3 (respects Ollama VRAM). Results are visible in the React UI and via the REST API. Live progress streams via SSE — including `retry` and `memory` events.
 
 **Navigation:**
-- **Left (primary):** Dashboard · Explorer · Trading · Learn
-- **Right (secondary):** Backtesting · Logs · Portainer · ⚙ Settings
+- **Left (primary):** 📊 Dashboard · 📈 Trading · 🔥 Discovery · 🔍 Explorer · 📋 Activity · 📑 Reports · 📚 Learn · 🗓 Schedule
+- **Right (secondary):** 🧪 Backtesting · ⚙ Settings, plus external tool links to Logs (Aspire) and Portainer
 
 After each scan, the scheduler syncs open Alpaca paper orders (status, fill price, P&L) back to the local DB. The **Dashboard** shows a live watchlist price table (Price · Chg% · VWAP · Vol · H/L) updated every 30 s during market hours and a collapsible **Paper Orders** sidebar for quick order glances. The dedicated **Trading** tab provides the full paper-trading dashboard: account metrics, portfolio equity curve, insight charts (Orders by Status, Max Gain/Loss, Confidence, Realised P&L), open positions table, and a full orders table with expandable per-row detail.
 
@@ -130,10 +130,14 @@ See [docs/screenshots/README.md](../screenshots/README.md) for full instructions
 | [Paper Trading](paper-trading.md) | Alpaca paper account setup, bracket orders, live market data, autonomous trading loop, `/paper/*` API endpoints |
 | [Trending Discovery](trending-discovery.md) | Candidate scanning, scoring, watchlist auto-add, `/discovery/*` endpoints |
 | [Notifications](notifications.md) | ntfy + Telegram setup, order/blocked/system alerts, periodic reports |
-| [Reports](reports.md) | EoD & weekly LLM reports — the Reports page, tuning suggestions, model tag, `/reports*` endpoints |
+| [Reports](reports.md) | The four LLM reports (EoD/weekly × orders/frac) — Reports page, tuning suggestions, model tag, `/reports*` endpoints |
+| [Schedule](schedule.md) | The trading week as a timeline — wake, scans, discovery, reports, stop |
 | [Glossary](glossary.md) | Alphabetical trading and macro terminology |
 | [Observability](observability.md) | OTEL span hierarchy, Aspire usage guide, log lines, in-app Activity feed |
 | [Cloudflare Cron](cloudflare-cron.md) | Workers cron that starts/stops the Fly app and sends EoD + weekly reports on schedule |
+| [Cloud Hosting](cloud-hosting.md) | Deploying the backend to Fly.io and the frontend to Vercel |
+| [Security](security.md) | Admin token, CORS, secret handling |
+| [Development](development.md) | Local dev loop, lint gate, tests |
 
 ---
 
@@ -141,7 +145,7 @@ See [docs/screenshots/README.md](../screenshots/README.md) for full instructions
 
 | URL | Service |
 |---|---|
-| http://localhost:5174 | React UI — Dashboard · Analysis Explorer · Backtesting · Learn · Settings |
+| http://localhost:5174 | React UI — Dashboard · Trading · Discovery · Explorer · Activity · Reports · Learn · Schedule · Backtesting · Settings |
 | http://localhost:8010/docs | FastAPI interactive docs (OpenAPI) |
 | http://localhost:18889 | Aspire — structured logs, traces, metrics |
 | http://localhost:9000 | Portainer — container management |

@@ -509,21 +509,35 @@ Restore rows from a previously-exported data JSON (multipart file upload). Used 
 
 ## Reports
 
-### `GET /reports/eod`
+Reports are split into four focused types — end-of-day vs weekly, crossed with bracket
+orders vs fractional — so each one only reports on its own trade flow and can suggest
+tuning for the env vars that actually apply to it.
 
-Generate, persist, and dispatch the end-of-day report to all configured channels. Returns **502** if no channel is configured. Response includes `id`, headline, both body versions, `llm`, and `model`.
+### `GET /reports/eod/orders`
+### `GET /reports/eod/frac`
+### `GET /reports/weekly/orders`
+### `GET /reports/weekly/frac`
+
+Generate, persist, and dispatch the corresponding report to all configured channels.
+Returns **502** if no channel is configured. Response includes `id`, `report_type`,
+`headline`, both body versions (`notification_body`, `full_body`), `llm`, and `model`.
+
+The `eod/*` pair looks back over today; the `weekly/*` pair over 7 days and additionally
+receives per-day breakdowns plus the stored EoD summaries from each day of the week.
 
 ```bash
-curl -H "Authorization: Bearer <ADMIN_TOKEN>" http://localhost:8010/reports/eod
+curl -H "Authorization: Bearer <ADMIN_TOKEN>" http://localhost:8010/reports/eod/orders
+curl -H "Authorization: Bearer <ADMIN_TOKEN>" http://localhost:8010/reports/weekly/frac
 ```
 
-### `GET /reports/llm-summary?period=daily|weekly`
-
-Generate + dispatch a daily or weekly LLM summary (same response shape).
+> `GET /reports/eod` and `GET /reports/llm-summary` were **removed** when reports were
+> split into the four types above.
 
 ### `GET /reports?limit=&type=`
 
-List persisted reports, newest first. `type` filters `eod|weekly|daily`.
+List persisted reports, newest first. `type` filters by `report_type`:
+`eod_orders|eod_frac|weekly_orders|weekly_frac`. Rows written before the split carry the
+legacy values `eod|weekly|daily` and still list normally.
 
 ### `DELETE /reports/{id}`
 
