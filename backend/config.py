@@ -31,6 +31,20 @@ def _env_str(key: str, default: str) -> str:
     return value if value not in (None, "") else default
 
 
+def _env_model(key: str, default: str = "") -> str:
+    """Read a model name env var; if comma-separated, return only the first entry."""
+    raw = _env_str(key, default)
+    return raw.split(",")[0].strip() if raw else default
+
+
+def _env_model_list(key: str, default: list[str]) -> list[str]:
+    """Read a comma-separated model list from an env var; return default if unset."""
+    raw = os.getenv(key, "")
+    if not raw.strip():
+        return list(default)
+    return [m.strip() for m in raw.split(",") if m.strip()]
+
+
 def _env_int(key: str, default: int) -> int:
     try:
         return int(os.getenv(key, str(default)))
@@ -60,7 +74,7 @@ class OllamaConfig:
     """Local Ollama server connection settings."""
 
     host: str = field(default_factory=lambda: _env_str("OLLAMA_HOST", "http://localhost:11434"))
-    model: str = field(default_factory=lambda: _env_str("OLLAMA_MODEL", "qwen2.5:14b"))
+    model: str = field(default_factory=lambda: _env_model("OLLAMA_MODEL", "qwen2.5:14b"))
     timeout: int = field(default_factory=lambda: _env_int("OLLAMA_TIMEOUT", 120))
 
     @property
@@ -98,11 +112,16 @@ class LLMConfig:
     # Provider API keys (empty = not set)
     groq_api_key: str = field(default_factory=lambda: _env_str("GROQ_API_KEY", ""))
 
-    # Optional model override per provider (empty = use provider default)
-    groq_model: str = field(default_factory=lambda: _env_str("GROQ_MODEL", ""))
+    # Optional model override per provider (first entry if comma-separated list)
+    groq_model: str = field(default_factory=lambda: _env_model("GROQ_MODEL"))
+    # Full model list from env var — used by /settings/models to populate the UI dropdown.
+    # Format: GROQ_MODEL=qwen/qwen3.8-27b,llama-3.3-70b-versatile
+    # Empty when the env var is unset — the UI then only offers "type your own".
+    groq_models: list[str] = field(default_factory=lambda: _env_model_list("GROQ_MODEL", []))
 
     gemini_api_key: str = field(default_factory=lambda: _env_str("GEMINI_API_KEY", ""))
-    gemini_model: str = field(default_factory=lambda: _env_str("GEMINI_MODEL", ""))
+    gemini_model: str = field(default_factory=lambda: _env_model("GEMINI_MODEL"))
+    gemini_models: list[str] = field(default_factory=lambda: _env_model_list("GEMINI_MODEL", []))
     gemini_base_url: str = field(
         default_factory=lambda: _env_str(
             "GEMINI_BASE_URL",
@@ -110,13 +129,19 @@ class LLMConfig:
         )
     )
     mistral_api_key: str = field(default_factory=lambda: _env_str("MISTRAL_API_KEY", ""))
-    mistral_model: str = field(default_factory=lambda: _env_str("MISTRAL_MODEL", ""))
+    mistral_model: str = field(default_factory=lambda: _env_model("MISTRAL_MODEL"))
+    mistral_models: list[str] = field(default_factory=lambda: _env_model_list("MISTRAL_MODEL", []))
     mistral_base_url: str = field(
         default_factory=lambda: _env_str("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
     )
 
     # Timeout (seconds) for cloud LLM calls
     cloud_timeout: int = field(default_factory=lambda: _env_int("CLOUD_LLM_TIMEOUT", 60))
+
+    # Max completion tokens for cloud calls. Reasoning models (e.g. gpt-oss-120b) spend
+    # tokens thinking before emitting JSON; too small a budget truncates the output and
+    # Groq/OpenAI reject it with "Failed to generate JSON". 8192 leaves ample room.
+    cloud_max_tokens: int = field(default_factory=lambda: _env_int("CLOUD_LLM_MAX_TOKENS", 8192))
 
     # Fallback provider — automatically used when the primary returns HTTP 429.
     # Both keys can also be overridden at runtime via DB settings
