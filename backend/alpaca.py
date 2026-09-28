@@ -141,6 +141,21 @@ class AlpacaClient:
         except httpx.RequestError as exc:
             raise AlpacaError(f"DELETE {path} network error: {exc}") from exc
 
+    def _delete_json(self, path: str, params: dict | None = None) -> Any:
+        """DELETE that returns the response body (for bulk Alpaca operations)."""
+        url = f"{self._base_url}{path}"
+        try:
+            r = httpx.delete(url, headers=self._headers(), params=params, timeout=_TIMEOUT)
+            # Alpaca bulk-cancel/close returns 207 Multi-Status with a body
+            if r.status_code in (200, 204, 207):
+                try:
+                    return r.json()
+                except Exception:  # noqa: BLE001
+                    return []
+            raise AlpacaError(f"DELETE {path} → {r.status_code}: {r.text[:200]}")
+        except httpx.RequestError as exc:
+            raise AlpacaError(f"DELETE {path} network error: {exc}") from exc
+
     # ------------------------------------------------------------------
     # Public API methods
     # ------------------------------------------------------------------
@@ -319,6 +334,16 @@ class AlpacaClient:
     def get_positions(self) -> list[dict[str, Any]]:
         """Return all open positions."""
         return self._get("/v2/positions")
+
+    def cancel_all_orders(self) -> list[dict[str, Any]]:
+        """Cancel all open orders. Returns list of per-order cancel results."""
+        result = self._delete_json("/v2/orders")
+        return result if isinstance(result, list) else []
+
+    def close_all_positions(self) -> list[dict[str, Any]]:
+        """Liquidate all open positions at market. Also cancels any related orders."""
+        result = self._delete_json("/v2/positions", params={"cancel_orders": "true"})
+        return result if isinstance(result, list) else []
 
     def cancel_order(self, alpaca_order_id: str) -> bool:
         """Cancel a pending order. Returns True on success."""

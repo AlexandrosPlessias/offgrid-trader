@@ -1,5 +1,6 @@
 """Route package — re-exports all APIRouter instances."""
 
+from backend.routes.admin import router as admin_router
 from backend.routes.alpaca import router as alpaca_router
 from backend.routes.analysis import router as analysis_router
 from backend.routes.backtest import router as backtest_router
@@ -15,6 +16,7 @@ from backend.routes.usage import router as usage_router
 from backend.routes.watchlist import router as watchlist_router
 
 all_routers = [
+    admin_router,
     health_router,
     watchlist_router,
     settings_router,
@@ -32,6 +34,7 @@ all_routers = [
 
 __all__ = [
     "all_routers",
+    "admin_router",
     "alpaca_router",
     "analysis_router",
     "backtest_router",
