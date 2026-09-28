@@ -27,6 +27,12 @@ crons = [
   "25 21 * * FRI",  # weekly LLM — 5:25 PM ET Fri (EDT) / 4:25 PM ET Fri (EST) — before the 21:30 stop
 ]
 
+# ── Vercel frontend (non-secret identifiers; the token is a secret) ───────────
+[vars]
+VERCEL_TEAM_ID = "team_tzMR94KNETQJPHfAzKfrYEIH"
+VERCEL_PROJECT_ID = "prj_tAzhApZge3mR53bc5ZC9WLqiiu91"
+VERCEL_ALIAS = "offgrid-trader.vercel.app"
+
 # ── Observability (free — logs + traces stored 3 days in Cloudflare) ──────────
 [observability]
 enabled = true
@@ -47,5 +53,6 @@ persist = true
 # BACKEND_URL   — base URL of the Fly backend, e.g. https://offgrid-trader.fly.dev
 # FLY_API_TOKEN — Fly.io API token (for Machines API start/stop)
 # FLY_APP       — Fly app name, e.g. offgrid-trader
+# VERCEL_TOKEN  — Vercel access token (re-points the frontend alias on start)
 #
 # Never put these in wrangler.toml or commit them to the repo.

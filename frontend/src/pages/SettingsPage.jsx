@@ -150,13 +150,16 @@ function DiscoverySettingsSection() {
         <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} />
       </div>
 
-      <div className="settings-row" style={{ alignItems: 'center' }}>
-        <label className="settings-label">
+      <div className="settings-row">
+        <div className="settings-row-label">
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             Sources
             <InfoTip text="Which screeners to pull trending tickers from. Enable at least one. Alpaca uses your paper-trading API key; yfinance is always available as a fallback." />
           </span>
-        </label>
+          {sourceList.length === 0 && (
+            <span style={{ fontSize: 11, color: 'var(--red)' }}>⚠ Select at least one source</span>
+          )}
+        </div>
         <div style={{ display: 'flex', gap: 8 }}>
           {[
             { key: 'alpaca',   label: 'Alpaca',   icon: '🔵',
@@ -187,18 +190,16 @@ function DiscoverySettingsSection() {
             )
           })}
         </div>
-        {sourceList.length === 0 && (
-          <span style={{ fontSize: 11, color: 'var(--red)', marginLeft: 8 }}>⚠ Select at least one source</span>
-        )}
       </div>
 
       <div className="settings-row">
-        <label className="settings-label">
+        <div className="settings-row-label">
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             Max candidates
             <InfoTip text="How many trending tickers the discovery scan evaluates each run." />
           </span>
-        </label>
+          <span className="text-dim" style={{ fontSize: 12 }}>per run (5–100)</span>
+        </div>
         <input
           className="settings-input"
           type="number" min={5} max={100}
@@ -206,16 +207,16 @@ function DiscoverySettingsSection() {
           onChange={e => setMaxCandidates(Number(e.target.value))}
           style={{ width: 80 }}
         />
-        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>per run (5–100)</span>
       </div>
 
       <div className="settings-row">
-        <label className="settings-label">
+        <div className="settings-row-label">
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             Min score
             <InfoTip text="Minimum trending score (0–100) a ticker must reach before it appears in the Discovery tab." />
           </span>
-        </label>
+          <span className="text-dim" style={{ fontSize: 12 }}>0–100</span>
+        </div>
         <input
           className="settings-input"
           type="number" min={0} max={100}
@@ -223,16 +224,16 @@ function DiscoverySettingsSection() {
           onChange={e => setMinScore(Number(e.target.value))}
           style={{ width: 80 }}
         />
-        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>0–100</span>
       </div>
 
       <div className="settings-row">
-        <label className="settings-label">
+        <div className="settings-row-label">
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             Interval
             <InfoTip text="How often the trending ticker discovery scan runs to find new opportunities outside your watchlist." />
           </span>
-        </label>
+          <span className="text-dim" style={{ fontSize: 12 }}>minutes between runs (15–1440)</span>
+        </div>
         <input
           className="settings-input"
           type="number" min={15} max={1440}
@@ -240,43 +241,50 @@ function DiscoverySettingsSection() {
           onChange={e => setIntervalMinutes(Number(e.target.value))}
           style={{ width: 80 }}
         />
-        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>minutes between runs (15–1440)</span>
       </div>
 
       <div className="settings-row">
-        <label className="settings-label">Auto-scan top-N</label>
-        <input type="checkbox" checked={autoscanEnabled} onChange={e => setAutoscanEnabled(e.target.checked)} />
-        {autoscanEnabled && (
-          <input
-            className="settings-input"
-            type="number" min={1} max={20}
-            value={autoscanTopN}
-            onChange={e => setAutoscanTopN(Number(e.target.value))}
-            style={{ width: 60, marginLeft: 10 }}
-          />
-        )}
-        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
-          {autoscanEnabled ? `Run full agent pipeline on top ${autoscanTopN} candidates` : 'Disabled'}
-        </span>
+        <div className="settings-row-label">
+          <span>Auto-scan top-N</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>
+            {autoscanEnabled ? `Run full agent pipeline on top ${autoscanTopN} candidates` : 'Disabled'}
+          </span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input type="checkbox" checked={autoscanEnabled} onChange={e => setAutoscanEnabled(e.target.checked)} />
+          {autoscanEnabled && (
+            <input
+              className="settings-input"
+              type="number" min={1} max={20}
+              value={autoscanTopN}
+              onChange={e => setAutoscanTopN(Number(e.target.value))}
+              style={{ width: 60 }}
+            />
+          )}
+        </div>
       </div>
 
       <div className="settings-row">
-        <label className="settings-label">Auto-add to watchlist</label>
-        <input type="checkbox" checked={autoaddEnabled} onChange={e => setAutoaddEnabled(e.target.checked)} />
-        {autoaddEnabled && (
-          <input
-            className="settings-input"
-            type="number" min={1} max={25}
-            value={autoaddTopN}
-            onChange={e => setAutoaddTopN(Number(e.target.value))}
-            style={{ width: 60, marginLeft: 10 }}
-          />
-        )}
-        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
-          {autoaddEnabled
-            ? `Add the top ${autoaddTopN} tradable candidate(s) per run to the watchlist (kept until removed)`
-            : 'Disabled'}
-        </span>
+        <div className="settings-row-label">
+          <span>Auto-add to watchlist</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>
+            {autoaddEnabled
+              ? `Add the top ${autoaddTopN} tradable candidate(s) per run to the watchlist (kept until removed)`
+              : 'Disabled'}
+          </span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input type="checkbox" checked={autoaddEnabled} onChange={e => setAutoaddEnabled(e.target.checked)} />
+          {autoaddEnabled && (
+            <input
+              className="settings-input"
+              type="number" min={1} max={25}
+              value={autoaddTopN}
+              onChange={e => setAutoaddTopN(Number(e.target.value))}
+              style={{ width: 60 }}
+            />
+          )}
+        </div>
       </div>
 
       <SaveRow status={saveStatus} errMsg={saveErr} onSave={save} />
@@ -1101,33 +1109,33 @@ function AutonomousTradingSection() {
                     letterSpacing: '0.09em', marginBottom: 10 }}>📡 Signal Detection Thresholds</div>
 
       <div className="settings-row">
-        <label className="settings-label">RSI oversold</label>
+        <div className="settings-row-label">
+          <span>RSI oversold</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>RSI below this → long signal candidate (lower = rarer, stronger signal)</span>
+        </div>
         <input className="settings-input" type="number" min={0} max={100} step={1}
                value={rsiOversold} onChange={e => setRsiOversold(e.target.value)}
                style={{ width: 70 }} />
-        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
-          RSI below this → long signal candidate (lower = rarer, stronger signal)
-        </span>
       </div>
 
       <div className="settings-row">
-        <label className="settings-label">RSI overbought</label>
+        <div className="settings-row-label">
+          <span>RSI overbought</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>RSI above this → short signal candidate (higher = rarer, stronger signal)</span>
+        </div>
         <input className="settings-input" type="number" min={0} max={100} step={1}
                value={rsiOverbought} onChange={e => setRsiOverbought(e.target.value)}
                style={{ width: 70 }} />
-        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
-          RSI above this → short signal candidate (higher = rarer, stronger signal)
-        </span>
       </div>
 
       <div className="settings-row">
-        <label className="settings-label">Volume spike multiplier</label>
+        <div className="settings-row-label">
+          <span>Volume spike multiplier</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>Volume must be ×N above average to confirm the signal (raise to filter noise)</span>
+        </div>
         <input className="settings-input" type="number" min={0.1} max={20} step={0.1}
                value={volumeSpikeMultiplier} onChange={e => setVolumeSpikeMultiplier(e.target.value)}
                style={{ width: 70 }} />
-        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
-          Volume must be ×N above average to confirm the signal (raise to filter noise)
-        </span>
       </div>
 
       <div style={{ borderTop: '1px solid var(--border)', margin: '14px 0', opacity: 0.4 }} />
@@ -1135,43 +1143,43 @@ function AutonomousTradingSection() {
                     letterSpacing: '0.09em', marginBottom: 10 }}>🎯 Confidence Gates</div>
 
       <div className="settings-row">
-        <label className="settings-label">Signal / bracket confidence floor</label>
+        <div className="settings-row-label">
+          <span>Signal / bracket confidence floor</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>Minimum % to create a signal and place a bracket order</span>
+        </div>
         <input className="settings-input" type="number" min={0} max={100}
                value={confidenceFloor} onChange={e => setConfidenceFloor(e.target.value)}
                style={{ width: 70 }} />
-        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
-          Minimum % to create a signal and place a bracket order
-        </span>
       </div>
 
       <div className="settings-row">
-        <label className="settings-label">Fractional confidence floor</label>
+        <div className="settings-row-label">
+          <span>Fractional confidence floor</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>Stricter % required for a fractional buy (frac commits notional)</span>
+        </div>
         <input className="settings-input" type="number" min={0} max={100}
                value={fracMinConf} onChange={e => setFracMinConf(e.target.value)}
                style={{ width: 70 }} />
-        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
-          Stricter % required for a fractional buy (frac commits notional)
-        </span>
       </div>
 
       <div className="settings-row">
-        <label className="settings-label">Bracket-only floor (optional)</label>
+        <div className="settings-row-label">
+          <span>Bracket-only floor (optional)</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>0 = fall back to the signal floor above</span>
+        </div>
         <input className="settings-input" type="number" min={0} max={100}
                value={paperMinConf} onChange={e => setPaperMinConf(e.target.value)}
                style={{ width: 70 }} />
-        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
-          0 = fall back to the signal floor above
-        </span>
       </div>
 
       <div className="settings-row">
-        <label className="settings-label">Max concurrent bracket positions</label>
+        <div className="settings-row-label">
+          <span>Max concurrent bracket positions</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>New bracket orders are held once this many positions are open</span>
+        </div>
         <input className="settings-input" type="number" min={0} max={100}
                value={maxPositions} onChange={e => setMaxPositions(e.target.value)}
                style={{ width: 70 }} />
-        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
-          New bracket orders are held once this many positions are open
-        </span>
       </div>
 
       <div className="settings-row">
@@ -1185,14 +1193,16 @@ function AutonomousTradingSection() {
       </div>
 
       <div className="settings-row">
-        <label className="settings-label">Allow live auto-frac</label>
+        <div className="settings-row-label">
+          <span>Allow live auto-frac</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>
+            {fracAllowLive
+              ? '⚠️ Autonomous fractional buys will use REAL money when the frac profile is live'
+              : 'Autonomous frac buys are paper-only (safe default)'}
+          </span>
+        </div>
         <input type="checkbox" checked={fracAllowLive}
                onChange={e => setFracAllowLive(e.target.checked)} />
-        <span className="text-dim" style={{ fontSize: 11, marginLeft: 8 }}>
-          {fracAllowLive
-            ? '⚠️ Autonomous fractional buys will use REAL money when the frac profile is live'
-            : 'Autonomous frac buys are paper-only (safe default)'}
-        </span>
       </div>
 
       <SaveRow status={saveStatus} errMsg={saveErr} onSave={save} />
@@ -1211,6 +1221,214 @@ function SaveRow({ status, errMsg, onSave, label = 'Save' }) {
     </div>
   )
 }
+
+// ── Danger Zone ───────────────────────────────────────────────────────────────
+
+function DangerZone() {
+  const [modal,    setModal]    = useState(null)   // null | 'loading' | 'preview' | 'resetting' | 'done' | 'error'
+  const [preview,  setPreview]  = useState(null)
+  const [result,   setResult]   = useState(null)
+  const [errMsg,   setErrMsg]   = useState('')
+
+  const openModal = async () => {
+    setModal('loading')
+    setPreview(null)
+    setResult(null)
+    setErrMsg('')
+    try {
+      const r = await fetch(`${API}/admin/reset-preview`, { headers: getAuthHeaders() })
+      if (!r.ok) throw new Error(`${r.status}`)
+      setPreview(await r.json())
+      setModal('preview')
+    } catch (e) {
+      setErrMsg(String(e))
+      setModal('error')
+    }
+  }
+
+  const executeReset = async () => {
+    setModal('resetting')
+    try {
+      const r = await fetch(`${API}/admin/reset`, { method: 'POST', headers: getAuthHeaders() })
+      if (!r.ok) throw new Error(`${r.status}`)
+      setResult(await r.json())
+      setModal('done')
+    } catch (e) {
+      setErrMsg(String(e))
+      setModal('error')
+    }
+  }
+
+  const close = () => { setModal(null); setPreview(null); setResult(null); setErrMsg('') }
+
+  const rowStyle = { display: 'flex', justifyContent: 'space-between', padding: '4px 0',
+    borderBottom: '1px solid var(--border)', fontSize: 12 }
+  const labelStyle = { color: 'var(--dim)' }
+  const valStyle   = { fontWeight: 600 }
+
+  return (
+    <>
+      {/* ── Section card ──────────────────────────────────────────────────── */}
+      <div style={{ marginTop: 32, border: '1px solid #7f1d1d', borderRadius: 12, overflow: 'hidden' }}>
+        <div style={{ background: '#450a0a', padding: '12px 20px', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 16 }}>⚠️</span>
+          <span style={{ fontWeight: 700, fontSize: 14, color: '#fca5a5' }}>Danger Zone</span>
+        </div>
+        <div style={{ padding: '16px 20px' }}>
+          <p style={{ fontSize: 13, color: 'var(--dim)', marginBottom: 14 }}>
+            Cancel all open Alpaca orders and positions, then wipe all trading data from the
+            database. Settings, watchlist groups, and API keys are preserved.
+          </p>
+          <button
+            className="btn-danger"
+            onClick={openModal}
+            style={{ fontWeight: 700 }}
+          >
+            Reset trading state…
+          </button>
+        </div>
+      </div>
+
+      {/* ── Modal ─────────────────────────────────────────────────────────── */}
+      {modal && (
+        <div
+          onClick={e => { if (e.target === e.currentTarget) close() }}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,.65)', zIndex: 1000,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <div style={{
+            background: 'var(--bg-card, #1a1d2e)', border: '1px solid var(--border)',
+            borderRadius: 14, padding: 28, width: 520, maxWidth: '95vw', maxHeight: '85vh',
+            overflowY: 'auto',
+          }}>
+            {/* header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+              <span style={{ fontWeight: 700, fontSize: 15 }}>⚠️ Reset trading state</span>
+              {modal !== 'resetting' && (
+                <button onClick={close} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: 'var(--dim)' }}>✕</button>
+              )}
+            </div>
+
+            {modal === 'loading' && <p style={{ color: 'var(--dim)', fontSize: 13 }}>Fetching preview…</p>}
+
+            {modal === 'error' && (
+              <>
+                <p style={{ color: '#f87171', fontSize: 13, marginBottom: 14 }}>Error: {errMsg}</p>
+                <button className="btn-secondary btn-sm" onClick={close}>Close</button>
+              </>
+            )}
+
+            {modal === 'resetting' && <p style={{ color: 'var(--dim)', fontSize: 13 }}>Executing reset…</p>}
+
+            {modal === 'done' && result && (
+              <>
+                <p style={{ color: '#4ade80', fontWeight: 600, marginBottom: 14, fontSize: 13 }}>✓ Reset complete</p>
+                {['paper', 'frac'].map(acc => (
+                  result[acc] && (
+                    <div key={acc} style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: 'var(--dim)', marginBottom: 4 }}>
+                        {acc === 'paper' ? 'Paper Alpaca' : 'Frac Alpaca'}
+                      </div>
+                      {result[acc].error
+                        ? <p style={{ fontSize: 12, color: '#f87171' }}>⚠ {result[acc].error}</p>
+                        : (
+                          <>
+                            <div style={rowStyle}><span style={labelStyle}>Orders cancelled</span><span style={valStyle}>{result[acc].orders_cancelled ?? 0}</span></div>
+                            <div style={rowStyle}><span style={labelStyle}>Positions closed</span><span style={valStyle}>{result[acc].positions_closed ?? 0}</span></div>
+                          </>
+                        )
+                      }
+                    </div>
+                  )
+                ))}
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: 'var(--dim)', marginBottom: 4 }}>Database</div>
+                  {Object.entries(result.db || {}).map(([k, v]) => (
+                    <div key={k} style={rowStyle}>
+                      <span style={labelStyle}>{k.replace(/_/g, ' ')}</span>
+                      <span style={valStyle}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+                <button className="btn-secondary btn-sm" onClick={close} style={{ marginTop: 16 }}>Close</button>
+              </>
+            )}
+
+            {modal === 'preview' && preview && (
+              <>
+                <p style={{ fontSize: 13, color: 'var(--dim)', marginBottom: 16 }}>
+                  Review what will be cancelled and deleted. This action cannot be undone.
+                </p>
+
+                {/* Alpaca accounts */}
+                {['paper', 'frac'].map(acc => {
+                  const data = preview[acc]
+                  const label = acc === 'paper' ? 'Paper Alpaca' : 'Frac Alpaca'
+                  return (
+                    <div key={acc} style={{ marginBottom: 14 }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: '#93c5fd', marginBottom: 6 }}>{label}</div>
+                      {data.error
+                        ? <p style={{ fontSize: 12, color: '#f87171' }}>⚠ Could not reach Alpaca: {data.error}</p>
+                        : (
+                          <>
+                            <div style={rowStyle}>
+                              <span style={labelStyle}>Open orders to cancel</span>
+                              <span style={{ ...valStyle, color: data.open_orders > 0 ? '#f87171' : 'var(--dim)' }}>{data.open_orders}</span>
+                            </div>
+                            <div style={rowStyle}>
+                              <span style={labelStyle}>Open positions to close</span>
+                              <span style={{ ...valStyle, color: data.open_positions > 0 ? '#f87171' : 'var(--dim)' }}>{data.open_positions}</span>
+                            </div>
+                            {data.positions?.map(p => (
+                              <div key={p.symbol} style={{ fontSize: 11, color: 'var(--dim)', paddingLeft: 12 }}>
+                                {p.symbol} · qty {p.qty} · market value ${Number(p.market_value || 0).toFixed(2)}
+                              </div>
+                            ))}
+                          </>
+                        )
+                      }
+                    </div>
+                  )
+                })}
+
+                {/* DB */}
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: '#93c5fd', marginBottom: 6 }}>Database rows to delete</div>
+                  {Object.entries(preview.db || {}).map(([k, v]) => (
+                    <div key={k} style={rowStyle}>
+                      <span style={labelStyle}>{k.replace(/_/g, ' ')}</span>
+                      <span style={{ ...valStyle, color: v > 0 ? '#f87171' : 'var(--dim)' }}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <p style={{ fontSize: 11, color: 'var(--dim)', marginBottom: 16 }}>
+                  Preserved: settings, watchlist groups, API keys, backtest history.
+                </p>
+
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <button className="btn-secondary btn-sm" onClick={close}>Cancel</button>
+                  <button
+                    onClick={executeReset}
+                    style={{
+                      background: '#dc2626', color: '#fff', border: 'none', borderRadius: 8,
+                      padding: '6px 18px', fontWeight: 700, fontSize: 13, cursor: 'pointer',
+                    }}
+                  >
+                    Execute reset
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
 
 export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, initialSection = null, onInitialSectionConsumed }) {
   // Left-nav category groups — all collapsed by default when Settings opens.
@@ -2964,6 +3182,9 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
 
       {/* ── Notifications (all channels) ─────────────────────────────────── */}
       <NotificationsSection />
+
+      {/* ── Danger Zone ──────────────────────────────────────────────────── */}
+      <DangerZone />
 
       </div>
     </div>

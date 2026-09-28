@@ -2,7 +2,8 @@
  * MarketSage — Cloudflare Workers Cron Trigger
  *
  * Handles three jobs:
- *   1. Start the Fly app at 8:30 AM ET Mon–Fri (via Fly Machines API)
+ *   1. Start the Fly app at 8:30 AM ET Mon–Fri (via Fly Machines API) and
+ *      re-point the Vercel production alias (via Vercel REST API)
  *   2. Send EoD report then stop the Fly app at 5:05 PM ET Mon–Fri
  *   3. Send weekly LLM summary at 5:25 PM ET Fridays
  *
@@ -14,11 +15,15 @@
  *   BACKEND_URL   — base URL, e.g. https://offgrid-trader.fly.dev (no trailing slash)
  *   FLY_API_TOKEN — Fly.io API token with read + write access to the app
  *   FLY_APP       — Fly app name, e.g. offgrid-trader
+ *   VERCEL_TOKEN  — Vercel access token scoped to the offgrid-trader team
+ *
+ * VERCEL_TEAM_ID / VERCEL_PROJECT_ID / VERCEL_ALIAS are plain vars in wrangler.toml.
  */
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const FLY_API = "https://api.machines.dev/v1";
+const VERCEL_API = "https://api.vercel.com";
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 10_000;
 
@@ -252,6 +257,64 @@ async function stopApp(env) {
   }
 }
 
+/** Call the Vercel REST API, scoped to the team that owns the project. */
+async function callVercel(env, method, path, body) {
+  const sep = path.includes("?") ? "&" : "?";
+  const url = `${VERCEL_API}${path}${sep}teamId=${env.VERCEL_TEAM_ID}`;
+  console.log(`[cron] Vercel API request ${method} ${path}`);
+  const opts = {
+    method,
+    headers: {
+      Authorization: `Bearer ${env.VERCEL_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+  };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const res = await fetch(url, opts);
+  const text = await res.text();
+  if (!res.ok) {
+    console.warn(`[cron] Vercel API ${method} ${path} → ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return { ok: res.ok, status: res.status, body: text };
+}
+
+/**
+ * Point the production alias at the latest Ready production deployment.
+ *
+ * App Power → stop removes the alias to take the site offline; without this the
+ * morning start would wake the backend while the frontend stayed unreachable.
+ * Re-assigning an alias that already points at the same deployment is a no-op.
+ */
+async function restoreFrontend(env) {
+  if (!env.VERCEL_TOKEN) {
+    console.warn("[cron] restoreFrontend: VERCEL_TOKEN not set — skipping.");
+    return;
+  }
+  const list = await callVercel(
+    env,
+    "GET",
+    `/v6/deployments?projectId=${env.VERCEL_PROJECT_ID}&target=production&state=READY&limit=1`
+  );
+  if (!list.ok) return;
+  let deployment;
+  try {
+    deployment = JSON.parse(list.body).deployments?.[0];
+  } catch (err) {
+    console.error(`[cron] restoreFrontend: deployments JSON parse error: ${err}`);
+    return;
+  }
+  if (!deployment?.uid) {
+    console.error("[cron] restoreFrontend: no Ready production deployment — run App Power → start.");
+    return;
+  }
+  const r = await callVercel(env, "POST", `/v2/deployments/${deployment.uid}/aliases`, {
+    alias: env.VERCEL_ALIAS,
+  });
+  console.log(
+    `[cron] restoreFrontend: ${env.VERCEL_ALIAS} → ${deployment.url} (${r.status})`
+  );
+}
+
 // ── Scheduled handler ─────────────────────────────────────────────────────────
 
 export default {
@@ -263,7 +326,7 @@ export default {
 
     console.log(`[cron] fired — schedule: "${cron}" · ET offset: ${offset} · resolved: ${action}`);
     console.log(
-      `[cron] env check — BACKEND_URL=${Boolean(env.BACKEND_URL)} · ADMIN_TOKEN=${Boolean(env.ADMIN_TOKEN)} · FLY_API_TOKEN=${Boolean(env.FLY_API_TOKEN)} · FLY_APP=${env.FLY_APP ? "set" : "missing"}`
+      `[cron] env check — BACKEND_URL=${Boolean(env.BACKEND_URL)} · ADMIN_TOKEN=${Boolean(env.ADMIN_TOKEN)} · FLY_API_TOKEN=${Boolean(env.FLY_API_TOKEN)} · FLY_APP=${env.FLY_APP ? "set" : "missing"} · VERCEL_TOKEN=${Boolean(env.VERCEL_TOKEN)}`
     );
 
     if (action === "noop") {
@@ -275,6 +338,12 @@ export default {
     if (action === "start") {
       console.log("[cron] Starting Fly app…");
       await startApp(env);
+      console.log("[cron] Restoring Vercel frontend alias…");
+      try {
+        await restoreFrontend(env);
+      } catch (err) {
+        console.error(`[cron] restoreFrontend failed: ${err}`);
+      }
       console.log(`[cron] action start completed in ${Date.now() - startedAt}ms`);
       return;
     }

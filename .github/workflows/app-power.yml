@@ -73,17 +73,12 @@ jobs:
       - name: Install Vercel CLI
         run: npm install -g vercel@latest
 
-      - name: Remove production deployment
+      - name: Remove production alias
         if: inputs.action == 'stop'
         run: |
-          PROD_URL=$(vercel ls "$FLY_APP" --prod --token=${{ secrets.VERCEL_TOKEN }} 2>/dev/null \
-            | grep -o 'https://[^ ]*' | head -1)
-          if [ -z "$PROD_URL" ]; then
-            echo "No production deployment found — already offline."
-            exit 0
-          fi
-          echo "Removing $PROD_URL"
-          vercel remove "$PROD_URL" --yes --token=${{ secrets.VERCEL_TOKEN }}
+          vercel alias rm offgrid-trader.vercel.app \
+            --scope offgrid-trader --yes --token=${{ secrets.VERCEL_TOKEN }} \
+            || echo "Alias not set — already offline."
 
       - name: Pull Vercel environment
         if: inputs.action == 'start'
@@ -96,6 +91,15 @@ jobs:
         working-directory: frontend
 
       - name: Deploy pre-built output
+        id: deploy
         if: inputs.action == 'start'
-        run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
+        run: |
+          URL=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }})
+          echo "url=$URL" >> $GITHUB_OUTPUT
         working-directory: frontend
+
+      - name: Assign production alias
+        if: inputs.action == 'start'
+        run: |
+          vercel alias set "${{ steps.deploy.outputs.url }}" offgrid-trader.vercel.app \
+            --scope offgrid-trader --token=${{ secrets.VERCEL_TOKEN }}

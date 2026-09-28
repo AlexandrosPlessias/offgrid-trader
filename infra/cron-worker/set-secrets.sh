@@ -89,5 +89,22 @@ else
 fi
 echo ""
 
+# ── VERCEL_TOKEN ───────────────────────────────────────────────────────────────
+VERCEL_TOKEN="$(get_env CRON_WORKER_VERCEL_TOKEN)"
+if [ -n "$VERCEL_TOKEN" ]; then
+  echo "▶ VERCEL_TOKEN  (read from .env → CRON_WORKER_VERCEL_TOKEN)"
+  push_secret "VERCEL_TOKEN" "$VERCEL_TOKEN"
+else
+  echo "▶ VERCEL_TOKEN  (CRON_WORKER_VERCEL_TOKEN not found in .env — enter manually)"
+  echo "  vercel.com → Account Settings → Tokens → Create (scope: offgrid-trader team)."
+  printf "  Value: "; read -r -s VERCEL_TOKEN; echo ""
+  if [ -n "$VERCEL_TOKEN" ]; then
+    push_secret "VERCEL_TOKEN" "$VERCEL_TOKEN"
+  else
+    echo "  ⚠ Skipped (empty) — the start job will not restore the frontend."
+  fi
+fi
+echo ""
+
 echo "=== All secrets set. Run 'npx wrangler deploy' to deploy. ==="
 echo ""

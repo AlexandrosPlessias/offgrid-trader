@@ -1086,12 +1086,14 @@ _CLEAR_CATEGORY_LABELS: dict[str, str] = {
     "signals": "signals",
     "analysis_log": "analysis_log",
     "paper_orders": "paper_orders",
+    "frac_positions": "frac_positions",
     "discovery_runs": "discovery_runs",  # candidates cascade
     "watchlist_overrides": "watchlist_added/removed",  # app_settings keys
     "ticker_memory": "ticker_memory",
     "data_cache": "data_cache",
     "backtest_runs": "backtest_runs",  # trades/floor_suggests/compares cascade
     "events": "events",  # activity-feed log
+    "reports": "reports",
 }
 
 CLEAR_CATEGORIES = set(_CLEAR_CATEGORY_LABELS.keys())
@@ -1139,6 +1141,10 @@ def clear_selected_data(
         if "backtest_runs" in cats:
             # backtest_trades / backtest_floor_suggests / backtest_compares cascade
             result["backtest_runs_deleted"] = conn.execute("DELETE FROM backtest_runs").rowcount
+        if "frac_positions" in cats:
+            result["frac_positions_deleted"] = conn.execute("DELETE FROM frac_positions").rowcount
+        if "reports" in cats:
+            result["reports_deleted"] = conn.execute("DELETE FROM reports").rowcount
         if "events" in cats:
             result["events_deleted"] = conn.execute("DELETE FROM events").rowcount
         conn.commit()

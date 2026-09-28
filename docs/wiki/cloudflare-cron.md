@@ -13,8 +13,8 @@ individual scan ticks.
 
 | Cron (UTC) | ET time | Season | Action |
 |---|---|---|---|
-| `30 12 * * MON-FRI` | 8:30 AM ET | EDT (summer) | Start the Fly app |
-| `30 13 * * MON-FRI` | 8:30 AM ET | EST (winter) | Start the Fly app |
+| `30 12 * * MON-FRI` | 8:30 AM ET | EDT (summer) | Start the Fly app + restore the Vercel alias |
+| `30 13 * * MON-FRI` | 8:30 AM ET | EST (winter) | Start the Fly app + restore the Vercel alias |
 | `5 21 * * MON-FRI` | 5:05 PM ET | EDT / 4:05 PM EST | EoD reports (orders **and** frac) → ntfy + Telegram |
 | `30 21 * * MON-FRI` | 5:30 PM ET | EDT / 4:30 PM EST | Stop the Fly app |
 | `25 21 * * FRI` | 5:25 PM ET Fri | EDT / 4:25 PM EST | Weekly reports (orders **and** frac) |
@@ -64,6 +64,20 @@ and serves no traffic** — so every later `/reports/*` call would fail against 
 looks "started". As a backstop, the Worker refuses to create a machine whose template has
 no volume mount, and logs that a manual `fly deploy` is required instead.
 
+### Restoring the frontend
+
+**App Power → stop** takes the site offline by removing the `offgrid-trader.vercel.app`
+alias. The daily stop only touches Fly, so without help the next morning's start would wake
+the backend while the frontend stayed at `DEPLOYMENT_NOT_FOUND`.
+
+After starting Fly, `restoreFrontend()` fetches the latest Ready production deployment
+(`GET /v6/deployments`) and assigns the alias to it (`POST /v2/deployments/{id}/aliases`).
+If the alias already points there, this does nothing. A Vercel failure is logged and never
+blocks the Fly start. If `VERCEL_TOKEN` is unset, the step is skipped with a warning.
+
+The team ID, project ID and alias are plain `[vars]` in `wrangler.toml`. Only `VERCEL_TOKEN`
+is a secret.
+
 ### DST resolution
 
 `easternOffset()` compares the current UTC hour against the same instant rendered in
@@ -82,6 +96,8 @@ computed offset by a full day for any job scheduled in the `00:xx` UTC hour.
   Fly.io dashboard → **offgrid-trader** app → **Settings → Tokens → Create deploy token**.
   Use a deploy token (not an org token) — it can only touch this one app.
 - **MarketSage admin token** — Settings → Authentication in the UI.
+- **Vercel access token** — vercel.com → Account Settings → **Tokens → Create**, scoped to
+  the `offgrid-trader` team. Store it in `.env` as `CRON_WORKER_VERCEL_TOKEN`.
 
 ---
 
@@ -160,6 +176,7 @@ bash -c '
   echo "BACKEND_URL=$(grep -E "^BACKEND_PUBLIC_URL=" .env | tail -1 | cut -d= -f2- | sed "s|/$||")" >> infra/cron-worker/.dev.vars
   echo "FLY_API_TOKEN=$(grep -E "^CRON_WORKER_FLY_API_TOKEN=" .env | cut -d= -f2-)"                >> infra/cron-worker/.dev.vars
   echo "FLY_APP=$(grep -E "^CRON_WORKER_FLY_APP_NAME=" .env | cut -d= -f2-)"                       >> infra/cron-worker/.dev.vars
+  echo "VERCEL_TOKEN=$(grep -E "^CRON_WORKER_VERCEL_TOKEN=" .env | cut -d= -f2-)"                  >> infra/cron-worker/.dev.vars
 '
 ```
 
