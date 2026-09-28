@@ -20,7 +20,7 @@ _RESET_CATEGORIES = [
     "analysis_log",
     "paper_orders",
     "frac_positions",
-    "discovery_runs",       # discovery_candidates cascade
+    "discovery_runs",  # discovery_candidates cascade
     "watchlist_overrides",  # re-adds/removes on the base watchlist
     "ticker_memory",
     "reports",
@@ -82,8 +82,15 @@ def reset_preview(_: str = Depends(_require_admin)) -> dict[str, Any]:  # noqa: 
     db_counts: dict[str, int] = {}
     with _connect() as conn:
         for table in (
-            "signals", "analysis_log", "paper_orders", "frac_positions",
-            "discovery_runs", "discovery_candidates", "ticker_memory", "reports", "events",
+            "signals",
+            "analysis_log",
+            "paper_orders",
+            "frac_positions",
+            "discovery_runs",
+            "discovery_candidates",
+            "ticker_memory",
+            "reports",
+            "events",
         ):
             db_counts[table] = conn.execute(
                 f"SELECT COUNT(*) FROM {table}"  # noqa: S608

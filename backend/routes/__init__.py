@@ -33,8 +33,8 @@ all_routers = [
 ]
 
 __all__ = [
-    "all_routers",
     "admin_router",
+    "all_routers",
     "alpaca_router",
     "analysis_router",
     "backtest_router",
