@@ -34,6 +34,7 @@
  *   18-mobile-hamburger.png      ← Mobile 375px — hamburger nav drawer open
  *   19-settings-fractional.png   ← Settings → Live / Fractional profile
  *   20-reports.png               ← Reports tab — Orders/Frac tabs, history + viewer
+ *   25-reports-compare.png       ← Reports tab — two same-type reports compared
  *   21-activity.png              ← Activity tab — event feed with a notification row expanded
  *   24-schedule.png              ← Schedule tab — the trading week as a timeline
  *   22-settings-autonomous.png   ← Settings → Autonomous trading section
@@ -394,6 +395,24 @@ await shot(page, '20-reports.png', async () => {
   // Scope to the desktop header nav — the mobile drawer has duplicate labels.
   try { await page.locator('.header-nav button:has-text("Reports")').click(); await page.waitForTimeout(2500); }
   catch { console.warn('⚠  Reports tab not found'); }
+});
+
+await shot(page, '25-reports-compare.png', async () => {
+  await goto(page, BASE);
+  try {
+    await page.locator('.header-nav button:has-text("Reports")').click();
+    await page.waitForTimeout(2000);
+    // Tick the first report, then the next one the UI still allows (same type only).
+    const boxes = page.locator('label:has-text("Compare"):visible input[type="checkbox"]');
+    await boxes.first().check();
+    await page.waitForTimeout(300);
+    const n = await boxes.count();
+    for (let i = 1; i < n; i++) {
+      if (!(await boxes.nth(i).isDisabled())) { await boxes.nth(i).check(); break; }
+    }
+    await page.locator('text=What moved').first().waitFor({ timeout: 8000 });
+    await page.waitForTimeout(1200);
+  } catch { console.warn('⚠  Need two reports of the same type to capture the comparison'); }
 });
 
 await shot(page, '21-activity.png', async () => {

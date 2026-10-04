@@ -39,7 +39,7 @@ choices independently.
 
 ### Per-report model overrides
 
-The four report types can each run on a different model — useful for sending the
+Each report type can run on a different model — useful for sending the
 heavier weekly cross-week analysis to a stronger model while keeping the daily reports
 on a fast, cheap one. An empty value means "use the primary model".
 
@@ -49,6 +49,8 @@ on a fast, cheap one. An empty value means "use the primary model".
 | `llm_model_eod_frac` | `GET /reports/eod/frac` |
 | `llm_model_weekly_orders` | `GET /reports/weekly/orders` |
 | `llm_model_weekly_frac` | `GET /reports/weekly/frac` |
+| `llm_model_range` | `GET /reports/range` — every monthly / quarterly / yearly / custom report |
+| `llm_model_report_compare` | `POST /reports/compare/review` — the trading-master comparison review |
 
 A value may be a bare model name, or `provider:model` to route that report to a
 different provider entirely. The generated report records — and the badge on the
@@ -316,13 +318,14 @@ Chips below the period selector filter all cards and charts to a specific provid
 
 ### By-source cards
 
-Three usage buckets (always shown; faded when zero):
+Usage buckets (faded when zero):
 
 | Source | What it counts |
 |---|---|
 | **Signals / Explorer** | AI calls from the Dashboard scheduler and Explorer on-demand analysis |
 | **Backtesting runs** | LLM-mode backtest engine calls |
 | **AI Review** | "Get AI Review" button clicks on a completed backtest run |
+| **Report Compare** | "Get trading-master review" clicks when comparing two reports |
 
 ### Quota / Limits
 

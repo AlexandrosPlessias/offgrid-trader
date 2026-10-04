@@ -243,3 +243,6 @@ my_temporary_notes.md
 .claude/settings.local.json
 .dev.vars
 .claude/settings.json
+
+# AI telemetry hooks — local only, not for version control
+ai-hooks/

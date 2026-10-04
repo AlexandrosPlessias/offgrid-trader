@@ -4,7 +4,7 @@
  * Handles three jobs:
  *   1. Start the Fly app at 8:30 AM ET Mon–Fri (via Fly Machines API) and
  *      re-point the Vercel production alias (via Vercel REST API)
- *   2. Send EoD report then stop the Fly app at 5:05 PM ET Mon–Fri
+ *   2. Send EoD report, stop the Fly app, and remove the Vercel alias at 5:05/5:30 PM ET Mon–Fri
  *   3. Send weekly LLM summary at 5:25 PM ET Fridays
  *
  * Scans are managed entirely by the in-process MonitorScheduler — this Worker
@@ -279,6 +279,27 @@ async function callVercel(env, method, path, body) {
 }
 
 /**
+ * Remove the production alias so the frontend goes offline.
+ * A no-op (with a warning) if VERCEL_TOKEN is not set or the alias doesn't exist.
+ */
+async function removeFrontend(env) {
+  if (!env.VERCEL_TOKEN) {
+    console.warn("[cron] removeFrontend: VERCEL_TOKEN not set — skipping.");
+    return;
+  }
+  const r = await callVercel(
+    env,
+    "DELETE",
+    `/v2/aliases/${env.VERCEL_ALIAS}`
+  );
+  if (r.status === 404) {
+    console.log("[cron] removeFrontend: alias not set — already offline.");
+  } else {
+    console.log(`[cron] removeFrontend: ${env.VERCEL_ALIAS} removed (${r.status})`);
+  }
+}
+
+/**
  * Point the production alias at the latest Ready production deployment.
  *
  * App Power → stop removes the alias to take the site offline; without this the
@@ -364,6 +385,12 @@ export default {
     if (action === "stop") {
       console.log("[cron] Stopping Fly app…");
       await stopApp(env);
+      console.log("[cron] Removing Vercel frontend alias…");
+      try {
+        await removeFrontend(env);
+      } catch (err) {
+        console.error(`[cron] removeFrontend failed: ${err}`);
+      }
       console.log(`[cron] action stop completed in ${Date.now() - startedAt}ms`);
       return;
     }

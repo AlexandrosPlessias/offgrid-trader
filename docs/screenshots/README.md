@@ -44,7 +44,8 @@ Captured with headless Chromium via [Playwright](https://playwright.dev).
 
 | File | Content |
 |---|---|
-| `20-reports.png` | Reports tab — Orders/Fractional tabs, history list, full/notification toggle, 🧠 model chip, Generate buttons, blocked-events banner |
+| `20-reports.png` | Reports tab — Orders/Fractional tabs, on-demand range presets, history list with Compare checkboxes, full/notification toggle, 🧠 model chip, Generate buttons |
+| `25-reports-compare.png` | Reports tab — two same-type reports compared: comparability grade, delta tiles, "what moved" diverging chart, A/B overlay |
 | `24-schedule.png` | Schedule tab — the trading week as a timeline: wake, scans, discovery, EoD/EoW reports, stop |
 | `21-activity.png` | Activity tab — live event feed with category chips, the ⛔ Errors filter, and a notification row expanded to show the exact text sent |
 
