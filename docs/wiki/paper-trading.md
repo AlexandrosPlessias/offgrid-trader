@@ -471,7 +471,7 @@ API call never discards a valid signal; any real rejection happens at order plac
 |---|---|---|---|
 | Paper auto-trade | `PAPER_TRADING_ENABLED` | `true` | Master switch for auto bracket orders |
 | Frac auto-trade | `FRAC_TRADING_ENABLED` | `false` | Master switch for auto fractional buys |
-| Signal / bracket floor | `CONFIDENCE_FLOOR` | `75` | Min confidence to create a signal / bracket |
+| Signal confidence floor (all modes) | `CONFIDENCE_FLOOR` | `75` | Min confidence for any setup to become a signal; gates alerts, bracket and fractional orders. The bracket-only and fractional floors can only add a stricter check on top. |
 | Fractional floor | `FRAC_MIN_CONFIDENCE` | `85` | Stricter floor for fractional buys |
 | Bracket-only floor | `PAPER_TRADE_MIN_CONFIDENCE` | `0` | Optional; 0 = use the signal floor |
 | Max bracket positions | `PAPER_MAX_POSITIONS` | `5` | Hold new bracket orders past this many open positions |

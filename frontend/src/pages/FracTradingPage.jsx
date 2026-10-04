@@ -1,5 +1,6 @@
 import { useState, Fragment } from 'react'
 import PriceSlider from '../components/shared/PriceSlider'
+import { ExplorerButton } from '../components/shared/TickerLink'
 import {
   ResponsiveContainer, AreaChart, Area, BarChart, Bar, Cell,
   XAxis, YAxis, Tooltip, CartesianGrid,
@@ -56,7 +57,7 @@ function Tile({ label, value, color }) {
   )
 }
 
-export default function FracTradingPage() {
+export default function FracTradingPage({ onOpenExplorer }) {
   const { data: acctData, reload: reloadAccount, error: acctError } = usePolling('/frac/account', 30_000)
   const { data: readiness, reload: reloadReadiness } = usePolling('/frac/readiness', 60_000)
   const { data: posData, reload: reloadPositions } = usePolling('/frac/positions?limit=200', 30_000)
@@ -399,6 +400,9 @@ export default function FracTradingPage() {
                         {isExp && (
                           <tr style={{ background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
                             <td colSpan={15} style={{ padding: '10px 18px' }}>
+                              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+                                <ExplorerButton ticker={p.ticker} onOpenExplorer={onOpenExplorer} />
+                              </div>
                               <div style={{ display: 'flex', gap: 0, flexWrap: 'wrap', fontSize: 11 }}>
                                 {/* Position */}
                                 <div style={{ paddingRight: 24 }}>
@@ -511,6 +515,9 @@ export default function FracTradingPage() {
                         {isExp && (
                           <tr style={{ background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
                             <td colSpan={10} style={{ padding: '12px 18px' }}>
+                              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+                                <ExplorerButton ticker={p.ticker} onOpenExplorer={onOpenExplorer} />
+                              </div>
                               <div style={{ display: 'flex', gap: 0, flexWrap: 'wrap', fontSize: 11 }}>
 
                                 {/* Performance */}

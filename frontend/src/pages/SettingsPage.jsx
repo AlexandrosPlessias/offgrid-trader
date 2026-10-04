@@ -998,6 +998,19 @@ function NotificationsSection() {
   )
 }
 
+// A flow floor only filters when it is above the signal floor — every signal already
+// clears the signal floor, so a lower or equal value never rejects anything.
+function FloorNoEffectWarning({ value, signalFloor, zeroMeansDefault = false, hint }) {
+  const v = parseFloat(value)
+  const s = parseFloat(signalFloor)
+  if (Number.isNaN(v) || Number.isNaN(s) || (zeroMeansDefault && v === 0) || v > s) return null
+  return (
+    <span style={{ fontSize: 12, color: '#f59e0b' }}>
+      ⚠ No effect: {v} is not above the signal floor ({s}), so every signal already passes. {hint}
+    </span>
+  )
+}
+
 function AutonomousTradingSection() {
   const [fetchErr,   setFetchErr]   = useState(false)
   const [saveStatus, setSaveStatus] = useState(null)
@@ -1144,8 +1157,8 @@ function AutonomousTradingSection() {
 
       <div className="settings-row">
         <div className="settings-row-label">
-          <span>Signal / bracket confidence floor</span>
-          <span className="text-dim" style={{ fontSize: 12 }}>Minimum % to create a signal and place a bracket order</span>
+          <span>Signal confidence floor (all modes)</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>Minimum % for any setup to become a signal — gates alerts, bracket and fractional orders. The floors below can only be stricter.</span>
         </div>
         <input className="settings-input" type="number" min={0} max={100}
                value={confidenceFloor} onChange={e => setConfidenceFloor(e.target.value)}
@@ -1156,6 +1169,8 @@ function AutonomousTradingSection() {
         <div className="settings-row-label">
           <span>Fractional confidence floor</span>
           <span className="text-dim" style={{ fontSize: 12 }}>Stricter % required for a fractional buy (frac commits notional)</span>
+          <FloorNoEffectWarning value={fracMinConf} signalFloor={confidenceFloor}
+                                hint="Set it above the signal floor to make fractional buys stricter." />
         </div>
         <input className="settings-input" type="number" min={0} max={100}
                value={fracMinConf} onChange={e => setFracMinConf(e.target.value)}
@@ -1166,6 +1181,8 @@ function AutonomousTradingSection() {
         <div className="settings-row-label">
           <span>Bracket-only floor (optional)</span>
           <span className="text-dim" style={{ fontSize: 12 }}>0 = fall back to the signal floor above</span>
+          <FloorNoEffectWarning value={paperMinConf} signalFloor={confidenceFloor} zeroMeansDefault
+                                hint="Set it above the signal floor, or 0 to use the signal floor." />
         </div>
         <input className="settings-input" type="number" min={0} max={100}
                value={paperMinConf} onChange={e => setPaperMinConf(e.target.value)}

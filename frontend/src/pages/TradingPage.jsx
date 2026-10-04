@@ -5,7 +5,7 @@ import FracTradingPage from './FracTradingPage'
 // Unified Trading page — two tabs:
 //   • Order Trading     — whole-share bracket orders on the primary paper account
 //   • Fractional Trading — notional buys on the 2nd (frac) Alpaca profile
-export default function TradingPage({ initialExpandedOrder, onExpandedOrderConsumed }) {
+export default function TradingPage({ initialExpandedOrder, onExpandedOrderConsumed, onOpenExplorer }) {
   const [tab, setTab] = useState('order')
 
   // A sidebar order deep-link targets the Order Trading tab.
@@ -47,10 +47,11 @@ export default function TradingPage({ initialExpandedOrder, onExpandedOrderConsu
         <PaperTradingPage
           initialExpandedOrder={initialExpandedOrder}
           onExpandedOrderConsumed={onExpandedOrderConsumed}
+          onOpenExplorer={onOpenExplorer}
         />
       </div>
       <div style={{ display: tab === 'frac' ? '' : 'none' }}>
-        <FracTradingPage />
+        <FracTradingPage onOpenExplorer={onOpenExplorer} />
       </div>
     </div>
   )

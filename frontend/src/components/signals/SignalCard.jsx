@@ -3,6 +3,7 @@ import { API, getAuthHeaders, placeFracOrder } from '../../utils/api'
 import { fmtN, fmtTime } from '../../utils/fmt'
 import { SOURCE_LABEL } from '../../utils/colors'
 import LLMReasoning from '../analysis/LLMReasoning'
+import TickerLink from '../shared/TickerLink'
 
 function SignalDetail({ signal, onClose }) {
   const [analysis, setAnalysis] = useState(null)
@@ -49,7 +50,7 @@ function SignalDetail({ signal, onClose }) {
   )
 }
 
-export default function SignalCard({ r, expanded, onToggle, onDelete, existingOrder = null }) {
+export default function SignalCard({ r, expanded, onToggle, onDelete, existingOrder = null, onOpenExplorer }) {
   const isLong   = r.type === 'long'
   const conf     = r.confidence ?? 0
   const modelTag = r.llm_model || null
@@ -140,7 +141,7 @@ export default function SignalCard({ r, expanded, onToggle, onDelete, existingOr
       {/* header row */}
       <div className="signal-card-header" onClick={onToggle} style={{ cursor: 'pointer' }}>
         <div className="signal-card-left">
-          <span className="signal-ticker">{r.ticker}</span>
+          <TickerLink className="signal-ticker" ticker={r.ticker} onOpenExplorer={onOpenExplorer} />
           <span className={`badge ${r.type}`} style={{ marginLeft: 8 }}>
             {r.type?.toUpperCase() ?? '—'}
           </span>

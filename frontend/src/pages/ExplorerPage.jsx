@@ -48,8 +48,9 @@ export default function ExplorerPage({ initialResult, onBack, modelName, onOpenI
   const [sec7Orders, setSec7Orders] = useState({})
   const [sec7Frac, setSec7Frac] = useState({})
 
-  // Use streamed result if available, otherwise show pre-loaded result from dashboard
-  const result    = streamResult ?? initialResult
+  // A ticker-only initialResult just prefills the input (no saved run exists for it).
+  const hasSavedRun = !!(initialResult && (initialResult._from_history || initialResult.market_data || initialResult.analysis))
+  const result    = streamResult ?? (hasSavedRun ? initialResult : null)
   const mkt       = result?.market_data
   const price     = mkt?.price
   const analysis    = result?.analysis
@@ -102,10 +103,17 @@ export default function ExplorerPage({ initialResult, onBack, modelName, onOpenI
       )}
 
       {!result && !streaming && !error && (
-        <div className="explorer-empty">
-          Enter a ticker above and click <strong>Run Analysis</strong> to begin the walkthrough.<br />
-          <span style={{ fontSize: 12 }}>Or expand the Analysis History panel below to open a saved run.</span>
-        </div>
+        initialResult?.ticker ? (
+          <div className="explorer-empty">
+            No saved analysis for <strong>{initialResult.ticker}</strong> yet — click{' '}
+            <strong>Run Analysis</strong> to create one.
+          </div>
+        ) : (
+          <div className="explorer-empty">
+            Enter a ticker above and click <strong>Run Analysis</strong> to begin the walkthrough.<br />
+            <span style={{ fontSize: 12 }}>Or expand the Analysis History panel below to open a saved run.</span>
+          </div>
+        )
       )}
 
       {error && <div className="error-msg" style={{ padding: '0 0 16px' }}>{error}</div>}

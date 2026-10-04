@@ -9,10 +9,11 @@ import {
 import { API, getAuthHeaders } from '../utils/api'
 import InfoTip from '../components/shared/InfoTip'
 import PriceSlider from '../components/shared/PriceSlider'
+import { ExplorerButton } from '../components/shared/TickerLink'
 
 // ─── Paper Trading Page ───────────────────────────────────────────────────────
 
-export default function PaperTradingPage({ initialExpandedOrder = null, onExpandedOrderConsumed }) {
+export default function PaperTradingPage({ initialExpandedOrder = null, onExpandedOrderConsumed, onOpenExplorer }) {
   const [account,      setAccount]      = useState(null)
   const [positions,    setPositions]    = useState([])
   const [orders,       setOrders]       = useState([])
@@ -963,6 +964,9 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                         {isExpPos && matchOrd && (
                           <tr style={{ background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
                             <td colSpan={13} style={{ padding: '10px 18px' }}>
+                              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+                                <ExplorerButton ticker={ticker} onOpenExplorer={onOpenExplorer} />
+                              </div>
                               <div style={{ display: 'flex', gap: 0, flexWrap: 'wrap', fontSize: 11 }}>
                                 {/* Position metrics */}
                                 <div style={{ paddingRight: 24 }}>
@@ -1216,6 +1220,9 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                       {isExpanded && (
                         <tr style={{ background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
                           <td colSpan={14} style={{ padding: '10px 18px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+                              <ExplorerButton ticker={o.ticker} onOpenExplorer={onOpenExplorer} />
+                            </div>
                             {/* Tight 3-column layout — each column is a definition grid (label · value side-by-side) */}
                             <div style={{ display: 'flex', gap: 0, flexWrap: 'wrap', fontSize: 11 }}>
 
@@ -1413,6 +1420,9 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                         {isExpanded && (
                           <tr style={{ background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
                             <td colSpan={13} style={{ padding: '10px 18px' }}>
+                              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+                                <ExplorerButton ticker={o.ticker} onOpenExplorer={onOpenExplorer} />
+                              </div>
                               <div style={{ display: 'flex', gap: 0, flexWrap: 'wrap', fontSize: 11 }}>
                                 <div style={{ paddingRight: 24 }}>
                                   <div style={{ fontSize: 9, color: 'var(--dim)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 5 }}>Trade Math</div>

@@ -5,7 +5,7 @@ import InfoTip from '../shared/InfoTip'
 
 const PAGE_SIZE = 30
 
-export default function SignalsTable({ signals, reload, signalOrderMap = {} }) {
+export default function SignalsTable({ signals, reload, signalOrderMap = {}, onOpenExplorer }) {
   const [open,           setOpen]           = useState(false)
   const [filterSide,     setFilterSide]     = useState('all')
   const [filterConf,     setFilterConf]     = useState(null)
@@ -201,6 +201,7 @@ export default function SignalsTable({ signals, reload, signalOrderMap = {} }) {
               onToggle={() => setExpanded(prev => prev === r.id ? null : r.id)}
               onDelete={() => handleDelete(r.id)}
               existingOrder={signalOrderMap[r.id] ?? null}
+              onOpenExplorer={onOpenExplorer}
             />
           ))}
         </div>

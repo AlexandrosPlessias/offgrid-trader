@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import { ResponsiveContainer, BarChart, Bar, Cell, XAxis, YAxis, Tooltip } from 'recharts'
 import { API, getAuthHeaders, placeFracOrder } from '../utils/api'
+import TickerLink from '../components/shared/TickerLink'
 
 export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplorer }) {
   const [candidates, setCandidates]   = useState([])
@@ -459,7 +460,9 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                 return (
                   <Fragment key={c.ticker}>
                     <tr style={{ borderBottom: isOpen ? 'none' : '1px solid var(--border-subtle, rgba(255,255,255,.06))' }}>
-                      <td style={{ ...cell, fontWeight: 700, whiteSpace: 'nowrap' }}>{c.ticker}</td>
+                      <td style={{ ...cell, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                        <TickerLink ticker={c.ticker} onOpenExplorer={onOpenExplorer} />
+                      </td>
                       <td style={{ ...cell, textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtPrice(c.price)}</td>
                       <td style={{ ...cell, textAlign: 'right', whiteSpace: 'nowrap', color: pctColor, fontWeight: 600 }}>{fmtPct(c.percent_change)}</td>
                       <td style={{ ...cell, textAlign: 'right', whiteSpace: 'nowrap', color: 'var(--text-dim)' }}>{fmtVol(c.volume)}</td>
@@ -809,16 +812,11 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                                       return (
                                         <tr key={ci} style={{ borderBottom: '1px solid rgba(255,255,255,.04)' }}>
                                           <td style={{ padding: '4px 8px', fontWeight: 700 }}>
-                                            <button
-                                              onClick={() => onOpenExplorer
-                                                ? onOpenExplorer({ ticker: c.ticker })
-                                                : onViewChange('explorer')}
-                                              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0,
-                                                       color: 'var(--text)', fontWeight: 700, fontSize: 11, textDecoration: 'underline dotted' }}
-                                              title={`Open ${c.ticker} in Explorer`}
-                                            >
-                                              {c.ticker}
-                                            </button>
+                                            <TickerLink
+                                              ticker={c.ticker}
+                                              onOpenExplorer={onOpenExplorer}
+                                              style={{ color: 'var(--text)', fontWeight: 700, fontSize: 11 }}
+                                            />
                                           </td>
                                           <td style={{ padding: '4px 8px', textAlign: 'right', color: scoreClr, fontWeight: 600 }}>{c.score?.toFixed(0)}</td>
                                           <td style={{ padding: '4px 8px', whiteSpace: 'nowrap' }}>

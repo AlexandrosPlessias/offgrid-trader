@@ -40,6 +40,7 @@ After each scan, the scheduler syncs open Alpaca paper orders (status, fill pric
 
 ## Recent highlights
 
+- **Ticker → Explorer links** — click a ticker on a Dashboard signal card or in Trending, or use **🔍 Open in Explorer** in any expanded Trading row, to open that ticker's latest saved analysis (or a prefilled Explorer if it has none).
 - **Report comparator** — tick two reports of the same type to see metric and tuning-setting deltas, a comparability grade, a "what moved" chart, and an optional LLM review with concrete tuning suggestions. See [Reports](reports.md).
 - **On-demand range reports** — monthly, quarterly, yearly or custom-dated reports, with report data queried by date in SQL so long ranges are never truncated.
 - **Site offline outside trading hours** — the Cloudflare cron now stops the Fly backend *and* removes the Vercel alias each evening, and restores both each weekday morning. See [Cloudflare Cron](cloudflare-cron.md).
