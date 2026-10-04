@@ -1478,7 +1478,11 @@ def get_signals_between(since: str, until: str, db_path: str | None = None) -> l
 
 
 def get_paper_orders_between(since: str, until: str, db_path: str | None = None) -> list[dict]:
-    """Return every paper order created in ``[since, until)``, newest first."""
+    """Return paper orders created or closed in ``[since, until)``, newest first.
+
+    Callers drop rows closed after ``until`` — realized P&L belongs to the window
+    the trade closed in.
+    """
     with _connect(db_path) as conn:
         rows = conn.execute(
             """
@@ -1488,10 +1492,11 @@ def get_paper_orders_between(since: str, until: str, db_path: str | None = None)
                    COALESCE(po.signal_timestamp,  s.timestamp)  AS signal_timestamp
             FROM paper_orders po
             LEFT JOIN signals s ON s.id = po.signal_id
-            WHERE po.created_at >= ? AND po.created_at < ?
+            WHERE (po.created_at >= ? AND po.created_at < ?)
+               OR (po.closed_at >= ? AND po.closed_at < ?)
             ORDER BY po.created_at DESC
             """,
-            (since, until),
+            (since, until, since, until),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -2268,6 +2273,9 @@ def save_backtest_compare(
 
 def save_paper_order(order: dict, db_path: str | None = None) -> int:
     """Insert a new paper order row and return its id."""
+    if order.get("realized_pnl") is not None and not order.get("closed_at"):
+        # Reports attribute realized P&L to the window the trade closed in.
+        order = {**order, "closed_at": _now_iso()}
     with _connect(db_path) as conn:
         cur = conn.execute(
             """
@@ -2344,6 +2352,8 @@ def update_paper_order_status(
     fields = {k: v for k, v in updates.items() if k in allowed and v is not None}
     if not fields:
         return
+    if "realized_pnl" in fields and "closed_at" not in fields:
+        fields["closed_at"] = _now_iso()
     # Keys are validated against the allowlist above — no injection risk.
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = [*fields.values(), alpaca_order_id]

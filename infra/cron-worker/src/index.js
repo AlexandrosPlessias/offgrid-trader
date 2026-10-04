@@ -356,14 +356,21 @@ export default {
     }
 
     // ── Start app ─────────────────────────────────────────────────────────────
+    // The Fly and Vercel steps are independent: a Fly failure must never leave the
+    // frontend in the wrong state, so each Vercel step runs in a finally block.
     if (action === "start") {
-      console.log("[cron] Starting Fly app…");
-      await startApp(env);
-      console.log("[cron] Restoring Vercel frontend alias…");
       try {
-        await restoreFrontend(env);
+        console.log("[cron] Starting Fly app…");
+        await startApp(env);
       } catch (err) {
-        console.error(`[cron] restoreFrontend failed: ${err}`);
+        console.error(`[cron] startApp failed: ${err}`);
+      } finally {
+        console.log("[cron] Restoring Vercel frontend alias…");
+        try {
+          await restoreFrontend(env);
+        } catch (err) {
+          console.error(`[cron] restoreFrontend failed: ${err}`);
+        }
       }
       console.log(`[cron] action start completed in ${Date.now() - startedAt}ms`);
       return;
@@ -383,13 +390,18 @@ export default {
 
     // ── Stop app ──────────────────────────────────────────────────────────────
     if (action === "stop") {
-      console.log("[cron] Stopping Fly app…");
-      await stopApp(env);
-      console.log("[cron] Removing Vercel frontend alias…");
       try {
-        await removeFrontend(env);
+        console.log("[cron] Stopping Fly app…");
+        await stopApp(env);
       } catch (err) {
-        console.error(`[cron] removeFrontend failed: ${err}`);
+        console.error(`[cron] stopApp failed: ${err}`);
+      } finally {
+        console.log("[cron] Removing Vercel frontend alias…");
+        try {
+          await removeFrontend(env);
+        } catch (err) {
+          console.error(`[cron] removeFrontend failed: ${err}`);
+        }
       }
       console.log(`[cron] action stop completed in ${Date.now() - startedAt}ms`);
       return;

@@ -34,6 +34,7 @@ from backend.database import (
     save_event,
     save_report_record,
 )
+from backend.routes._models import _log_safe
 
 router = APIRouter(tags=["reports"])
 _log = logging.getLogger(__name__)
@@ -639,7 +640,8 @@ def _run_report(
             raise ValueError("custom reports need start and end dates")
         since_d, last_d = start, end
     else:
-        since_d = (now - timedelta(days=_PERIOD_DAYS[period])).date()
+        # Inclusive window of exactly N calendar days ending today (EoD = today only).
+        since_d = (now - timedelta(days=_PERIOD_DAYS[period] - 1)).date()
         last_d = now.date()
     until_d = last_d + timedelta(days=1)
     since = since_d.isoformat()
@@ -651,9 +653,14 @@ def _run_report(
 
     # Window-scoped in SQL: no row cap, so long ranges are never silently truncated.
     signals = get_signals_between(since, until)
-    orders_period = get_paper_orders_between(since, until)
     # A position closed after the window belongs to the window it closed in, so
-    # consecutive windows never both count it.
+    # consecutive windows never both count it. Legacy rows without closed_at fall
+    # back to created_at.
+    orders_period = [
+        o
+        for o in get_paper_orders_between(since, until)
+        if not (o.get("closed_at") and o["closed_at"] >= until)
+    ]
     frac_period = [
         f
         for f in get_frac_positions_between(since, until)
@@ -769,7 +776,7 @@ def _run_report(
 
             ord_by_day: dict = defaultdict(_ord_init)
             for o in orders_period:
-                day = _bucket_key(o.get("created_at") or "", granularity)
+                day = _bucket_key(o.get("closed_at") or o.get("created_at") or "", granularity)
                 if day and o.get("realized_pnl") is not None:
                     ord_by_day[day]["trades"] += 1
                     ord_by_day[day]["tickers"].append(o["ticker"])
@@ -1098,7 +1105,12 @@ def _compare_reports(ra: dict[str, Any], rb: dict[str, Any]) -> dict[str, Any]:
         "config": config,
         "config_available": config_available,
         "buckets": {
-            "granularity": cb.get("bucket_granularity") or ca.get("bucket_granularity"),
+            # Different bucket sizes can't be aligned point-for-point; None hides the overlay.
+            "granularity": (
+                cb.get("bucket_granularity")
+                if cb.get("bucket_granularity") == ca.get("bucket_granularity")
+                else None
+            ),
             "a": {
                 "signals": ca.get("signals_by_day") or {},
                 "pnl": ca.get("frac_by_day" if mode == "frac" else "bracket_by_day") or {},
@@ -1144,13 +1156,16 @@ def _report_comparability(ra: dict[str, Any], rb: dict[str, Any]) -> tuple[str, 
         len_a, len_b = int(wa.get("days") or 0), int(wb.get("days") or 0)
         if len_a and len_b and abs(len_a - len_b) / max(len_a, len_b) > _WINDOW_LENGTH_TOLERANCE:
             _cap("none", f"Window lengths differ materially ({len_a} vs {len_b} days).")
+        # Inclusive end dates: any positive overlap means a shared, double-counted day.
         overlap = (min(a_end, b_end) - max(a_start, b_start)).days + 1
-        if overlap > 1:
+        if overlap > 0:
+            unit = "day" if overlap == 1 else "days"
             _cap(
-                "partial", f"The windows overlap by {overlap} days, so activity is double-counted."
+                "partial",
+                f"The windows overlap by {overlap} {unit}, so activity is double-counted.",
             )
         gap = (b_start - a_end).days
-        if overlap <= 1 and gap > max(1, round(0.1 * max(len_a, len_b))):
+        if overlap <= 0 and gap > max(1, round(0.1 * max(len_a, len_b))):
             _cap("partial", f"The periods are not consecutive ({gap}-day gap between them).")
     else:
         _cap("partial", "Window dates are missing on at least one report.")
@@ -1229,30 +1244,67 @@ _ENUM_KNOBS: dict[str, set[str]] = {
     "SIGNAL_DROP_MODE": {"untradable", "strict", "never"},
     "DISCOVERY_AUTOADD_ENABLED": {"true", "false"},
 }
+# (min, max, integer-only) — mirrors the Settings API validators, so a suggestion
+# the review shows is always one the user could actually save. None = unbounded.
+_NUMERIC_KNOBS: dict[str, tuple[float | None, float | None, bool]] = {
+    "RSI_OVERSOLD": (0, 100, False),
+    "RSI_OVERBOUGHT": (0, 100, False),
+    "VOLUME_SPIKE_MULTIPLIER": (0, None, False),
+    "SIGNIFICANT_MOVE_PCT": (0, None, False),
+    "CONFIDENCE_FLOOR": (0, 100, False),
+    "DISCOVERY_MIN_SCORE": (0, 100, True),
+    "DISCOVERY_AUTOADD_TOP_N": (1, 25, True),
+    "PAPER_MAX_POSITIONS": (0, 100, True),
+    "PAPER_TRADE_MIN_CONFIDENCE": (0, 100, False),
+    "FRAC_MIN_CONFIDENCE": (0, 100, False),
+    "FRAC_BUDGET": (0, None, False),
+    "FRAC_POSITION_SIZE": (0, None, False),
+    "FRAC_POLL_SECONDS": (10, None, True),
+}
 
 
-def _invalid_enum_value(item: dict[str, Any]) -> bool:
-    choices = _ENUM_KNOBS.get(str(item.get("setting") or ""))
-    return (
-        choices is not None and str(item.get("proposed_value", "")).strip().lower() not in choices
-    )
+def _tuning_value_error(item: dict[str, Any]) -> str | None:
+    """Why *item*'s proposed value can't be saved for its setting, or None if it can."""
+    setting = str(item.get("setting") or "")
+    raw = str(item.get("proposed_value", "")).strip()
+    if setting in _ENUM_KNOBS:
+        choices = _ENUM_KNOBS[setting]
+        return None if raw.lower() in choices else "must be one of " + " | ".join(sorted(choices))
+    if setting in _NUMERIC_KNOBS:
+        lo, hi, integer = _NUMERIC_KNOBS[setting]
+        try:
+            value = float(raw.replace("%", "").replace("$", "").replace(",", "").strip())
+        except ValueError:
+            return "must be a number"
+        if (lo is not None and value < lo) or (hi is not None and value > hi):
+            return f"must be between {lo} and {hi if hi is not None else 'unbounded'}"
+        if integer and not value.is_integer():
+            return "must be a whole number"
+    return None
 
 
 def _scope_violations(result: dict[str, Any], allowed: set[str]) -> list[str]:
-    """Out-of-flow settings and impossible enum values are schema errors."""
+    """Out-of-flow settings and unsaveable values are schema errors.
+
+    *allowed* is report B's tuning snapshot. With no snapshot nothing can be checked,
+    so every suggestion is a violation.
+    """
     errs: list[str] = []
     for item in result.get("improve") or []:
         setting = item.get("setting") if isinstance(item, dict) else None
-        if setting and allowed and setting not in allowed:
+        if not setting:
+            continue
+        if setting not in allowed:
             errs.append(
-                f"improve[].setting '{setting}' is not allowed for this report — use only: "
-                + ", ".join(sorted(allowed))
+                f"improve[].setting '{setting}' is not allowed for this report — "
+                + (
+                    "use only: " + ", ".join(sorted(allowed))
+                    if allowed
+                    else "report B has no tuning snapshot, so `improve` must be empty"
+                )
             )
-        elif setting and _invalid_enum_value(item):
-            errs.append(
-                f"improve[].proposed_value for {setting} must be one of: "
-                + " | ".join(sorted(_ENUM_KNOBS[setting]))
-            )
+        elif (problem := _tuning_value_error(item)) is not None:
+            errs.append(f"improve[].proposed_value for {setting} {problem}")
     return errs
 
 
@@ -1307,7 +1359,9 @@ async def review_report_comparison(request: ReportCompareRequest) -> dict[str, A
     try:
         raw, model_used, pt, ct = await asyncio.to_thread(llm, user_prompt, system_prompt)
     except LLMError as exc:
-        raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
+        # Provider errors can carry URLs and upstream response text — keep them server-side.
+        _log.warning("report compare review: LLM unavailable: %s", _log_safe(str(exc)))
+        raise HTTPException(status_code=503, detail="LLM unavailable — see server logs.") from exc
 
     def _parse(text: str) -> dict[str, Any] | None:
         cleaned = text.strip()
@@ -1321,6 +1375,7 @@ async def review_report_comparison(request: ReportCompareRequest) -> dict[str, A
         return parsed if isinstance(parsed, dict) else None
 
     allowed = set((_report_ctx(rb) or {}).get("tuning") or {})
+
     result = _parse(raw)
     errs = (
         ["Response is not a JSON object."]
@@ -1329,9 +1384,13 @@ async def review_report_comparison(request: ReportCompareRequest) -> dict[str, A
         + _scope_violations(result, allowed)
     )
     if errs:
-        _log.warning("report compare review invalid: %s", str(errs)[:300].replace("\n", " "))
+        _log.warning("report compare review invalid: %s", _log_safe(str(errs)[:300]))
         repaired = await asyncio.to_thread(_repair_llm_json, raw, errs, llm, system_prompt)
-        result = _parse(repaired) or result
+        result = _parse(repaired)
+        # The repair returns the original text when it fails, so re-check the structure;
+        # anything still malformed falls back to the safe result below.
+        if result is not None and _validate_llm_json(result, "report_compare.schema.json"):
+            result = None
 
     if result is None:
         result = {
@@ -1342,13 +1401,11 @@ async def review_report_comparison(request: ReportCompareRequest) -> dict[str, A
             "bad": [],
             "improve": [],
         }
-    # Never show out-of-scope or impossible suggestions, even if the repair didn't fix them.
+    # Never show out-of-scope or unsaveable suggestions, even if the repair didn't fix them.
     result["improve"] = [
         i
         for i in (result.get("improve") or [])
-        if isinstance(i, dict)
-        and (not allowed or i.get("setting") in allowed)
-        and not _invalid_enum_value(i)
+        if isinstance(i, dict) and i.get("setting") in allowed and _tuning_value_error(i) is None
     ]
     if grade == "none":
         result["verdict"] = "inconclusive"

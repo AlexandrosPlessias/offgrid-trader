@@ -550,8 +550,8 @@ always `a` in the response; deltas are `b − a`.
 ```json
 {
   "type": "weekly_orders", "mode": "orders",
-  "a": {"id": 12, "report_date": "2026-09-19", "window": {"start": "2026-09-12", "end": "2026-09-19", "days": 8}},
-  "b": {"id": 15, "report_date": "2026-09-26", "window": {"start": "2026-09-19", "end": "2026-09-26", "days": 8}},
+  "a": {"id": 12, "report_date": "2026-09-19", "window": {"start": "2026-09-13", "end": "2026-09-19", "days": 7}},
+  "b": {"id": 15, "report_date": "2026-09-26", "window": {"start": "2026-09-20", "end": "2026-09-26", "days": 7}},
   "metrics_basis": "window",
   "metrics": [{"key": "total_pnl", "label": "P&L", "a": -14.0, "b": 41.5, "delta": 55.5,
                "pct_delta": 396.43, "higher_is_better": true}],

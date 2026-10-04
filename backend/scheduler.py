@@ -200,6 +200,8 @@ async def sync_paper_orders() -> None:
                 # sell-to-close: profit when price rose; buy-to-cover: profit when price fell
                 direction = 1 if side == "sell" else -1
                 updates["realized_pnl"] = round((fill - entry) * qty * direction, 4)
+                if filled_at:
+                    updates["closed_at"] = filled_at
 
                 # Notify: this close leg just filled — fire regardless of origin
                 # (stop-loss, take-profit, or market close from Instant Cashout).
@@ -256,6 +258,8 @@ async def sync_paper_orders() -> None:
                     direction = 1 if entry_side == "buy" else -1
                     updates["realized_pnl"] = round((exit_px - entry_fill) * qty * direction, 4)
                     updates["exit_price"] = exit_px
+                    if exit_leg.get("filled_at"):
+                        updates["closed_at"] = exit_leg["filled_at"]
 
                     pnl = updates["realized_pnl"]
                     pnl_sign = "+" if pnl >= 0 else ""

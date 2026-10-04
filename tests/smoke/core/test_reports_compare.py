@@ -17,6 +17,9 @@ _client = TestClient(app)
 def _seed_window(prefix: str, n_signals: int, pnls: list[float]) -> None:
     """Insert signals and closed bracket orders dated inside ``prefix`` (YYYY-MM)."""
     with database._connect() as conn:
+        # The smoke DB persists between runs — clear this test-owned month first.
+        conn.execute("DELETE FROM signals WHERE created_at LIKE ?", (f"{prefix}-%",))
+        conn.execute("DELETE FROM paper_orders WHERE created_at LIKE ?", (f"{prefix}-%",))
         for i in range(n_signals):
             ts = f"{prefix}-{(i % 28) + 1:02d}T10:00:00Z"
             conn.execute(
@@ -273,10 +276,10 @@ def _pair(**overrides) -> tuple[dict, dict]:
         "id": 1,
         "type": "weekly_orders",
         "report_date": "2004-01-08",
-        "context_json": _ctx(start="2004-01-01", end="2004-01-08", days=8, **base),
+        "context_json": _ctx(start="2004-01-01", end="2004-01-07", days=7, **base),
     }
     b_args = {**base, **overrides}
-    b_window = b_args.pop("window", ("2004-01-08", "2004-01-15", 8))
+    b_window = b_args.pop("window", ("2004-01-08", "2004-01-14", 7))
     rb = {
         "id": 2,
         "type": "weekly_orders",
@@ -295,8 +298,10 @@ def test_comparability_grades(check):
     check("missing tuning snapshot → partial", grade == "partial")
     grade, _ = rep._report_comparability(*_pair(window=("2004-01-08", "2004-03-08", 60)))
     check("very different window lengths → none", grade == "none")
-    grade, _ = rep._report_comparability(*_pair(window=("2004-02-01", "2004-02-08", 8)))
+    grade, _ = rep._report_comparability(*_pair(window=("2004-02-01", "2004-02-07", 7)))
     check("non-consecutive periods → partial", grade == "partial")
+    grade, reasons = rep._report_comparability(*_pair(window=("2004-01-07", "2004-01-13", 7)))
+    check("a single shared day → partial", grade == "partial", str(reasons))
     grade, _ = rep._report_comparability(*_pair(signals=3))
     check("sharp signal-volume gap → partial", grade == "partial")
 
@@ -333,11 +338,11 @@ def _fake_review_llm(prompt, system_prompt=None, **_kw):
 def test_review_scopes_suggestions_and_tracks_tokens(check):
     a = _save(
         "weekly_orders",
-        "2005-01-08",
+        "2005-01-07",
         _ctx(
             start="2005-01-01",
-            end="2005-01-08",
-            days=8,
+            end="2005-01-07",
+            days=7,
             closed=8,
             wins=4,
             losses=4,
@@ -348,11 +353,11 @@ def test_review_scopes_suggestions_and_tracks_tokens(check):
     )
     b = _save(
         "weekly_orders",
-        "2005-01-15",
+        "2005-01-14",
         _ctx(
             start="2005-01-08",
-            end="2005-01-15",
-            days=8,
+            end="2005-01-14",
+            days=7,
             closed=9,
             wins=6,
             losses=3,
@@ -426,13 +431,14 @@ def test_weekly_report_persists_frac_scoped_snapshot(check):
     ctx = json.loads(database.get_report_record(r.json()["id"])["context_json"])
     check("frac tuning includes frac knobs", "FRAC_BUDGET" in ctx["tuning"])
     check("frac tuning excludes bracket knobs", "PAPER_MAX_POSITIONS" not in ctx["tuning"])
-    check("weekly window is 8 calendar days", ctx["window"]["days"] == 8)
+    check("weekly window is exactly 7 calendar days", ctx["window"]["days"] == 7)
     check("weekly buckets by day", ctx.get("bucket_granularity") == "day")
     check("scheduled report still notifies", r.json()["channels"] == {"ntfy": True})
 
 
 def test_frac_position_counts_once_across_consecutive_windows(check):
     with database._connect() as conn:
+        conn.execute("DELETE FROM frac_positions WHERE ticker = 'XDBL'")
         conn.execute(
             "INSERT INTO frac_positions "
             "(ticker, notional, status, realized_pnl, opened_at, closed_at) "
@@ -450,3 +456,149 @@ def test_frac_position_counts_once_across_consecutive_windows(check):
         ctx_a["window_economics"]["closed_trades"] == 0,
     )
     check("counted in the window it closed in", ctx_b["window_economics"]["closed_trades"] == 1)
+
+
+def test_paper_pnl_counts_in_the_window_it_closed(check):
+    with database._connect() as conn:
+        conn.execute("DELETE FROM paper_orders WHERE ticker IN ('XCLS', 'XLEG')")
+        # Opened in window A, closed in window B.
+        conn.execute(
+            "INSERT INTO paper_orders "
+            "(ticker, side, status, notional, realized_pnl, created_at, closed_at) "
+            "VALUES ('XCLS', 'buy', 'filled', 100, 7.5, "
+            "'2008-01-04T15:00:00Z', '2008-01-09T15:00:00Z')"
+        )
+        # Legacy row with no closed_at — stays in the window it was created in.
+        conn.execute(
+            "INSERT INTO paper_orders (ticker, side, status, notional, realized_pnl, created_at) "
+            "VALUES ('XLEG', 'buy', 'filled', 100, 1.0, '2008-01-03T15:00:00Z')"
+        )
+        conn.commit()
+    closed = []
+    with mock.patch.object(analysis, "call_llm", _fake_report_llm):
+        for start, end in (("2008-01-01", "2008-01-07"), ("2008-01-08", "2008-01-14")):
+            r = _client.get(f"/reports/range?mode=orders&start={start}&end={end}")
+            ctx = json.loads(database.get_report_record(r.json()["id"])["context_json"])
+            closed.append(ctx["window_economics"]["closed_trades"])
+    check("each trade counted once, in the window it closed in", closed == [1, 1], str(closed))
+
+
+def test_realizing_pnl_stamps_closed_at(check):
+    with database._connect() as conn:
+        conn.execute("DELETE FROM paper_orders WHERE alpaca_order_id = 'stamp-1'")
+        conn.commit()
+    database.save_paper_order(
+        {"ticker": "XSTAMP", "side": "buy", "alpaca_order_id": "stamp-1", "notional": 100}
+    )
+    database.update_paper_order_status("stamp-1", {"status": "filled", "realized_pnl": 2.0})
+    with database._connect() as conn:
+        closed_at = conn.execute(
+            "SELECT closed_at FROM paper_orders WHERE alpaca_order_id = 'stamp-1'"
+        ).fetchone()[0]
+    check("writing realized_pnl records when the trade closed", bool(closed_at), str(closed_at))
+
+
+def test_eod_window_is_today_only(check):
+    from backend import alerts
+
+    with mock.patch.object(analysis, "call_llm", _fake_report_llm), mock.patch.object(
+        alerts, "send_report", lambda *a, **k: {}
+    ):
+        r = _client.get("/reports/eod/orders")
+    ctx = json.loads(database.get_report_record(r.json()["id"])["context_json"])
+    check("EoD covers exactly one calendar day", ctx["window"]["days"] == 1, str(ctx["window"]))
+
+
+def test_overlay_hidden_when_bucket_sizes_differ(check):
+    ra, rb = _pair()
+    ca, cb = json.loads(ra["context_json"]), json.loads(rb["context_json"])
+    ca["bucket_granularity"], cb["bucket_granularity"] = "day", "week"
+    ra["context_json"], rb["context_json"] = json.dumps(ca), json.dumps(cb)
+    check(
+        "mismatched granularity → no overlay",
+        rep._compare_reports(ra, rb)["buckets"]["granularity"] is None,
+    )
+    cb["bucket_granularity"] = "day"
+    rb["context_json"] = json.dumps(cb)
+    check(
+        "matching granularity kept", rep._compare_reports(ra, rb)["buckets"]["granularity"] == "day"
+    )
+
+
+def _review_pair(year: int, tuning_b: dict | None = _TUNING) -> tuple[int, int]:
+    common = dict(closed=8, wins=4, losses=4, pnl=-5, signals=20)
+    a = _save(
+        "weekly_orders",
+        f"{year}-01-07",
+        _ctx(start=f"{year}-01-01", end=f"{year}-01-07", days=7, tuning=_TUNING, **common),
+    )
+    b = _save(
+        "weekly_orders",
+        f"{year}-01-14",
+        _ctx(start=f"{year}-01-08", end=f"{year}-01-14", days=7, tuning=tuning_b, **common),
+    )
+    return a, b
+
+
+def _llm_returning(body: dict):
+    return lambda prompt, system_prompt=None, **_kw: (json.dumps(body), "fake-model", 10, 5)
+
+
+_REVIEW_BASE = {
+    "verdict": "mixed",
+    "verdict_confidence": "low",
+    "summary": "s",
+    "good": [],
+    "bad": [],
+}
+
+
+def _improve(setting: str, value: str) -> dict:
+    return {
+        "setting": setting,
+        "current_value": "1",
+        "proposed_value": value,
+        "rationale": "r",
+        "expected_effect": "e",
+        "confidence": "low",
+    }
+
+
+def test_review_drops_unsaveable_and_unsnapshotted_suggestions(check):
+    a, b = _review_pair(2009)
+    body = {
+        **_REVIEW_BASE,
+        "improve": [_improve("PAPER_MAX_POSITIONS", "999"), _improve("CONFIDENCE_FLOOR", "80%")],
+    }
+    with mock.patch.object(analysis, "call_llm", _llm_returning(body)):
+        kept = _client.post("/reports/compare/review", json={"a": a, "b": b}).json()["improve"]
+    settings = [i["setting"] for i in kept]
+    check("out-of-range numeric value dropped", "PAPER_MAX_POSITIONS" not in settings)
+    check("valid value with a % sign kept", "CONFIDENCE_FLOOR" in settings, str(settings))
+
+    a, b = _review_pair(2010, tuning_b=None)
+    body = {**_REVIEW_BASE, "improve": [_improve("CONFIDENCE_FLOOR", "80")]}
+    with mock.patch.object(analysis, "call_llm", _llm_returning(body)):
+        kept = _client.post("/reports/compare/review", json={"a": a, "b": b}).json()["improve"]
+    check("no tuning snapshot on B → no suggestions", kept == [], str(kept))
+
+
+def test_review_falls_back_when_repair_stays_invalid(check):
+    a, b = _review_pair(2011)
+    broken = {**_REVIEW_BASE, "good": "not a list", "improve": []}
+    with mock.patch.object(analysis, "call_llm", _llm_returning(broken)):
+        body = _client.post("/reports/compare/review", json={"a": a, "b": b}).json()
+    check("still-invalid output falls back to inconclusive", body.get("verdict") == "inconclusive")
+    check("fallback lists are lists", body.get("good") == [] and body.get("improve") == [])
+
+
+def test_review_hides_llm_error_details(check):
+    a, b = _review_pair(2012)
+
+    def _boom(*_a, **_kw):
+        raise analysis.LLMError("upstream 500 from https://internal.example/secret-path")
+
+    with mock.patch.object(analysis, "call_llm", _boom):
+        r = _client.post("/reports/compare/review", json={"a": a, "b": b})
+    check("LLM failure → 503", r.status_code == 503, str(r.status_code))
+    check("provider detail not exposed", "secret-path" not in r.text, r.text)

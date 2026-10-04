@@ -145,9 +145,14 @@ Each report's `context_json` also persists, so later comparisons are honest:
 | `tuning` | the tuning knobs in force when the report was generated, scoped to its flow |
 | `mode` | `orders` or `frac` |
 
-Report data is queried by date range in SQL, so long windows are never truncated. A
-fractional position is counted in the window it **closed** in, so consecutive windows
-never both count it.
+Report data is queried by date range in SQL, so long windows are never truncated.
+Windows are inclusive and exactly as long as their name: EoD is today only, weekly the last
+7 calendar days, monthly 30, quarterly 90, yearly 365, so consecutive scheduled reports
+never share a day.
+
+Both bracket trades and fractional positions are counted in the window they **closed** in,
+so consecutive windows never both count one trade. Bracket orders record `closed_at` when
+their P&L is realised; older rows without it fall back to the day they were created.
 
 ---
 
@@ -168,7 +173,7 @@ can never upgrade this grade.
 | Grade | When |
 |---|---|
 | **Fully comparable** | Consecutive windows of equal length, ≥ 5 closed trades each, tuning snapshots on both |
-| **Partially comparable** | Too few closed trades · windows overlap or aren't consecutive · a tuning snapshot is missing · signal volume differs by more than half |
+| **Partially comparable** | Too few closed trades · windows share even one day or aren't consecutive · a tuning snapshot is missing · signal volume differs by more than half |
 | **Not comparable** | Window lengths differ by more than 20% · a report predates window-scoped metrics |
 
 ### Layer 1 — deterministic diff (no LLM)
@@ -256,8 +261,10 @@ events, and they are counted two ways:
 No setting turns an untradable signal into a trade, so the report prompts forbid tuning
 suggestions for these drops (in particular any `SIGNAL_DROP_MODE` change). The useful
 response is removing the tickers from the watchlist. Every prompt also shows each setting's
-allowed values next to its current value, and the comparator review rejects an impossible
-value such as `SIGNAL_DROP_MODE=none`.
+allowed values next to its current value, and the comparator review rejects any value the
+Settings API would refuse — an impossible word such as `SIGNAL_DROP_MODE=none` or a number
+outside the setting's range such as `RSI_OVERSOLD=200`. If report B has no tuning snapshot,
+the review shows no tuning suggestions at all.
 
 ---
 

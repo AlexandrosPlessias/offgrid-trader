@@ -55,8 +55,12 @@ def test_review_rejects_impossible_drop_mode(check):
     check("'none' is a violation", len(rep._scope_violations(bad, allowed)) == 1)
     check("a real mode passes (case-insensitive)", rep._scope_violations(good, allowed) == [])
     check(
-        "free-form numeric knobs are not enum-checked",
-        not rep._invalid_enum_value({"setting": "FRAC_BUDGET", "proposed_value": "250"}),
+        "an in-range numeric value is accepted",
+        rep._tuning_value_error({"setting": "FRAC_BUDGET", "proposed_value": "250"}) is None,
+    )
+    check(
+        "an out-of-range numeric value is rejected",
+        rep._tuning_value_error({"setting": "RSI_OVERSOLD", "proposed_value": "200"}) is not None,
     )
 
 

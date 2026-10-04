@@ -326,7 +326,8 @@ async def backtest_compare(
     try:
         raw, model_used, pt, ct = await asyncio.to_thread(call_llm, user_prompt, system_prompt)
     except LLMError as exc:
-        raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
+        _log.warning("backtest LLM call failed: %s", _log_safe(str(exc)))
+        raise HTTPException(status_code=503, detail="LLM unavailable — see server logs.") from exc
     except Exception as exc:
         _log.exception("backtest_compare error: %s", _log_safe(str(exc)))
         raise HTTPException(
@@ -463,7 +464,8 @@ async def backtest_experiment_advisor(run_id: int) -> dict[str, Any]:
     try:
         raw, model_used, pt, ct = await asyncio.to_thread(call_llm, user_prompt, system_prompt)
     except LLMError as exc:
-        raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
+        _log.warning("backtest LLM call failed: %s", _log_safe(str(exc)))
+        raise HTTPException(status_code=503, detail="LLM unavailable — see server logs.") from exc
     except Exception as exc:
         _log.exception("backtest_experiment_advisor error for run %d", int(run_id))
         raise HTTPException(
@@ -674,7 +676,8 @@ async def backtest_review(run_id: int) -> dict[str, Any]:
     try:
         raw, model_used, pt, ct = await asyncio.to_thread(call_llm, user_prompt, system_prompt)
     except LLMError as exc:
-        raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
+        _log.warning("backtest LLM call failed: %s", _log_safe(str(exc)))
+        raise HTTPException(status_code=503, detail="LLM unavailable — see server logs.") from exc
     except Exception as exc:
         _log.exception("backtest_review error for run %d", int(run_id))
         raise HTTPException(
