@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReportCompareReview",
+  "type": "object",
+  "required": ["verdict", "summary", "good", "bad", "improve"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["improved", "regressed", "mixed", "inconclusive"]
+    },
+    "verdict_confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low", "none"]
+    },
+    "summary": { "type": "string", "minLength": 1 },
+    "comparability_note": { "type": "string" },
+    "good": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "bad": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          { "$ref": "#/$defs/finding" },
+          {
+            "type": "object",
+            "required": ["cause"],
+            "properties": {
+              "cause": { "type": "string", "minLength": 1 }
+            }
+          }
+        ]
+      }
+    },
+    "improve": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "setting",
+          "current_value",
+          "proposed_value",
+          "rationale",
+          "expected_effect",
+          "confidence"
+        ],
+        "properties": {
+          "setting": { "type": "string", "minLength": 1 },
+          "current_value": { "type": "string" },
+          "proposed_value": { "type": "string", "minLength": 1 },
+          "rationale": { "type": "string", "minLength": 1 },
+          "expected_effect": { "type": "string", "minLength": 1 },
+          "confidence": { "type": "string", "enum": ["high", "medium", "low"] }
+        }
+      }
+    },
+    "watch_next": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "required": ["point", "evidence", "confidence"],
+      "properties": {
+        "metric": { "type": "string" },
+        "point": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "string", "minLength": 1 },
+        "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+        "cause": { "type": "string" }
+      }
+    }
+  }
+}

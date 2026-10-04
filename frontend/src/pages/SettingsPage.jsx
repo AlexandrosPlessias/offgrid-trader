@@ -1502,6 +1502,8 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
   const [reportModelEodOrders,    setReportModelEodOrders]    = useState('')
   const [reportModelWeeklyFrac,   setReportModelWeeklyFrac]   = useState('')
   const [reportModelWeeklyOrders, setReportModelWeeklyOrders] = useState('')
+  const [reportModelRange,        setReportModelRange]        = useState('')
+  const [reportModelCompare,      setReportModelCompare]      = useState('')
 
   // ── Signal-scan LLM switch ──────────────────────────────────────────────────
   const [signalLlmEnabled,     setSignalLlmEnabled]     = useState(true)
@@ -1823,6 +1825,14 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
       if (cfg.provider_model_prefs)  setProviderModelPrefs(cfg.provider_model_prefs)
       if (cfg.provider_saved_models) setProviderSavedModels(cfg.provider_saved_models)
       if (cfg.provider_key_status)   setProviderKeyStatus(cfg.provider_key_status)
+      // Must be loaded here too: saveLlm always sends these, so leaving them blank on
+      // load would wipe every saved per-report override on the next save.
+      setReportModelEodFrac(cfg.llm_model_eod_frac ?? '')
+      setReportModelEodOrders(cfg.llm_model_eod_orders ?? '')
+      setReportModelWeeklyFrac(cfg.llm_model_weekly_frac ?? '')
+      setReportModelWeeklyOrders(cfg.llm_model_weekly_orders ?? '')
+      setReportModelRange(cfg.llm_model_range ?? '')
+      setReportModelCompare(cfg.llm_model_report_compare ?? '')
     }).catch(() => {})
     loadCacheStats()
     loadPerfSettings()
@@ -1857,6 +1867,8 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
     setReportModelEodOrders(cfg.llm_model_eod_orders ?? '')
     setReportModelWeeklyFrac(cfg.llm_model_weekly_frac ?? '')
     setReportModelWeeklyOrders(cfg.llm_model_weekly_orders ?? '')
+    setReportModelRange(cfg.llm_model_range ?? '')
+    setReportModelCompare(cfg.llm_model_report_compare ?? '')
     if (provider === 'ollama') setModels(modelData.models ?? [])
     else setProviderModels(modelData.models ?? [])
   }
@@ -1896,6 +1908,8 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
       body.llm_model_eod_orders     = reportModelEodOrders
       body.llm_model_weekly_frac    = reportModelWeeklyFrac
       body.llm_model_weekly_orders  = reportModelWeeklyOrders
+      body.llm_model_range          = reportModelRange
+      body.llm_model_report_compare = reportModelCompare
       // Persist the active provider's current model choice as a per-provider pref.
       // The saved model becomes this provider's default and is appended as a new pill.
       const activeModel = envDefaultsActive ? '' : (llmModel || model || '')
@@ -2748,13 +2762,15 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
           </div>
           <p className="text-dim" style={{ fontSize: 12, marginBottom: 12 }}>
             Assign a specific provider + model per report type. Leave blank to use the primary model.
-            Weekly reports benefit from a larger model (e.g. Mistral Large, Gemini Flash).
+            Weekly, range and compare reviews benefit from a larger model (e.g. Mistral Large, Gemini Flash).
           </p>
           {[
             ['EoD Orders',    reportModelEodOrders,    setReportModelEodOrders],
             ['EoD Frac',      reportModelEodFrac,      setReportModelEodFrac],
             ['Weekly Orders', reportModelWeeklyOrders, setReportModelWeeklyOrders],
             ['Weekly Frac',   reportModelWeeklyFrac,   setReportModelWeeklyFrac],
+            ['Range reports (monthly / quarterly / yearly / custom)', reportModelRange, setReportModelRange],
+            ['Report Compare review', reportModelCompare, setReportModelCompare],
           ].map(([label, value, setter]) => (
             <div key={label} className="settings-field" style={{ marginBottom: 10 }}>
               <label className="settings-label">{label}</label>

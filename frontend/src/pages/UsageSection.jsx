@@ -275,6 +275,13 @@ export default function UsageSection({ usage: usageProp, onRefresh }) {
               <span className="usage-stat-sub">no comparisons yet this period</span>
             </div>
           )}
+          {!by_source.find(s => s.source === 'report_compare') && (
+            <div className="usage-stat-card" style={{ flex: '1 1 140px', opacity: 0.45 }}>
+              <span className="usage-stat-label">Report Compare</span>
+              <span className="usage-stat-value" style={{ fontSize: 15 }}>0</span>
+              <span className="usage-stat-sub">no report reviews yet this period</span>
+            </div>
+          )}
         </div>
       )}
 
