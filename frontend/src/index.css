@@ -490,6 +490,19 @@ tbody td {
   white-space: nowrap;
 }
 
+/* Wide trading tables: headers wrap and padding tightens so every column — including
+   the proximity bar — fits without horizontal scrolling. */
+.table-compact thead th {
+  white-space: normal;
+  text-align: center;
+  vertical-align: middle;
+  line-height: 1.25;
+  padding: 6px 5px 8px;
+}
+/* Centre data under the centred headers (detail rows span all columns, so skip them). */
+.table-compact tbody td { padding: 6px 5px; font-size: 11px; }
+.table-compact tbody td:not([colspan]) { text-align: center; }
+
 .ts { font-size: 11px; color: var(--dim); }
 .source-cell { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
 

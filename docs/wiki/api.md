@@ -1068,3 +1068,28 @@ Returns all scored candidates for one run, ordered by score descending.
 { "run_id": 3, "candidates": [{ "ticker": "NVDA", "score": 87.5, "source": "alpaca_actives", "price": 131.2, ... }] }
 ```
 
+### `POST /discovery/runs/{run_id}/confidence-scan`
+
+Starts an **analysis-only** Explorer scan, in the background, for every candidate in the run
+that scored at or above `discovery_min_score` and has never been analysed. Each ticker is
+attempted at most once per run; repeat calls start nothing. Skipped entirely while the market
+is closed. The scan saves the analysis but never saves signals, places orders or sends alerts.
+
+```json
+{ "started": ["FLUX", "QTEX"], "skipped": null }
+{ "started": [], "skipped": "market_closed" }
+```
+
+### `GET /discovery/runs/{run_id}/confidence`
+
+The best setup from each candidate's latest analysis, plus its scan status
+(`done` · `scanning` · `failed` · `none`). `confidence`/`type` are null when the analysis found
+no setup.
+
+```json
+{ "run_id": 3, "confidence": {
+    "ACN":  { "status": "done", "confidence": 82, "type": "short", "analyzed_at": "2026-10-04T15:00:00Z" },
+    "FLUX": { "status": "scanning" },
+    "IOVA": { "status": "none" } } }
+```
+

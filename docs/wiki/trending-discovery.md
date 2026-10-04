@@ -76,6 +76,13 @@ Settings are available in two places:
 
 All settings override env-var defaults and take effect without a restart.
 
+**Confidence column.** Next to each candidate's Score, the table shows the best setup from
+its latest Explorer analysis (▲ long / ▼ short and the confidence %). Candidates at or above
+`discovery_min_score` that have never been analysed get one analysis-only scan per discovery
+run, during market hours. That scan saves the analysis but never saves signals, places orders
+or sends alerts. `—` means no analysis is available (market closed, not yet scanned, or the
+scan failed); `no setup` means the analysis found nothing.
+
 **Auto-add respects manual removals.** A ticker you removed from the watchlist is never
 re-added by auto-add, even if it keeps trending. Adding it back yourself (single or bulk add)
 clears the removal. This matters for momentum small caps that the scanner keeps wanting to

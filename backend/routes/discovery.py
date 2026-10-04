@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -15,6 +16,7 @@ from backend.database import (
     get_discovery_history,
     get_discovery_run_candidates,
     get_effective_watchlist,
+    get_latest_analysis_confidence,
     get_latest_discovery,
     get_setting,
     save_discovery_candidates,
@@ -22,7 +24,7 @@ from backend.database import (
     set_setting,
     update_discovery_run,
 )
-from backend.routes._models import _sse_frame
+from backend.routes._models import _log_safe, _sse_frame
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -196,6 +198,107 @@ def discovery_run_candidates(run_id: int) -> dict[str, Any]:
     if not candidates:
         raise HTTPException(status_code=404, detail="Run not found or has no candidates")
     return {"run_id": run_id, "candidates": candidates}
+
+
+# --------------------------------------------------------------------------- #
+# Explorer confidence for trending candidates
+# --------------------------------------------------------------------------- #
+# Tickers being scanned / that failed, for the run currently being scanned.
+_confscan: dict[str, Any] = {"run_id": None, "pending": set(), "failed": set(), "task": None}
+_CONFSCAN_KEY = "discovery_confidence_scanned"  # {"run_id": int, "tickers": [...]}
+
+
+def _attempted(run_id: int) -> set[str]:
+    try:
+        rec = json.loads(get_setting(_CONFSCAN_KEY, "") or "{}")
+    except ValueError:
+        rec = {}
+    return set(rec.get("tickers") or []) if rec.get("run_id") == run_id else set()
+
+
+async def _run_confidence_scans(run_id: int, tickers: list[str]) -> None:
+    """Analysis-only Explorer scans: fetch, analyse, detect, save the analysis.
+
+    Deliberately leaves out signal persistence, both trade skills and alerts, so a
+    trending ticker you never chose to watch can't place an order or notify you.
+    """
+    from backend.agent import TickerAgent
+    from backend.scheduler import _memory
+    from backend.skills.ai_analysis import AIAnalysisSkill
+    from backend.skills.fetch_data import FetchDataSkill
+    from backend.skills.opportunity_detect import OpportunityDetectSkill
+    from backend.skills.persist import SaveAnalysisSkill
+
+    skills = [FetchDataSkill, AIAnalysisSkill, OpportunityDetectSkill, SaveAnalysisSkill]
+    for ticker in tickers:
+        try:
+            result = await TickerAgent(
+                ticker, memory=_memory, skill_classes=skills, send_alerts=False
+            ).run()
+            if not result.context.analysis:
+                _confscan["failed"].add(ticker)
+        except Exception:
+            _log.exception("discovery: confidence scan failed for %s", _log_safe(str(ticker)))
+            _confscan["failed"].add(ticker)
+        finally:
+            _confscan["pending"].discard(ticker)
+    _log.info("discovery: confidence scans for run %s finished", _log_safe(str(run_id)))
+
+
+def _run_candidates(run_id: int) -> list[dict[str, Any]]:
+    candidates = get_discovery_run_candidates(run_id)
+    if not candidates:
+        raise HTTPException(status_code=404, detail="Run not found or has no candidates")
+    return candidates
+
+
+@router.post("/discovery/runs/{run_id}/confidence-scan")
+async def start_confidence_scan(run_id: int) -> dict[str, Any]:
+    """Scan, once per run, every candidate above the min score that has no analysis yet."""
+    from backend.scheduler import is_market_open
+
+    candidates = _run_candidates(run_id)
+    if not is_market_open():
+        return {"started": [], "skipped": "market_closed"}
+
+    from backend.config import get_settings
+
+    min_score = int(get_setting("discovery_min_score", "") or get_settings().discovery.min_score)
+    qualifying = [c["ticker"] for c in candidates if (c.get("score") or 0) >= min_score]
+    analysed = get_latest_analysis_confidence(qualifying)
+    attempted = _attempted(run_id)
+    todo = [t for t in qualifying if t not in analysed and t not in attempted]
+    if not todo:
+        return {"started": [], "skipped": None}
+
+    set_setting(
+        _CONFSCAN_KEY, json.dumps({"run_id": run_id, "tickers": sorted(attempted | set(todo))})
+    )
+    if _confscan["run_id"] != run_id:
+        _confscan.update(run_id=run_id, pending=set(), failed=set())
+    _confscan["pending"].update(todo)
+    # Keep a reference so the task isn't garbage-collected mid-run.
+    _confscan["task"] = asyncio.create_task(_run_confidence_scans(run_id, todo))
+    return {"started": todo, "skipped": None}
+
+
+@router.get("/discovery/runs/{run_id}/confidence")
+def candidate_confidence(run_id: int) -> dict[str, Any]:
+    """Latest Explorer confidence per candidate, plus each ticker's scan status."""
+    tickers = [c["ticker"] for c in _run_candidates(run_id)]
+    latest = get_latest_analysis_confidence(tickers)
+    same_run = _confscan["run_id"] == run_id
+    out: dict[str, dict[str, Any]] = {}
+    for t in tickers:
+        if same_run and t in _confscan["pending"]:
+            out[t] = {"status": "scanning"}
+        elif t in latest:
+            out[t] = {"status": "done", **latest[t]}
+        elif same_run and t in _confscan["failed"]:
+            out[t] = {"status": "failed"}
+        else:
+            out[t] = {"status": "none"}
+    return {"run_id": run_id, "confidence": out}
 
 
 @router.post("/discovery/refresh")

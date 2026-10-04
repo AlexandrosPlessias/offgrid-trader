@@ -772,12 +772,12 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
           ? <div style={{ fontSize: 12, color: 'var(--dim)' }}>No open positions.</div>
           : (
             <div className="table-wrap">
-              <table>
+              <table className="table-compact">
                 <thead>
                   <tr>
                     <th></th>
                     <th>Ticker</th><th>Side</th><th>Qty</th><th>Avg Entry</th>
-                    <th>Current Price</th><th>Market Value</th><th>Unrealised P&L</th><th>P&L %</th>
+                    <th>Current Price</th><th>Market Value</th><th title="Unrealised P&L">Unreal. P&L</th><th>P&L %</th>
                     <th>Stop</th><th>Target</th><th>Proximity</th><th>Conf %</th><th></th>
                   </tr>
                 </thead>
@@ -875,12 +875,13 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                           </td>
                           <td>
                             {matchOrd?.stop_price && matchOrd?.take_profit_price && p.current_price
-                              ? <PriceSlider stop={matchOrd.stop_price} target={matchOrd.take_profit_price} current={p.current_price} />
+                              ? <PriceSlider stop={matchOrd.stop_price} target={matchOrd.take_profit_price} current={p.current_price} width={80} />
                               : <span style={{ color: 'var(--dim)' }}>—</span>}
                           </td>
                           <td>{matchOrd?.signal_confidence != null ? `${matchOrd.signal_confidence.toFixed(0)}%` : '—'}</td>
                           {/* Close Position action */}
-                          <td onClick={e => e.stopPropagation()} style={{ minWidth: 120 }}>
+                          {/* Fixed width + wrapping: the confirm prompt and status labels must never widen the table. */}
+                          <td onClick={e => e.stopPropagation()} style={{ width: 96, minWidth: 96, whiteSpace: 'normal' }}>
                             {(isLocked || hasPendingNew) ? (
                               /* Shares locked in a pending bracket/new order — cashout blocked */
                               <div style={{ fontSize: 10, color: 'var(--dim)', lineHeight: 1.4 }}>
@@ -892,18 +893,16 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                                     : 'All shares are reserved in a pending stop-loss or take-profit order. The cashout will be available once those orders settle or are cancelled.'
                                 }>
                                   {hasPendingNew
-                                    ? '🔒 Order pending…'
-                                    : pendingExit ? '⏳ Exit queued' : '🔒 Shares locked'}
+                                    ? '🔒 Pending…'
+                                    : pendingExit ? '⏳ Exit queued' : '🔒 Locked'}
                                 </span>
                               </div>
                             ) : closeConfirm === ticker ? (
                               <div style={{ fontSize: 10, lineHeight: 1.4 }}>
-                                <div style={{ color: 'var(--text)', marginBottom: 4, fontWeight: 600 }}>
+                                <div style={{ color: 'var(--text)', marginBottom: 4, fontWeight: 600 }}
+                                     title="Closes at market price. This cannot be undone.">
                                   {isLong ? 'Sell' : 'Buy back'}{' '}
-                                  {qtyAvail < qty
-                                    ? <>{qtyAvail} of {qty} {isLong ? 'shares' : 'short shares'}</>
-                                    : <>all {qty} {isLong ? 'shares' : 'short shares'}</>
-                                  }{' '}of {ticker} at market? This cannot be undone.
+                                  {qtyAvail < qty ? <>{qtyAvail} of {qty}</> : <>all {qty}</>} at market?
                                   {qtyAvail < qty && (
                                     <div style={{ color: 'var(--dim)', fontWeight: 400, marginTop: 2 }}>
                                       {qty - qtyAvail} share{qty - qtyAvail !== 1 ? 's' : ''} are locked in a pending bracket order.
@@ -943,12 +942,13 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                               <div>
                                 <button
                                   onClick={() => setCloseConfirm(ticker)}
-                                  style={{ fontSize: 10, padding: '2px 7px', borderRadius: 4, cursor: 'pointer',
+                                  title="Instant cashout — close this position at market"
+                                  style={{ fontSize: 10, padding: '2px 7px', borderRadius: 4, cursor: 'pointer', whiteSpace: 'nowrap',
                                     background: 'color-mix(in srgb, var(--red) 12%, transparent)',
                                     border: '1px solid color-mix(in srgb, var(--red) 30%, transparent)',
                                     color: 'var(--red)', fontWeight: 600 }}
                                 >
-                                  💸 Instant Cashout
+                                  💸 Cashout
                                 </button>
                                 {closeError[ticker] && (
                                   <div style={{ marginTop: 4, color: 'var(--red)', fontSize: 10 }}>{closeError[ticker]}</div>
@@ -964,7 +964,7 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                         {isExpPos && matchOrd && (
                           <tr style={{ background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
                             <td colSpan={13} style={{ padding: '10px 18px' }}>
-                              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+                              <div style={{ position: 'sticky', left: 0, width: 'fit-content', marginBottom: 6 }}>
                                 <ExplorerButton ticker={ticker} onOpenExplorer={onOpenExplorer} />
                               </div>
                               <div style={{ display: 'flex', gap: 0, flexWrap: 'wrap', fontSize: 11 }}>
@@ -1060,10 +1060,11 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
             ❓ What do these statuses mean?
           </summary>
           <div style={{ marginTop: 8, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
-            <table style={{ fontSize: 11, borderCollapse: 'collapse', width: '100%', tableLayout: 'fixed', minWidth: 460 }}>
+            <table style={{ fontSize: 11, borderCollapse: 'collapse', width: '100%', tableLayout: 'fixed', minWidth: 500 }}>
               <colgroup>
-                <col style={{ width: 130 }} />
-                <col style={{ width: 130 }} />
+                {/* Wide enough for the uppercase, letter-spaced nowrap headers. */}
+                <col style={{ width: 140 }} />
+                <col style={{ width: 180 }} />
                 <col />  {/* description — takes remaining width and wraps */}
               </colgroup>
               <thead>
@@ -1103,7 +1104,7 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
           ? <div style={{ fontSize: 12, color: 'var(--dim)' }}>No active orders.</div>
           : (
             <div className="table-wrap">
-              <table>
+              <table className="table-compact">
                 <thead>
                   <tr>
                     <th></th>
@@ -1220,7 +1221,7 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                       {isExpanded && (
                         <tr style={{ background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
                           <td colSpan={14} style={{ padding: '10px 18px' }}>
-                            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+                            <div style={{ position: 'sticky', left: 0, width: 'fit-content', marginBottom: 6 }}>
                               <ExplorerButton ticker={o.ticker} onOpenExplorer={onOpenExplorer} />
                             </div>
                             {/* Tight 3-column layout — each column is a definition grid (label · value side-by-side) */}
@@ -1319,7 +1320,7 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
           ? <div style={{ fontSize: 12, color: 'var(--dim)' }}>No closed orders yet.</div>
           : (
             <div className="table-wrap">
-              <table>
+              <table className="table-compact">
                 <thead>
                   <tr>
                     <th></th>
@@ -1420,7 +1421,7 @@ export default function PaperTradingPage({ initialExpandedOrder = null, onExpand
                         {isExpanded && (
                           <tr style={{ background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
                             <td colSpan={13} style={{ padding: '10px 18px' }}>
-                              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+                              <div style={{ position: 'sticky', left: 0, width: 'fit-content', marginBottom: 6 }}>
                                 <ExplorerButton ticker={o.ticker} onOpenExplorer={onOpenExplorer} />
                               </div>
                               <div style={{ display: 'flex', gap: 0, flexWrap: 'wrap', fontSize: 11 }}>

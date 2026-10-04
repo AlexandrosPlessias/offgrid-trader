@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { API, getAuthHeaders } from '../../utils/api'
 
+const WATCHLIST_HEIGHT = 480 // ≈ 15 rows + header
+
 export default function WatchlistCard({ wl, onWatchlistChange, signals }) {
   const [newTicker,  setNewTicker]  = useState('')
   const [adding,     setAdding]     = useState(false)
@@ -99,9 +101,10 @@ export default function WatchlistCard({ wl, onWatchlistChange, signals }) {
 
       {/* Live market data table */}
       {hasLiveData ? (
-        <div style={{ overflowX: 'auto' }}>
+        // Fixed height (~15 rows) so the card never grows or shifts the page; extra rows scroll.
+        <div style={{ height: WATCHLIST_HEIGHT, overflowY: 'auto', overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-            <thead>
+            <thead style={{ position: 'sticky', top: 0, zIndex: 1, background: 'color-mix(in srgb, var(--bg), white 6%)' }}>
               <tr style={{ borderBottom: '1px solid var(--border)' }}>
                 <th style={{ textAlign: 'left',  padding: '4px 8px', color: 'var(--dim)', fontWeight: 500, fontSize: 11 }}>Ticker</th>
                 <th style={{ textAlign: 'right', padding: '4px 8px', color: 'var(--dim)', fontWeight: 500, fontSize: 11 }}>Price</th>
@@ -150,7 +153,7 @@ export default function WatchlistCard({ wl, onWatchlistChange, signals }) {
         </div>
       ) : (
         /* Fallback: plain chips when Alpaca not configured */
-        <div className="chip-row">
+        <div className="chip-row" style={{ height: WATCHLIST_HEIGHT, overflowY: 'auto', alignContent: 'flex-start' }}>
           {tickers.map((t) => (
             <span key={t} className="chip">
               {t}

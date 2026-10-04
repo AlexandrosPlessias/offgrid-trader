@@ -1030,6 +1030,47 @@ def get_analysis_history(
     return results
 
 
+def get_latest_analysis_confidence(
+    tickers: list[str], db_path: str | None = None
+) -> dict[str, dict[str, Any]]:
+    """Best setup from each ticker's most recent analysis, for tickers that have one.
+
+    Returns ``{ticker: {confidence, type, analyzed_at}}``. ``confidence``/``type``
+    are None when the analysis found no setup at all.
+    """
+    wanted = sorted({t.upper() for t in tickers if t})
+    if not wanted:
+        return {}
+    marks = ",".join("?" * len(wanted))
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT a.ticker, a.analysis_json, a.opportunities_json, a.created_at "  # noqa: S608
+            "FROM analysis_log a JOIN ("
+            f"  SELECT MAX(id) AS id FROM analysis_log WHERE ticker IN ({marks}) GROUP BY ticker"
+            ") latest ON latest.id = a.id",
+            wanted,
+        ).fetchall()
+
+    out: dict[str, dict[str, Any]] = {}
+    for ticker, analysis_raw, opps_raw, created_at in rows:
+        best: dict[str, Any] = {}
+        try:
+            opps = json.loads(opps_raw) if opps_raw else []
+            best = max(opps, key=lambda o: o.get("confidence") or 0, default={}) or {}
+            if not best:
+                ai_opp = (json.loads(analysis_raw) if analysis_raw else {}).get("opportunity")
+                if ai_opp and (ai_opp.get("confidence") or 0) > 0:
+                    best = ai_opp
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            best = {}
+        out[ticker] = {
+            "confidence": best.get("confidence"),
+            "type": best.get("type"),
+            "analyzed_at": created_at,
+        }
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Key-value app settings (runtime toggles persisted across restarts)
 # --------------------------------------------------------------------------- #
