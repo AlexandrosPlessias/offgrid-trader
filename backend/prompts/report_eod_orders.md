@@ -29,7 +29,10 @@ Missed-opportunity analysis (mandatory if data present):
 If `blocked_events.position_cap_hits > 0`: state exactly how many orders were blocked by the
 position cap and recommend a specific new value for PAPER_MAX_POSITIONS.
 If `blocked_events.insufficient_funds_hits > 0`: note that buying power was exhausted.
-If `blocked_events.untradable_dropped > 0`: note how many signals were filtered as untradable.
+If `blocked_events.untradable_dropped > 0`: note how many distinct tickers
+(`untradable_tickers`) were filtered as untradable. These signals could never become an order,
+so no setting recovers them — never propose a SIGNAL_DROP_MODE change for them.
+Every proposed value must lie within the `allowed` range shown next to that setting.
 
 Return an analyst note as compact JSON with EXACTLY these keys:
 {

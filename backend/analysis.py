@@ -390,11 +390,10 @@ def call_ollama(
     }
 
     _log.info(
-        "ollama ▶ ticker=%s model=%s prompt_chars=%d\n%s",
+        "ollama ▶ ticker=%s model=%s prompt_chars=%d",
         ticker or "?",
         _model,
         len(user_prompt),
-        user_prompt,
     )
 
     with _tracer.start_as_current_span("llm.chat") as span:

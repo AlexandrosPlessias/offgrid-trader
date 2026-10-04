@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -15,6 +16,7 @@ from backend.database import (
     get_discovery_history,
     get_discovery_run_candidates,
     get_effective_watchlist,
+    get_latest_analysis_confidence,
     get_latest_discovery,
     get_setting,
     save_discovery_candidates,
@@ -22,7 +24,7 @@ from backend.database import (
     set_setting,
     update_discovery_run,
 )
-from backend.routes._models import _sse_frame
+from backend.routes._models import _log_safe, _sse_frame
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -198,6 +200,119 @@ def discovery_run_candidates(run_id: int) -> dict[str, Any]:
     return {"run_id": run_id, "candidates": candidates}
 
 
+# --------------------------------------------------------------------------- #
+# Explorer confidence for trending candidates
+# --------------------------------------------------------------------------- #
+# Scan state per discovery run — {run_id: {"pending", "failed", "tasks"}} — so a task
+# from an older run can never change the status reported for a newer one.
+_confscan_runs: dict[int, dict[str, set]] = {}
+_CONFSCAN_KEEP_RUNS = 5
+_CONFSCAN_KEY = "discovery_confidence_scanned"  # {"run_id": int, "tickers": [...]}
+
+
+def _scan_state(run_id: int) -> dict[str, set]:
+    """This run's scan state, pruning finished older runs so the map stays small."""
+    state = _confscan_runs.setdefault(run_id, {"pending": set(), "failed": set(), "tasks": set()})
+    idle = sorted(r for r, s in _confscan_runs.items() if r != run_id and not s["pending"])
+    for old in idle[: max(0, len(_confscan_runs) - _CONFSCAN_KEEP_RUNS)]:
+        del _confscan_runs[old]
+    return state
+
+
+def _attempted(run_id: int) -> set[str]:
+    try:
+        rec = json.loads(get_setting(_CONFSCAN_KEY, "") or "{}")
+    except ValueError:
+        rec = {}
+    return set(rec.get("tickers") or []) if rec.get("run_id") == run_id else set()
+
+
+async def _run_confidence_scans(run_id: int, tickers: list[str], state: dict[str, set]) -> None:
+    """Analysis-only Explorer scans: fetch, analyse, detect, save the analysis.
+
+    Deliberately leaves out signal persistence, both trade skills and alerts, so a
+    trending ticker you never chose to watch can't place an order or notify you.
+    """
+    from backend.agent import TickerAgent
+    from backend.scheduler import _memory
+    from backend.skills.ai_analysis import AIAnalysisSkill
+    from backend.skills.fetch_data import FetchDataSkill
+    from backend.skills.opportunity_detect import OpportunityDetectSkill
+    from backend.skills.persist import SaveAnalysisSkill
+
+    skills = [FetchDataSkill, AIAnalysisSkill, OpportunityDetectSkill, SaveAnalysisSkill]
+    for ticker in tickers:
+        try:
+            result = await TickerAgent(
+                ticker, memory=_memory, skill_classes=skills, send_alerts=False
+            ).run()
+            if not result.context.analysis:
+                state["failed"].add(ticker)
+        except Exception:
+            _log.exception("discovery: confidence scan failed for %s", _log_safe(str(ticker)))
+            state["failed"].add(ticker)
+        finally:
+            state["pending"].discard(ticker)
+    _log.info("discovery: confidence scans for run %s finished", _log_safe(str(run_id)))
+
+
+def _run_candidates(run_id: int) -> list[dict[str, Any]]:
+    candidates = get_discovery_run_candidates(run_id)
+    if not candidates:
+        raise HTTPException(status_code=404, detail="Run not found or has no candidates")
+    return candidates
+
+
+@router.post("/discovery/runs/{run_id}/confidence-scan")
+async def start_confidence_scan(run_id: int) -> dict[str, Any]:
+    """Scan, once per run, every candidate above the min score that has no analysis yet."""
+    from backend.scheduler import is_market_open
+
+    candidates = _run_candidates(run_id)
+    if not is_market_open():
+        return {"started": [], "skipped": "market_closed"}
+
+    from backend.config import get_settings
+
+    min_score = int(get_setting("discovery_min_score", "") or get_settings().discovery.min_score)
+    qualifying = [c["ticker"] for c in candidates if (c.get("score") or 0) >= min_score]
+    analysed = get_latest_analysis_confidence(qualifying)
+    attempted = _attempted(run_id)
+    todo = [t for t in qualifying if t not in analysed and t not in attempted]
+    if not todo:
+        return {"started": [], "skipped": None}
+
+    set_setting(
+        _CONFSCAN_KEY, json.dumps({"run_id": run_id, "tickers": sorted(attempted | set(todo))})
+    )
+    state = _scan_state(run_id)
+    state["pending"].update(todo)
+    # Hold a reference until the task finishes so it isn't garbage-collected mid-run.
+    task = asyncio.create_task(_run_confidence_scans(run_id, todo, state))
+    state["tasks"].add(task)
+    task.add_done_callback(state["tasks"].discard)
+    return {"started": todo, "skipped": None}
+
+
+@router.get("/discovery/runs/{run_id}/confidence")
+def candidate_confidence(run_id: int) -> dict[str, Any]:
+    """Latest Explorer confidence per candidate, plus each ticker's scan status."""
+    tickers = [c["ticker"] for c in _run_candidates(run_id)]
+    latest = get_latest_analysis_confidence(tickers)
+    state = _confscan_runs.get(run_id) or {"pending": set(), "failed": set()}
+    out: dict[str, dict[str, Any]] = {}
+    for t in tickers:
+        if t in state["pending"]:
+            out[t] = {"status": "scanning"}
+        elif t in latest:
+            out[t] = {"status": "done", **latest[t]}
+        elif t in state["failed"]:
+            out[t] = {"status": "failed"}
+        else:
+            out[t] = {"status": "none"}
+    return {"run_id": run_id, "confidence": out}
+
+
 @router.post("/discovery/refresh")
 async def discovery_refresh() -> StreamingResponse:
     """Run a discovery cycle and stream progress as Server-Sent Events.
@@ -275,10 +390,10 @@ async def discovery_refresh() -> StreamingResponse:
                     await asyncio.to_thread(update_discovery_run, run_id, "error", 0, str(exc))
                 except Exception:  # noqa: S110
                     pass
-            # Truncate to 300 chars so internal paths/stack details are not
-            # forwarded verbatim to the client (CodeQL py/stack-trace-exposure).
-            _err_msg = str(exc)[:300].replace("\r", "").replace("\n", " ")
-            yield _sse_frame({"type": "error", "message": _err_msg})
+            # Details stay in the server log; the client gets a fixed message.
+            yield _sse_frame(
+                {"type": "error", "message": "Discovery run failed — see server logs."}
+            )
         finally:
             # Catch asyncio.CancelledError (client disconnect / ASGI teardown)
             # which bypasses the except block but still runs finally.  Only

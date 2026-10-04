@@ -454,9 +454,16 @@ the feed. The behaviour is set by **Signal drop rule**:
 
 | Mode | Meaning |
 |---|---|
-| `untradable` (default) | Drop only permanently-unactionable signals. Transient blocks (no funds / cap) keep the signal and send a "top up your wallet" notification. |
-| `strict` | Also drop when transiently blocked — no "top up" notice. |
-| `never` | Never drop; keep every signal for the audit trail. |
+| `untradable` (default) | Drop only permanently-unactionable signals — those that can neither place a bracket nor a fractional buy. Each drop is logged as a `Dropped … signal` scan event. |
+| `strict` | **Currently identical to `untradable`.** Reserved for a future wider drop set; selecting it changes nothing today. |
+| `never` | Never drop; keep every signal (annotated with `can_bracket` / `can_frac`) for the audit trail. |
+
+Transient blocks — out of funds, budget cap, position cap — never drop a signal in any
+mode. They are handled later by the trade skills, which skip the order, record an
+`order_blocked` event and send a "top up / cap reached" notification.
+
+If the Alpaca asset lookup fails, the signal is kept (treated as bracket-able) so a flaky
+API call never discards a valid signal; any real rejection happens at order placement.
 
 ### Settings (all also settable via env vars)
 
@@ -464,7 +471,7 @@ the feed. The behaviour is set by **Signal drop rule**:
 |---|---|---|---|
 | Paper auto-trade | `PAPER_TRADING_ENABLED` | `true` | Master switch for auto bracket orders |
 | Frac auto-trade | `FRAC_TRADING_ENABLED` | `false` | Master switch for auto fractional buys |
-| Signal / bracket floor | `CONFIDENCE_FLOOR` | `75` | Min confidence to create a signal / bracket |
+| Signal confidence floor (all modes) | `CONFIDENCE_FLOOR` | `75` | Min confidence for any setup to become a signal; gates alerts, bracket and fractional orders. The bracket-only and fractional floors can only add a stricter check on top. |
 | Fractional floor | `FRAC_MIN_CONFIDENCE` | `85` | Stricter floor for fractional buys |
 | Bracket-only floor | `PAPER_TRADE_MIN_CONFIDENCE` | `0` | Optional; 0 = use the signal floor |
 | Max bracket positions | `PAPER_MAX_POSITIONS` | `5` | Hold new bracket orders past this many open positions |

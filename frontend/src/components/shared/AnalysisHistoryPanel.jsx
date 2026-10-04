@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { API, getAuthHeaders } from '../../utils/api'
 import { fmtTime } from '../../utils/fmt'
+import { historyRowToResult } from '../../utils/explorer'
 
 export default function AnalysisHistoryPanel({ onOpenInExplorer, expanded: extExpanded, onToggleExpanded }) {
   const [localExpanded, setLocalExpanded] = useState(false)
@@ -22,21 +23,7 @@ export default function AnalysisHistoryPanel({ onOpenInExplorer, expanded: extEx
   // Load data the first time the panel is opened
   useEffect(() => { if (expanded && history === null) load() }, [expanded, history, load])
 
-  const openRow = (row) => {
-    // row.opportunities / row.actionable are null for entries recorded before
-    // the opportunities columns were added; the stepper shows a friendly
-    // "not stored" message in that case rather than "no rule checks fired".
-    onOpenInExplorer({
-      ticker:        row.ticker,
-      analysis:      row.analysis_json,
-      market_data:   row.market_snapshot,
-      opportunities: row.opportunities,    // null | Opportunity[]
-      actionable:    row.actionable ?? [], // null → []
-      errors:        [],
-      _from_history: true,
-      _history_at:   row.created_at,
-    })
-  }
+  const openRow = (row) => onOpenInExplorer(historyRowToResult(row))
 
   const handleDelete = async (id) => {
     if (!confirm('Delete this analysis entry?')) return

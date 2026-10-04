@@ -1,4 +1,4 @@
-# Reports — 4 focused types with missed-opportunity diagnostics
+# Reports — focused types, on-demand ranges, and report comparison
 
 MarketSage generates **4 focused report types** — one EoD and one weekly each for
 fractional trades and bracket orders — that combine deterministic account figures with
@@ -19,6 +19,10 @@ tab (split into Frac / Orders tabs), and delivered to your notification channels
 | `weekly_orders` | `GET /reports/weekly/orders` | 7-day bracket history + cross-week patterns |
 | `eod_frac` | `GET /reports/eod/frac` | Today's fractional trades + budget cap hits |
 | `weekly_frac` | `GET /reports/weekly/frac` | 7-day frac history + cross-week patterns |
+| `monthly_*` · `quarterly_*` · `yearly_*` | `GET /reports/range?period=…&mode=…` | Last 30 / 90 / 365 days, on demand |
+| `custom_*` | `GET /reports/range?start=…&end=…&mode=…` | Any explicit date range (up to 3 years), on demand |
+
+`*` is `orders` or `frac`, so e.g. `quarterly_frac` or `custom_orders`.
 
 Legacy types (`eod`, `daily`, `weekly`) remain in the DB and appear in the Orders tab.
 
@@ -90,16 +94,121 @@ digest with `⚠️ AI analysis unavailable`, stored with `llm = false`.
 
 Open **📑 Reports** from the top nav. The page has two tabs:
 
-- **📋 Orders** — `eod_orders`, `weekly_orders`, and legacy reports.
-- **🔢 Fractional** — `eod_frac`, `weekly_frac`.
+- **📋 Orders** — `eod_orders`, `weekly_orders`, the `*_orders` range reports, and legacy reports.
+- **🔢 Fractional** — `eod_frac`, `weekly_frac`, and the `*_frac` range reports.
 
 Each tab has:
 - **Generate buttons** — `⟳ EoD <mode>` and `⟳ Weekly <mode>` (async, with loading
   state); jump to the fresh report on completion.
+- **On-demand range** — Monthly / Quarterly / Yearly / Custom presets with date pickers
+  and an optional *Also send to ntfy / Telegram* toggle (see below).
 - **History list** — newest first, with a colour-coded type chip, date, headline, ⚠️
-  marker if AI was unavailable, and a 🗑 delete button.
+  marker if AI was unavailable, a **Compare** checkbox, and a 🗑 delete button.
 - **Viewer** — Full report / Notification toggle, 🧠 model chip, yellow ⚠️ banner if
-  cap hits occurred, **Copy** button (copies full text to clipboard).
+  cap hits occurred, **Copy** button (copies full text to clipboard). Replaced by the
+  comparison panel while two reports are ticked.
+
+---
+
+## On-demand range reports
+
+Besides the scheduled EoD and weekly reports, you can run a report over any window:
+
+- **Monthly / Quarterly / Yearly** — the last 30 / 90 / 365 days up to today.
+- **Custom** — any inclusive start and end date. The end can't be in the future and the
+  span is capped at 3 years.
+
+Range reports are **on demand only** — no cron runs them, because the Cloudflare free
+plan's five cron triggers are already in use. They also **don't notify** unless you tick
+*Also send to ntfy / Telegram* (`notify=true` on the API).
+
+Per-bucket breakdowns (`signals_by_day`, `bracket_by_day` / `frac_by_day`) adapt to the
+window so a yearly report doesn't produce 365 points:
+
+| Window | Bucket (`bucket_granularity`) |
+|---|---|
+| up to 31 days | day |
+| up to 1 year | week (keyed by its Monday) |
+| longer | month |
+
+All range periods share two prompts — `report_range_orders.md` and
+`report_range_frac.md` — and one model override, `llm_model_range`.
+
+### What every report now stores
+
+Each report's `context_json` also persists, so later comparisons are honest:
+
+| Key | Meaning |
+|---|---|
+| `window` | `{start, end, days}` of the report's window |
+| `window_economics` | P&L, win rate, trade counts **inside the window** (the `bracket_economics` / `frac_economics` blocks are all-time) |
+| `tuning` | the tuning knobs in force when the report was generated, scoped to its flow |
+| `mode` | `orders` or `frac` |
+
+Report data is queried by date range in SQL, so long windows are never truncated.
+Windows are inclusive and exactly as long as their name: EoD is today only, weekly the last
+7 calendar days, monthly 30, quarterly 90, yearly 365, so consecutive scheduled reports
+never share a day.
+
+Both bracket trades and fractional positions are counted in the window they **closed** in,
+so consecutive windows never both count one trade. Bracket orders record `closed_at` when
+their P&L is realised; older rows without it fall back to the day they were created.
+
+---
+
+## Comparing two reports
+
+![Reports — two weekly-length order reports compared](../screenshots/25-reports-compare.png)
+
+Tick **Compare** on two reports of the **same type** (for example two `weekly_orders`, or
+two `custom_frac`) and the viewer becomes a comparison panel. Report **A** is always the
+earlier one, and every delta is **B − A**. Reports of a different type are greyed out once
+you've picked the first.
+
+### Comparability grade
+
+Before anything is shown, the backend grades how fair the comparison is. The LLM review
+can never upgrade this grade.
+
+| Grade | When |
+|---|---|
+| **Fully comparable** | Consecutive windows of equal length, ≥ 5 closed trades each, tuning snapshots on both |
+| **Partially comparable** | Too few closed trades · windows share even one day or aren't consecutive · a tuning snapshot is missing · signal volume differs by more than half |
+| **Not comparable** | Window lengths differ by more than 20% · a report predates window-scoped metrics |
+
+### Layer 1 — deterministic diff (no LLM)
+
+- **Headline tiles** — P&L, win rate and closed trades for B, with the change from A.
+- **What moved** — one bar per metric, % change, **right/teal = better, left/rose =
+  worse**. Direction depends on whether higher is better: fewer losses or fewer blocked
+  trades point right. Metrics with no good/bad direction (signals, open positions,
+  notional) and metrics where A was zero stay in the table only.
+- **Per-bucket overlay** — for multi-day reports, A (blue) and B (amber) P&L and signal
+  counts drawn over the same bucket index (Day 1, Day 2, …) so the periods line up.
+- **All metrics** — A, B, Δ and %Δ for every metric.
+- **Configuration changes** — the tuning knobs that differed between the two reports.
+
+Reports generated before this release have no tuning snapshot or window metrics, so their
+comparisons are graded down and say so.
+
+### Layer 2 — trading-master review (on demand)
+
+**🧠 Get trading-master review** sends both reports' full snapshots, the Layer 1 diff and
+the comparability grade to the LLM. The review returns:
+
+- a verdict — improved / regressed / mixed / inconclusive — with a confidence level;
+- **what's good**, and **what's bad** with a cause for each regression (a specific config
+  change, or an explicit "no configuration change explains this");
+- **what to improve** — setting, current → proposed value, rationale, expected effect and
+  confidence;
+- what to watch in the next report.
+
+The prompt forbids causal claims from small samples or without tuning snapshots. Suggestions
+are limited to the report's own flow: a frac comparison never suggests `PAPER_*` settings,
+and anything out of scope is removed before it reaches you. A "Not comparable" pair always
+comes back *inconclusive*. The review uses its own model override, `llm_model_report_compare`,
+so you can point it at a stronger model. Tokens are tracked as **Report Compare** in
+Settings → AI Usage.
 
 ---
 
@@ -113,6 +222,9 @@ Analyst prompts live as editable files — change tone or emphasis without touch
 | `backend/prompts/report_weekly_orders.md` | Weekly bracket report (cross-week analysis) |
 | `backend/prompts/report_eod_frac.md` | EoD fractional report |
 | `backend/prompts/report_weekly_frac.md` | Weekly fractional report (cross-week analysis) |
+| `backend/prompts/report_range_orders.md` | Monthly / quarterly / yearly / custom bracket report |
+| `backend/prompts/report_range_frac.md` | Monthly / quarterly / yearly / custom fractional report |
+| `backend/prompts/report_compare_system.md` + `report_compare_user.md` | Trading-master comparison review (JSON validated by `schemas/report_compare.schema.json`) |
 | `backend/prompts/report_eod.md` | Unused — unreachable fallback default (see note) |
 | `backend/prompts/report_weekly.md` | Unused — unreachable fallback default (see note) |
 
@@ -139,6 +251,21 @@ When a trade is wanted but blocked, the system saves an `order_blocked` event:
 These events are visible in the [Activity feed](observability.md#activity-feed-in-app-event-log)
 and counted into every report's `blocked_events` context.
 
+Untradable drops are logged as `Dropped … signal` scan warnings rather than `order_blocked`
+events, and they are counted two ways:
+
+- `untradable_dropped` — every drop. The same ticker is re-detected on each scan, so this
+  number grows quickly (one non-shortable ticker can be dropped 40+ times a week).
+- `untradable_tickers` — distinct tickers dropped. This is the size of the real problem.
+
+No setting turns an untradable signal into a trade, so the report prompts forbid tuning
+suggestions for these drops (in particular any `SIGNAL_DROP_MODE` change). The useful
+response is removing the tickers from the watchlist. Every prompt also shows each setting's
+allowed values next to its current value, and the comparator review rejects any value the
+Settings API would refuse — an impossible word such as `SIGNAL_DROP_MODE=none` or a number
+outside the setting's range such as `RSI_OVERSOLD=200`. If report B has no tuning snapshot,
+the review shows no tuning suggestions at all.
+
 ---
 
 ## API
@@ -149,6 +276,9 @@ and counted into every report's `blocked_events` context.
 | `GET /reports/weekly/orders` | Generate + dispatch the 7-day bracket orders report |
 | `GET /reports/eod/frac` | Generate + dispatch today's fractional report |
 | `GET /reports/weekly/frac` | Generate + dispatch the 7-day fractional report |
+| `GET /reports/range?mode=&period=` / `?mode=&start=&end=` | Generate an on-demand range report (`notify=true` to also dispatch) |
+| `GET /reports/compare?a=&b=` | Deterministic diff + comparability grade for two same-type reports |
+| `POST /reports/compare/review` | Trading-master LLM review; body `{"a": id, "b": id}` |
 | `GET /reports?limit=&type=` | List persisted reports; `type` filters by `report_type` |
 | `DELETE /reports/{id}` | Delete a persisted report |
 

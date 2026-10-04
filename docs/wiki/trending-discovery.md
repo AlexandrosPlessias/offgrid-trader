@@ -71,8 +71,22 @@ Settings are available in two places:
 | `discovery_interval_minutes` | 60 | Minutes between scheduled runs |
 | `discovery_autoscan_enabled` | false | Run full agent pipeline on top-N candidates |
 | `discovery_autoscan_top_n` | 3 | Number of candidates to auto-scan |
+| `discovery_autoadd_enabled` | false | Add the strongest tradable candidates to the watchlist after each run |
+| `discovery_autoadd_top_n` | 5 | Max candidates auto-added per run (1–25) |
 
 All settings override env-var defaults and take effect without a restart.
+
+**Confidence column.** Next to each candidate's Score, the table shows the best setup from
+its latest Explorer analysis (▲ long / ▼ short and the confidence %). Candidates at or above
+`discovery_min_score` that have never been analysed get one analysis-only scan per discovery
+run, during market hours. That scan saves the analysis but never saves signals, places orders
+or sends alerts. `—` means no analysis is available (market closed, not yet scanned, or the
+scan failed); `no setup` means the analysis found nothing.
+
+**Auto-add respects manual removals.** A ticker you removed from the watchlist is never
+re-added by auto-add, even if it keeps trending. Adding it back yourself (single or bulk add)
+clears the removal. This matters for momentum small caps that the scanner keeps wanting to
+short but Alpaca won't let you short: remove them once and they stay out.
 
 ---
 

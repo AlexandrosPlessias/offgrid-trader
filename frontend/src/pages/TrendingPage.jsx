@@ -1,6 +1,26 @@
 import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import { ResponsiveContainer, BarChart, Bar, Cell, XAxis, YAxis, Tooltip } from 'recharts'
 import { API, getAuthHeaders, placeFracOrder } from '../utils/api'
+import TickerLink from '../components/shared/TickerLink'
+
+function ConfidenceCell({ info }) {
+  const dim = { color: 'var(--text-dim)', fontSize: 11 }
+  if (!info || info.status === 'none' || info.status === 'failed') {
+    const why = info?.status === 'failed'
+      ? 'The Explorer analysis failed for this ticker'
+      : 'No analysis yet — scans run during market hours for candidates above the min score'
+    return <span style={dim} title={why}>—</span>
+  }
+  if (info.status === 'scanning') return <span style={dim}>scanning…</span>
+  const when = info.analyzed_at ? `Analysed ${new Date(info.analyzed_at).toLocaleString()}` : ''
+  if (info.confidence == null) return <span style={dim} title={when}>no setup</span>
+  const isLong = info.type === 'long'
+  return (
+    <span title={when} style={{ fontWeight: 700, color: isLong ? 'var(--green)' : 'var(--red)' }}>
+      {isLong ? '▲' : '▼'} {Math.round(info.confidence)}%
+    </span>
+  )
+}
 
 export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplorer }) {
   const [candidates, setCandidates]   = useState([])
@@ -86,6 +106,38 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
   }, [])
 
   useEffect(() => { load(); loadHistory() }, [load, loadHistory])
+
+  // Explorer confidence per candidate. The scan request goes out once per discovery
+  // run (the backend also dedupes per run); then poll only while scans are in flight.
+  const [confidence, setConfidence] = useState({}) // ticker → {status, confidence, type, analyzed_at}
+  const scanRequested = useRef(new Set())
+  const runId = runMeta?.id
+  useEffect(() => {
+    if (!runId) return
+    let cancelled = false
+    let timer = null
+    let polls = 0
+    const poll = async () => {
+      try {
+        const r = await fetch(`${API}/discovery/runs/${runId}/confidence`, { headers: getAuthHeaders() })
+        if (!r.ok || cancelled) return
+        const map = (await r.json()).confidence || {}
+        setConfidence(map)
+        const scanning = Object.values(map).some(v => v.status === 'scanning')
+        if (scanning && ++polls < 60) timer = setTimeout(poll, 5000)
+      } catch { /* non-critical — the column just shows — */ }
+    }
+    ;(async () => {
+      if (!scanRequested.current.has(runId)) {
+        scanRequested.current.add(runId)
+        await fetch(`${API}/discovery/runs/${runId}/confidence-scan`, {
+          method: 'POST', headers: getAuthHeaders(),
+        }).catch(() => {})
+      }
+      if (!cancelled) poll()
+    })()
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [runId])
 
   const toggleRunExpand = useCallback(async (runId) => {
     if (expandedRunId === runId) { setExpandedRunId(null); return }
@@ -234,7 +286,7 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
 
   return (
     <div className="page-content" style={{ padding: '24px 32px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>🔥 Trending Tickers</h2>
         <button
           className="btn-primary btn-sm"
@@ -253,6 +305,13 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
           ⚙ Settings
         </button>
       </div>
+      <p style={{ margin: '0 0 20px', fontSize: 13, lineHeight: 1.55, color: 'var(--text-dim)', maxWidth: 900 }}>
+        Discovery scans market screeners for tickers you are not watching yet and ranks them 0–100 on
+        momentum, volume, trend and RSI/MACD — no AI tokens spent. <strong>Score</strong> says how strongly a
+        ticker is moving; <strong>Confidence</strong> is the Explorer's verdict from its latest analysis — the best
+        setup found (▲ long / ▼ short) and how sure it is. Candidates above your minimum score are analysed once
+        per discovery run during market hours; — means no analysis is available yet.
+      </p>
 
       {/* Live step monitor — fixed-height box scrolls internally so the page stays put */}
       {progress.length > 0 && (
@@ -379,6 +438,7 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
               <col style={{ width: '9%'  }} />{/* Change  */}
               <col style={{ width: '9%'  }} />{/* Volume  */}
               <col style={{ width: '11%' }} />{/* Score   */}
+              <col style={{ width: '10%' }} />{/* Confidence */}
               <col />{/* Reasons — takes remaining space */}
               <col style={{ width: '9%'  }} />{/* Source  */}
               <col style={{ width: '6%'  }} />{/* Watch   */}
@@ -391,6 +451,10 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                 <th style={{ textAlign: 'right',  padding: '8px 10px', whiteSpace: 'nowrap' }}>Change</th>
                 <th style={{ textAlign: 'right',  padding: '8px 10px', whiteSpace: 'nowrap' }}>Volume</th>
                 <th style={{ textAlign: 'right',  padding: '8px 10px', whiteSpace: 'nowrap' }}>Score</th>
+                <th style={{ textAlign: 'right',  padding: '8px 10px', whiteSpace: 'nowrap' }}
+                    title="Best setup from the latest Explorer analysis: ▲ long / ▼ short and how sure it is. — = no analysis could run.">
+                  Confidence
+                </th>
                 <th style={{ textAlign: 'left',   padding: '8px 10px' }}>Reasons</th>
                 <th style={{ textAlign: 'center', padding: '8px 10px', whiteSpace: 'nowrap' }}>Source</th>
                 <th style={{ textAlign: 'center', padding: '8px 10px', whiteSpace: 'nowrap' }}>Watch</th>
@@ -459,7 +523,9 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                 return (
                   <Fragment key={c.ticker}>
                     <tr style={{ borderBottom: isOpen ? 'none' : '1px solid var(--border-subtle, rgba(255,255,255,.06))' }}>
-                      <td style={{ ...cell, fontWeight: 700, whiteSpace: 'nowrap' }}>{c.ticker}</td>
+                      <td style={{ ...cell, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                        <TickerLink ticker={c.ticker} onOpenExplorer={onOpenExplorer} />
+                      </td>
                       <td style={{ ...cell, textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtPrice(c.price)}</td>
                       <td style={{ ...cell, textAlign: 'right', whiteSpace: 'nowrap', color: pctColor, fontWeight: 600 }}>{fmtPct(c.percent_change)}</td>
                       <td style={{ ...cell, textAlign: 'right', whiteSpace: 'nowrap', color: 'var(--text-dim)' }}>{fmtVol(c.volume)}</td>
@@ -477,6 +543,9 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                             <div style={{ width: `${Math.min(c.score || 0, 100)}%`, height: '100%', background: scoreColor, borderRadius: 2, transition: 'width .3s' }} />
                           </div>
                         </div>
+                      </td>
+                      <td style={{ ...cell, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        <ConfidenceCell info={confidence[c.ticker]} />
                       </td>
                       <td style={{ ...cell, fontSize: 11, color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                           title={(c.reasons || []).join(' · ') || '—'}>
@@ -631,7 +700,7 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                     {/* ── Score breakdown detail row ──────────────────────── */}
                     {isOpen && (
                       <tr style={{ borderBottom: '1px solid var(--border-subtle, rgba(255,255,255,.06))' }}>
-                        <td colSpan={9} style={{ padding: '0 10px 12px 10px', background: 'rgba(255,255,255,.02)' }}>
+                        <td colSpan={10} style={{ padding: '0 10px 12px 10px', background: 'rgba(255,255,255,.02)' }}>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 10 }}>
 
                             {/* Component bars with inline reason captions */}
@@ -809,16 +878,11 @@ export default function TrendingPage({ onViewChange, onOpenSettings, onOpenExplo
                                       return (
                                         <tr key={ci} style={{ borderBottom: '1px solid rgba(255,255,255,.04)' }}>
                                           <td style={{ padding: '4px 8px', fontWeight: 700 }}>
-                                            <button
-                                              onClick={() => onOpenExplorer
-                                                ? onOpenExplorer({ ticker: c.ticker })
-                                                : onViewChange('explorer')}
-                                              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0,
-                                                       color: 'var(--text)', fontWeight: 700, fontSize: 11, textDecoration: 'underline dotted' }}
-                                              title={`Open ${c.ticker} in Explorer`}
-                                            >
-                                              {c.ticker}
-                                            </button>
+                                            <TickerLink
+                                              ticker={c.ticker}
+                                              onOpenExplorer={onOpenExplorer}
+                                              style={{ color: 'var(--text)', fontWeight: 700, fontSize: 11 }}
+                                            />
                                           </td>
                                           <td style={{ padding: '4px 8px', textAlign: 'right', color: scoreClr, fontWeight: 600 }}>{c.score?.toFixed(0)}</td>
                                           <td style={{ padding: '4px 8px', whiteSpace: 'nowrap' }}>

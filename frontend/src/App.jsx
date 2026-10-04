@@ -157,6 +157,7 @@ export default function App() {
                   .filter(o => o.signal_id != null)
                   .map(o => [o.signal_id, o])
               )}
+              onOpenExplorer={openExplorer}
             />
           </div>
         </div>
@@ -183,6 +184,7 @@ export default function App() {
         </div>
         <div style={{ display: activeView === 'paper' ? '' : 'none' }}>
           <TradingPage
+            onOpenExplorer={openExplorer}
             initialExpandedOrder={tradingExpandOrder}
             onExpandedOrderConsumed={() => setTradingExpandOrder(null)}
           />

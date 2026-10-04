@@ -5,6 +5,7 @@ import {
 } from 'recharts'
 import { usePolling } from '../hooks/usePolling'
 import { API, getAuthHeaders } from '../utils/api'
+import ReportComparePanel from './ReportCompare'
 
 const deleteReport = async (id) => {
   const r = await fetch(`${API}/reports/${id}`, { method: 'DELETE', headers: getAuthHeaders() })
@@ -17,14 +18,24 @@ const TYPE_STYLE = {
   weekly_orders: { bg: '#2a1a3d', color: '#c98cff',  label: 'Wkly Orders' },
   eod_frac:      { bg: '#0f3538', color: '#4fd0d8',  label: 'EoD Frac' },
   weekly_frac:   { bg: '#12321a', color: '#7acc8c',  label: 'Wkly Frac' },
+  monthly_orders:   { bg: '#3a2a10', color: '#f0b45a', label: 'Month Orders' },
+  quarterly_orders: { bg: '#3a2a10', color: '#f0b45a', label: 'Qtr Orders' },
+  yearly_orders:    { bg: '#3a2a10', color: '#f0b45a', label: 'Year Orders' },
+  custom_orders:    { bg: '#2e2e2e', color: '#d0d0d0', label: 'Custom Orders' },
+  monthly_frac:     { bg: '#2c1a33', color: '#e39be8', label: 'Month Frac' },
+  quarterly_frac:   { bg: '#2c1a33', color: '#e39be8', label: 'Qtr Frac' },
+  yearly_frac:      { bg: '#2c1a33', color: '#e39be8', label: 'Year Frac' },
+  custom_frac:      { bg: '#2e2e2e', color: '#d0d0d0', label: 'Custom Frac' },
   // legacy types (kept for old records)
   eod:           { bg: '#12324d', color: '#5cc8ff',  label: 'EoD' },
   weekly:        { bg: '#2a1a3d', color: '#c98cff',  label: 'Weekly' },
   daily:         { bg: '#0f3538', color: '#4fd0d8',  label: 'Daily' },
 }
 
-const ORDERS_TYPES = new Set(['eod_orders', 'weekly_orders', 'eod', 'daily', 'weekly'])
-const FRAC_TYPES   = new Set(['eod_frac', 'weekly_frac'])
+const RANGE_PERIODS = ['monthly', 'quarterly', 'yearly', 'custom']
+const ORDERS_TYPES = new Set(['eod_orders', 'weekly_orders', 'eod', 'daily', 'weekly',
+                              ...RANGE_PERIODS.map(p => `${p}_orders`)])
+const FRAC_TYPES   = new Set(['eod_frac', 'weekly_frac', ...RANGE_PERIODS.map(p => `${p}_frac`)])
 
 const fmtDateTime = (iso) => {
   if (!iso) return ''
@@ -464,7 +475,11 @@ function ReportViewer({ report }) {
     const win = window.open('', '_blank', 'width=900,height=750')
     if (!win) return
     const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    const TYPE_LABEL = { eod_orders: 'EoD — Orders', weekly_orders: 'Weekly — Orders', eod_frac: 'EoD — Fractional', weekly_frac: 'Weekly — Fractional' }
+    const TYPE_LABEL = {
+      eod_orders: 'EoD — Orders', weekly_orders: 'Weekly — Orders', eod_frac: 'EoD — Fractional', weekly_frac: 'Weekly — Fractional',
+      monthly_orders: 'Monthly — Orders', quarterly_orders: 'Quarterly — Orders', yearly_orders: 'Yearly — Orders', custom_orders: 'Custom range — Orders',
+      monthly_frac: 'Monthly — Fractional', quarterly_frac: 'Quarterly — Fractional', yearly_frac: 'Yearly — Fractional', custom_frac: 'Custom range — Fractional',
+    }
 
     // ── Capture charts as inline SVGs ─────────────────────────────────────────
     const svgEls = chartsRef.current ? Array.from(chartsRef.current.querySelectorAll('svg')) : []
@@ -737,7 +752,8 @@ li{margin-bottom:5px;line-height:1.55;color:#334155}
   )
 }
 
-function HistoryList({ reports, selectedId, onSelect, onDelete, deletingId }) {
+function HistoryList({ reports, selectedId, onSelect, onDelete, deletingId, compareSel, onToggleCompare }) {
+  const firstType = compareSel.length ? reports.find(r => r.id === compareSel[0])?.type : null
   if (reports.length === 0) return (
     <p className="text-dim" style={{ fontSize: 13 }}>No reports yet — generate one above.</p>
   )
@@ -746,12 +762,15 @@ function HistoryList({ reports, selectedId, onSelect, onDelete, deletingId }) {
       {reports.map(r => {
         const active = r.id === selectedId
         const isDeleting = deletingId === r.id
+        const picked = compareSel.includes(r.id)
+        const typeMismatch = firstType != null && !picked && r.type !== firstType
+        const compareDisabled = !picked && (compareSel.length >= 2 || typeMismatch)
         return (
           <div
             key={r.id}
             style={{
               borderRadius: 8,
-              border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+              border: `1px solid ${picked ? '#2563eb' : active ? 'var(--accent)' : 'var(--border)'}`,
               background: active ? 'var(--bg-elev, rgba(255,255,255,.04))' : 'transparent',
             }}
           >
@@ -772,7 +791,19 @@ function HistoryList({ reports, selectedId, onSelect, onDelete, deletingId }) {
                 {r.headline || '(no headline)'}
               </span>
             </button>
-            <div style={{ padding: '0 6px 6px', display: 'flex', justifyContent: 'flex-end' }}>
+            <div style={{ padding: '0 6px 6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label
+                title={typeMismatch ? 'Only reports of the same type can be compared'
+                  : compareSel.length >= 2 && !picked ? 'Two reports already selected' : 'Select to compare'}
+                onClick={e => e.stopPropagation()}
+                style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--dim)',
+                         padding: '2px 4px', cursor: compareDisabled ? 'not-allowed' : 'pointer',
+                         opacity: compareDisabled ? 0.4 : 1 }}
+              >
+                <input type="checkbox" checked={picked} disabled={compareDisabled}
+                       onChange={() => onToggleCompare(r.id)} />
+                Compare
+              </label>
               <button
                 title="Delete report"
                 disabled={isDeleting}
@@ -796,9 +827,52 @@ function HistoryList({ reports, selectedId, onSelect, onDelete, deletingId }) {
   )
 }
 
-function TabPane({ reports, modeTypes, trigger, busyKey, triggerErr, selectedId, setSelectedId, deletingId, onDelete }) {
+const RANGE_PRESETS = [['monthly', 'Monthly'], ['quarterly', 'Quarterly'], ['yearly', 'Yearly'], ['custom', 'Custom']]
+
+function RangeReportControl({ mode, runRange, busy, step }) {
+  const today = new Date().toISOString().slice(0, 10)
+  const [period, setPeriod] = useState('monthly')
+  const [start, setStart] = useState('')
+  const [end, setEnd] = useState(today)
+  const [notify, setNotify] = useState(false)
+  const busyKey = `range_${mode}`
+  const customInvalid = period === 'custom' && (!start || !end || start > end)
+  return (
+    <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', marginBottom: 12 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
+                    letterSpacing: '0.08em', marginBottom: 6 }}>On-demand range</div>
+      <div className="filter-group" style={{ marginBottom: 6, flexWrap: 'wrap' }}>
+        {RANGE_PRESETS.map(([key, label]) => (
+          <button key={key} className={`filter-btn ${period === key ? 'active' : ''}`}
+                  onClick={() => setPeriod(key)}>{label}</button>
+        ))}
+      </div>
+      {period === 'custom' && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
+          <input type="date" className="settings-select" value={start} max={end || today}
+                 onChange={e => setStart(e.target.value)} aria-label="Range start" />
+          <input type="date" className="settings-select" value={end} min={start} max={today}
+                 onChange={e => setEnd(e.target.value)} aria-label="Range end" />
+        </div>
+      )}
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--dim)', marginBottom: 6 }}>
+        <input type="checkbox" checked={notify} onChange={e => setNotify(e.target.checked)} />
+        Also send to ntfy / Telegram
+      </label>
+      <button className="btn-secondary btn-sm" disabled={busy !== null || customInvalid}
+              onClick={() => runRange({ mode, period, start, end, notify })}>
+        {busy === busyKey ? `⏳ ${step ?? 'Generating…'}` : '⟳ Run range report'}
+      </button>
+    </div>
+  )
+}
+
+function TabPane({ reports, modeTypes, trigger, busyKey, triggerErr, selectedId, setSelectedId, deletingId, onDelete,
+                   compareSel, onToggleCompare, clearCompare, runRange }) {
   const filtered = reports.filter(r => modeTypes.has(r.type))
   const selected = filtered.find(r => r.id === selectedId) ?? filtered[0] ?? null
+  // Both tab panes stay mounted, so only act on picks that belong to this pane.
+  const tabSel = compareSel.filter(id => filtered.some(r => r.id === id))
 
   const [eodKey, weeklyKey] = busyKey  // e.g. ['eod_frac', 'weekly_frac']
   const isFrac = eodKey.includes('frac')
@@ -818,9 +892,14 @@ function TabPane({ reports, modeTypes, trigger, busyKey, triggerErr, selectedId,
             {trigger.busy === weeklyKey ? `⏳ ${trigger.step ?? 'Generating…'}` : `⟳ Weekly ${modeName}`}
           </button>
         </div>
+        <RangeReportControl mode={isFrac ? 'frac' : 'orders'} runRange={runRange}
+                            busy={trigger.busy} step={trigger.step} />
         <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase',
                       letterSpacing: '0.08em', marginBottom: 8 }}>
           History · {filtered.length}
+          {tabSel.length === 1 && (
+            <span style={{ textTransform: 'none', letterSpacing: 0, fontWeight: 400 }}> · pick one more to compare</span>
+          )}
         </div>
         <HistoryList
           reports={filtered}
@@ -828,12 +907,16 @@ function TabPane({ reports, modeTypes, trigger, busyKey, triggerErr, selectedId,
           onSelect={setSelectedId}
           onDelete={onDelete}
           deletingId={deletingId}
+          compareSel={tabSel}
+          onToggleCompare={onToggleCompare}
         />
       </div>
 
-      {/* ── Viewer ──────────────────────────────────────────────────────────── */}
+      {/* ── Viewer / comparison ─────────────────────────────────────────────── */}
       <div style={{ flex: 1, minWidth: 300 }}>
-        <ReportViewer report={selected} />
+        {tabSel.length === 2
+          ? <ReportComparePanel ids={tabSel} onClear={clearCompare} />
+          : <ReportViewer report={selected} />}
       </div>
     </div>
   )
@@ -849,6 +932,12 @@ export default function ReportsPage() {
   const [triggerErr, setTriggerErr] = useState('')
   const [deletingId, setDeletingId] = useState(null)
   const [genStep,    setGenStep]    = useState(null)   // null | 'data' | 'llm' | 'saving'
+  const [compareSel, setCompareSel] = useState([])     // up to 2 report ids, same type
+
+  const toggleCompare = (id) => setCompareSel(sel =>
+    sel.includes(id) ? sel.filter(x => x !== id) : sel.length >= 2 ? sel : [...sel, id])
+  const clearCompare = () => setCompareSel([])
+  const switchTab = (key) => { setTab(key); setCompareSel([]) }
 
   const GEN_STEPS = {
     data:   '📊 Fetching data…',
@@ -863,11 +952,11 @@ export default function ReportsPage() {
     weekly_frac:   '/reports/weekly/frac',
   }
 
-  const triggerFn = async (kind) => {
+  const generate = async (kind, path) => {
     setBusy(kind); setTriggerErr(''); setGenStep('data')
     const stepTimer = setTimeout(() => setGenStep('llm'), 1800)
     try {
-      const r = await fetch(`${API}${PATH_MAP[kind]}`, { headers: getAuthHeaders() })
+      const r = await fetch(`${API}${path}`, { headers: getAuthHeaders() })
       setGenStep('saving')
       const d = await r.json()
       if (!r.ok) throw new Error(d.detail || `Failed (${r.status})`)
@@ -882,6 +971,12 @@ export default function ReportsPage() {
       setBusy(null)
     }
   }
+  const triggerFn = (kind) => generate(kind, PATH_MAP[kind])
+  const runRange = ({ mode, period, start, end, notify }) => {
+    const qs = new URLSearchParams({ mode, notify: String(notify) })
+    if (period === 'custom') { qs.set('start', start); qs.set('end', end) } else qs.set('period', period)
+    return generate(`range_${mode}`, `/reports/range?${qs}`)
+  }
   triggerFn.busy = busy
   triggerFn.step = genStep ? GEN_STEPS[genStep] : null
 
@@ -890,6 +985,7 @@ export default function ReportsPage() {
     try {
       await deleteReport(id)
       if (selectedId === id) setSelectedId(null)
+      setCompareSel(sel => sel.filter(x => x !== id))
       await reload()
     } finally {
       setDeletingId(null)
@@ -904,10 +1000,15 @@ export default function ReportsPage() {
     setSelectedId,
     deletingId,
     onDelete: handleDelete,
+    compareSel,
+    onToggleCompare: toggleCompare,
+    clearCompare,
+    runRange,
   }
 
   return (
-    <div style={{ maxWidth: 960, margin: '0 auto' }}>
+    // width + minWidth: fill <main> (a flex row) without letting wide tables grow the page.
+    <div style={{ maxWidth: 960, width: '100%', minWidth: 0, margin: '0 auto' }}>
       {/* ── Page header ──────────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
         <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>📑 Reports</h1>
@@ -924,7 +1025,7 @@ export default function ReportsPage() {
           <button
             key={key}
             className={`nav-tab ${tab === key ? 'active' : ''}`}
-            onClick={() => setTab(key)}
+            onClick={() => switchTab(key)}
             style={{
               borderRadius: 'var(--radius-sm, 6px) var(--radius-sm, 6px) 0 0',
               borderBottom: tab === key ? '2px solid var(--accent)' : '2px solid transparent',

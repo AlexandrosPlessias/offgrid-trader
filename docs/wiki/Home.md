@@ -40,6 +40,11 @@ After each scan, the scheduler syncs open Alpaca paper orders (status, fill pric
 
 ## Recent highlights
 
+- **Ticker → Explorer links** — click a ticker on a Dashboard signal card or in Trending, or use **🔍 Open in Explorer** in any expanded Trading row, to open that ticker's latest saved analysis (or a prefilled Explorer if it has none).
+- **Report comparator** — tick two reports of the same type to see metric and tuning-setting deltas, a comparability grade, a "what moved" chart, and an optional LLM review with concrete tuning suggestions. See [Reports](reports.md).
+- **On-demand range reports** — monthly, quarterly, yearly or custom-dated reports, with report data queried by date in SQL so long ranges are never truncated.
+- **Site offline outside trading hours** — the Cloudflare cron now stops the Fly backend *and* removes the Vercel alias each evening, and restores both each weekday morning. See [Cloudflare Cron](cloudflare-cron.md).
+- **CodeQL fixes** — report prompt files are read from an allowlist, and the Ollama log line no longer includes the raw prompt. See [Security](security.md).
 - **Mobile-responsive UI** — hamburger nav drawer activates on ≤ 768 px; Settings page and Glossary reflow for small screens.
 - **Discovery: Watch / Trade icon buttons** — each candidate row in the Trending tab has a Watch toggle (👁 / ✓ / ⏳) and a state-driven Trade button (🔍 Checking → 📈 Trade / ⚠ Restricted / 🚫 Blocked → ⏳ Placing → ✅ Done / ❌ Failed) with tooltips.
 - **Discovery: Hide Restricted / Hide OTC** — client-side checkboxes filter candidates by tradability and exchange; hidden count shown inline.
@@ -70,6 +75,14 @@ After each scan, the scheduler syncs open Alpaca paper orders (status, fill pric
 | Fractional Trading tab | Live / Fractional settings |
 |---|---|
 | ![Fractional Trading](../screenshots/13b-fractional-trading.png) | ![Live / Fractional settings](../screenshots/19-settings-fractional.png) |
+
+| Reports — history, range presets, Compare | Report comparator |
+|---|---|
+| ![Reports](../screenshots/20-reports.png) | ![Report comparator](../screenshots/25-reports-compare.png) |
+
+| Schedule — the trading week | Activity feed |
+|---|---|
+| ![Schedule](../screenshots/24-schedule.png) | ![Activity](../screenshots/21-activity.png) |
 
 ### Explorer — section walkthrough (AAPL)
 
@@ -130,13 +143,13 @@ See [docs/screenshots/README.md](../screenshots/README.md) for full instructions
 | [Paper Trading](paper-trading.md) | Alpaca paper account setup, bracket orders, live market data, autonomous trading loop, `/paper/*` API endpoints |
 | [Trending Discovery](trending-discovery.md) | Candidate scanning, scoring, watchlist auto-add, `/discovery/*` endpoints |
 | [Notifications](notifications.md) | ntfy + Telegram setup, order/blocked/system alerts, periodic reports |
-| [Reports](reports.md) | The four LLM reports (EoD/weekly × orders/frac) — Reports page, tuning suggestions, model tag, `/reports*` endpoints |
-| [Schedule](schedule.md) | The trading week as a timeline — wake, scans, discovery, reports, stop |
+| [Reports](reports.md) | The four LLM reports (EoD/weekly × orders/frac), on-demand range reports, the report comparator and its LLM review, `/reports*` endpoints |
+| [Schedule](schedule.md) | The trading week as a timeline — wake, scans, discovery, reports, stop (site offline between stop and wake) |
 | [Glossary](glossary.md) | Alphabetical trading and macro terminology |
 | [Observability](observability.md) | OTEL span hierarchy, Aspire usage guide, log lines, in-app Activity feed |
-| [Cloudflare Cron](cloudflare-cron.md) | Workers cron that starts/stops the Fly app and sends EoD + weekly reports on schedule |
+| [Cloudflare Cron](cloudflare-cron.md) | Workers cron that starts/stops the Fly app, takes the Vercel site offline and back, and sends EoD + weekly reports on schedule |
 | [Cloud Hosting](cloud-hosting.md) | Deploying the backend to Fly.io and the frontend to Vercel |
-| [Security](security.md) | Admin token, CORS, secret handling |
+| [Security](security.md) | Admin token, CORS, secret handling, SSRF and path-traversal fixes, log hygiene |
 | [Development](development.md) | Local dev loop, lint gate, tests |
 
 ---

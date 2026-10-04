@@ -17,6 +17,7 @@ directly::
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 from datetime import datetime
@@ -199,6 +200,8 @@ async def sync_paper_orders() -> None:
                 # sell-to-close: profit when price rose; buy-to-cover: profit when price fell
                 direction = 1 if side == "sell" else -1
                 updates["realized_pnl"] = round((fill - entry) * qty * direction, 4)
+                if filled_at:
+                    updates["closed_at"] = filled_at
 
                 # Notify: this close leg just filled — fire regardless of origin
                 # (stop-loss, take-profit, or market close from Instant Cashout).
@@ -255,6 +258,8 @@ async def sync_paper_orders() -> None:
                     direction = 1 if entry_side == "buy" else -1
                     updates["realized_pnl"] = round((exit_px - entry_fill) * qty * direction, 4)
                     updates["exit_price"] = exit_px
+                    if exit_leg.get("filled_at"):
+                        updates["closed_at"] = exit_leg["filled_at"]
 
                     pnl = updates["realized_pnl"]
                     pnl_sign = "+" if pnl >= 0 else ""
@@ -469,13 +474,15 @@ def _autoadd_tradable_candidates(candidates: list[dict[str, Any]]) -> None:
         from .routes._models import _clean_ticker
 
         top_n = int(get_setting("discovery_autoadd_top_n", "") or _cfg().discovery.autoadd_top_n)
+        # A manual removal is a decision; add_watchlist_tickers would un-remove it.
+        removed = set(json.loads(get_setting("watchlist_removed", "[]") or "[]"))
         client = get_client()
         tradable_tickers: list[str] = []
         for cand in candidates:
             if len(tradable_tickers) >= top_n:
                 break  # only add the strongest top-N per run
             ticker = (cand.get("ticker") or "").strip().upper()
-            if not ticker:
+            if not ticker or ticker in removed:
                 continue
             try:
                 asset = client._get(f"/v2/assets/{_clean_ticker(ticker)}")
@@ -677,7 +684,7 @@ class MonitorScheduler:
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=sleep_for)
                 except asyncio.TimeoutError:
-                    pass
+                    pass  # timeout is the normal path — no stop requested, run the next scan
         finally:
             self.running = False
             _log.info("stopped")
@@ -704,7 +711,7 @@ class MonitorScheduler:
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=poll_seconds)
             except asyncio.TimeoutError:
-                pass
+                pass  # timeout is the normal path — no stop requested, poll exits again
 
     def start(self) -> None:
         """Start the loop if it is not already running."""
@@ -749,7 +756,6 @@ scheduler = MonitorScheduler()
 
 
 if __name__ == "__main__":
-    import json
 
     async def _main() -> None:
         print(f"market_open={is_market_open()}")

@@ -59,6 +59,12 @@ function getMondayOfWeek(now) {
   return d
 }
 
+// The evening cron jobs run at fixed UTC times (infra/cron-worker/wrangler.toml), so in
+// winter they land an hour earlier in ET than in summer — derive them from UTC, not the close.
+function utcOnTradingDay(openTime, hh, mm) {
+  return new Date(Date.UTC(openTime.getUTCFullYear(), openTime.getUTCMonth(), openTime.getUTCDate(), hh, mm))
+}
+
 function buildEvents(dayDate, marketHours, scanIntervalMinutes, fracPollSeconds) {
   const tz = marketHours.timezone || 'America/New_York'
   const openTime = parseHHMM(marketHours.open, dayDate, tz)
@@ -67,7 +73,7 @@ function buildEvents(dayDate, marketHours, scanIntervalMinutes, fracPollSeconds)
   const events = []
 
   const wakeTime = new Date(openTime.getTime() - 60 * 60000)
-  events.push({ time: wakeTime, label: 'System wake (Fly start)', color: '#6b7280', bg: '#1c1e26' })
+  events.push({ time: wakeTime, label: 'System wake (Fly + Vercel)', color: '#6b7280', bg: '#1c1e26' })
 
   events.push({ time: openTime, label: 'Market opens', color: '#22c55e', bg: '#0f2d1a' })
 
@@ -102,16 +108,16 @@ function buildEvents(dayDate, marketHours, scanIntervalMinutes, fracPollSeconds)
 
   events.push({ time: closeTime, label: 'Market closes', color: '#ef4444', bg: '#2d0f0f' })
 
-  const eodTime = new Date(closeTime.getTime() + 65 * 60000)
+  const eodTime = utcOnTradingDay(openTime, 21, 5)
   events.push({ time: eodTime, label: 'EOD report', color: '#f97316', bg: '#2d1a0a' })
 
   if (dayDate.getDay() === 5) {
-    const eowTime = new Date(closeTime.getTime() + 85 * 60000)
+    const eowTime = utcOnTradingDay(openTime, 21, 25)
     events.push({ time: eowTime, label: 'End-of-Week report', color: '#e879f9', bg: '#2d0f2d' })
   }
 
-  const stopTime = new Date(closeTime.getTime() + 90 * 60000)
-  events.push({ time: stopTime, label: 'System stop (Fly)', color: '#6b7280', bg: '#1c1e26' })
+  const stopTime = utcOnTradingDay(openTime, 21, 30)
+  events.push({ time: stopTime, label: 'System stop (Fly + Vercel)', color: '#6b7280', bg: '#1c1e26' })
 
   events.sort((a, b) => {
     if (!a.time) return 0

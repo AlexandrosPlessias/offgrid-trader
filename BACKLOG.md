@@ -273,7 +273,8 @@ Surface *new* tickers to watch automatically from market trends, instead of rely
 
 ---
 
-## 6. Pluggable Notification & Alert Channel Integration
+## ✅ 6. Pluggable Notification & Alert Channel Integration
+*Shipped on branch `feat/backlog-6-notifications`*
 
 A channel-agnostic notification system that dispatches rich, actionable alerts across independently toggleable channels whenever a significant event occurs.
 
@@ -471,7 +472,12 @@ The review must cover the **whole project** — not just these three — but cha
 
 ---
 
-## 8. Replace the in-process scheduler with a Cloudflare Workers cron trigger
+## ✅ 8. Replace the in-process scheduler with a Cloudflare Workers cron trigger
+*Shipped on branch `feat/backlog-8-cloudflare-cron` (commit `1298891`)*
+
+*Follow-up (2026-10):* the Worker also manages the Vercel frontend — the start job re-points
+`offgrid-trader.vercel.app` at the latest production deployment and the stop job removes the
+alias, so the site follows the same wake/stop schedule as the backend.
 
 The in-process `MonitorScheduler` (`backend/scheduler.py`) is a hand-rolled `while` loop that silently misses ticks whenever the backend restarts or Fly idles the machine (`fly.toml` sets `auto_stop_machines = "stop"` and `min_machines_running = 0`). Scans, the EoD digest, and the new LLM reports must fire on schedule regardless of backend uptime — so the trigger has to live *outside* the app it wakes up.
 
@@ -507,7 +513,24 @@ The in-process `MonitorScheduler` (`backend/scheduler.py`) is a hand-rolled `whi
 
 ---
 
-## 9. Report comparator — week-over-week / arbitrary-period deltas
+## ✅ 9. Report comparator — week-over-week / arbitrary-period deltas
+*Shipped on branch `feat/backlog-9-report-comparator`*
+
+**Delivered** (scope grew beyond the original spec below):
+- **Layer 1** — `GET /reports/compare`: metric deltas on window-scoped economics, config deltas from a
+  persisted tuning snapshot, a backend comparability grade (full / partial / none), plus a diverging
+  "what moved" chart, per-bucket A/B overlay and delta tables on the Reports page.
+- **Layer 2** — `POST /reports/compare/review`: strict trading-master review over both full snapshots,
+  structured good / bad / improve output, mode-scoped suggestions, `report_compare` usage source and its
+  own `llm_model_report_compare` model override.
+- **On-demand range reports** — `GET /reports/range` for monthly / quarterly / yearly / custom windows
+  with adaptive bucketing and a shared `llm_model_range` override.
+- **Fixes along the way** — report data is queried by date in SQL (no 500-row truncation), all-time
+  figures come from SQL aggregates, and Settings no longer wipes per-report model overrides on save.
+- **Shipped alongside** — the Cloudflare nightly stop now also removes the Vercel alias, so the
+  site is offline overnight and at weekends (see item 8). Two CodeQL findings were fixed: report
+  prompt files are looked up from an allowlist instead of a path built from the request, and the
+  Ollama log line no longer includes the raw prompt.
 
 The four report types (`eod_frac`, `eod_orders`, `weekly_frac`, `weekly_orders`) each
 summarise a **single** window: EoD = today, weekly = the last 7 days, plus some all-time

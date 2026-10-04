@@ -998,6 +998,19 @@ function NotificationsSection() {
   )
 }
 
+// A flow floor only filters when it is above the signal floor — every signal already
+// clears the signal floor, so a lower or equal value never rejects anything.
+function FloorNoEffectWarning({ value, signalFloor, zeroMeansDefault = false, hint }) {
+  const v = parseFloat(value)
+  const s = parseFloat(signalFloor)
+  if (Number.isNaN(v) || Number.isNaN(s) || (zeroMeansDefault && v === 0) || v > s) return null
+  return (
+    <span style={{ fontSize: 12, color: '#f59e0b' }}>
+      ⚠ No effect: {v} is not above the signal floor ({s}), so every signal already passes. {hint}
+    </span>
+  )
+}
+
 function AutonomousTradingSection() {
   const [fetchErr,   setFetchErr]   = useState(false)
   const [saveStatus, setSaveStatus] = useState(null)
@@ -1144,8 +1157,8 @@ function AutonomousTradingSection() {
 
       <div className="settings-row">
         <div className="settings-row-label">
-          <span>Signal / bracket confidence floor</span>
-          <span className="text-dim" style={{ fontSize: 12 }}>Minimum % to create a signal and place a bracket order</span>
+          <span>Signal confidence floor (all modes)</span>
+          <span className="text-dim" style={{ fontSize: 12 }}>Minimum % for any setup to become a signal — gates alerts, bracket and fractional orders. The floors below can only be stricter.</span>
         </div>
         <input className="settings-input" type="number" min={0} max={100}
                value={confidenceFloor} onChange={e => setConfidenceFloor(e.target.value)}
@@ -1156,6 +1169,8 @@ function AutonomousTradingSection() {
         <div className="settings-row-label">
           <span>Fractional confidence floor</span>
           <span className="text-dim" style={{ fontSize: 12 }}>Stricter % required for a fractional buy (frac commits notional)</span>
+          <FloorNoEffectWarning value={fracMinConf} signalFloor={confidenceFloor}
+                                hint="Set it above the signal floor to make fractional buys stricter." />
         </div>
         <input className="settings-input" type="number" min={0} max={100}
                value={fracMinConf} onChange={e => setFracMinConf(e.target.value)}
@@ -1166,6 +1181,8 @@ function AutonomousTradingSection() {
         <div className="settings-row-label">
           <span>Bracket-only floor (optional)</span>
           <span className="text-dim" style={{ fontSize: 12 }}>0 = fall back to the signal floor above</span>
+          <FloorNoEffectWarning value={paperMinConf} signalFloor={confidenceFloor} zeroMeansDefault
+                                hint="Set it above the signal floor, or 0 to use the signal floor." />
         </div>
         <input className="settings-input" type="number" min={0} max={100}
                value={paperMinConf} onChange={e => setPaperMinConf(e.target.value)}
@@ -1187,7 +1204,7 @@ function AutonomousTradingSection() {
         <select className="settings-select" value={dropMode}
                 onChange={e => setDropMode(e.target.value)} style={{ maxWidth: 260 }}>
           <option value="untradable">Drop only untradable (recommended)</option>
-          <option value="strict">Strict — also drop when out of funds/capacity</option>
+          <option value="strict">Strict — same as untradable for now (reserved)</option>
           <option value="never">Never drop (keep full audit trail)</option>
         </select>
       </div>
@@ -1502,6 +1519,8 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
   const [reportModelEodOrders,    setReportModelEodOrders]    = useState('')
   const [reportModelWeeklyFrac,   setReportModelWeeklyFrac]   = useState('')
   const [reportModelWeeklyOrders, setReportModelWeeklyOrders] = useState('')
+  const [reportModelRange,        setReportModelRange]        = useState('')
+  const [reportModelCompare,      setReportModelCompare]      = useState('')
 
   // ── Signal-scan LLM switch ──────────────────────────────────────────────────
   const [signalLlmEnabled,     setSignalLlmEnabled]     = useState(true)
@@ -1823,6 +1842,14 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
       if (cfg.provider_model_prefs)  setProviderModelPrefs(cfg.provider_model_prefs)
       if (cfg.provider_saved_models) setProviderSavedModels(cfg.provider_saved_models)
       if (cfg.provider_key_status)   setProviderKeyStatus(cfg.provider_key_status)
+      // Must be loaded here too: saveLlm always sends these, so leaving them blank on
+      // load would wipe every saved per-report override on the next save.
+      setReportModelEodFrac(cfg.llm_model_eod_frac ?? '')
+      setReportModelEodOrders(cfg.llm_model_eod_orders ?? '')
+      setReportModelWeeklyFrac(cfg.llm_model_weekly_frac ?? '')
+      setReportModelWeeklyOrders(cfg.llm_model_weekly_orders ?? '')
+      setReportModelRange(cfg.llm_model_range ?? '')
+      setReportModelCompare(cfg.llm_model_report_compare ?? '')
     }).catch(() => {})
     loadCacheStats()
     loadPerfSettings()
@@ -1857,6 +1884,8 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
     setReportModelEodOrders(cfg.llm_model_eod_orders ?? '')
     setReportModelWeeklyFrac(cfg.llm_model_weekly_frac ?? '')
     setReportModelWeeklyOrders(cfg.llm_model_weekly_orders ?? '')
+    setReportModelRange(cfg.llm_model_range ?? '')
+    setReportModelCompare(cfg.llm_model_report_compare ?? '')
     if (provider === 'ollama') setModels(modelData.models ?? [])
     else setProviderModels(modelData.models ?? [])
   }
@@ -1896,6 +1925,8 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
       body.llm_model_eod_orders     = reportModelEodOrders
       body.llm_model_weekly_frac    = reportModelWeeklyFrac
       body.llm_model_weekly_orders  = reportModelWeeklyOrders
+      body.llm_model_range          = reportModelRange
+      body.llm_model_report_compare = reportModelCompare
       // Persist the active provider's current model choice as a per-provider pref.
       // The saved model becomes this provider's default and is appended as a new pill.
       const activeModel = envDefaultsActive ? '' : (llmModel || model || '')
@@ -2748,13 +2779,15 @@ export default function SettingsPage({ usage, onUsageRefresh, onHealthRefresh, i
           </div>
           <p className="text-dim" style={{ fontSize: 12, marginBottom: 12 }}>
             Assign a specific provider + model per report type. Leave blank to use the primary model.
-            Weekly reports benefit from a larger model (e.g. Mistral Large, Gemini Flash).
+            Weekly, range and compare reviews benefit from a larger model (e.g. Mistral Large, Gemini Flash).
           </p>
           {[
             ['EoD Orders',    reportModelEodOrders,    setReportModelEodOrders],
             ['EoD Frac',      reportModelEodFrac,      setReportModelEodFrac],
             ['Weekly Orders', reportModelWeeklyOrders, setReportModelWeeklyOrders],
             ['Weekly Frac',   reportModelWeeklyFrac,   setReportModelWeeklyFrac],
+            ['Range reports (monthly / quarterly / yearly / custom)', reportModelRange, setReportModelRange],
+            ['Report Compare review', reportModelCompare, setReportModelCompare],
           ].map(([label, value, setter]) => (
             <div key={label} className="settings-field" style={{ marginBottom: 10 }}>
               <label className="settings-label">{label}</label>

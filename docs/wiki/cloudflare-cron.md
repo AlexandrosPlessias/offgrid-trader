@@ -1,7 +1,8 @@
 # Cloudflare Workers Cron Trigger
 
-MarketSage uses a **Cloudflare Workers Cron Trigger** to start and stop the Fly.io backend and
-send end-of-day / weekly reports on a reliable schedule fully independent of the backend's uptime.
+MarketSage uses a **Cloudflare Workers Cron Trigger** to start and stop the Fly.io backend, take
+the Vercel frontend offline and back, and send end-of-day / weekly reports on a reliable schedule
+fully independent of the backend's uptime.
 If the backend is cold-starting, calls are retried automatically (3 attempts × 10 s).
 
 Scans are managed entirely by the in-process `MonitorScheduler` — the Worker does **not** trigger
@@ -16,7 +17,7 @@ individual scan ticks.
 | `30 12 * * MON-FRI` | 8:30 AM ET | EDT (summer) | Start the Fly app + restore the Vercel alias |
 | `30 13 * * MON-FRI` | 8:30 AM ET | EST (winter) | Start the Fly app + restore the Vercel alias |
 | `5 21 * * MON-FRI` | 5:05 PM ET | EDT / 4:05 PM EST | EoD reports (orders **and** frac) → ntfy + Telegram |
-| `30 21 * * MON-FRI` | 5:30 PM ET | EDT / 4:30 PM EST | Stop the Fly app |
+| `30 21 * * MON-FRI` | 5:30 PM ET | EDT / 4:30 PM EST | Stop the Fly app + remove the Vercel alias |
 | `25 21 * * FRI` | 5:25 PM ET Fri | EDT / 4:25 PM EST | Weekly reports (orders **and** frac) |
 
 > **Always use day names, never numbers.** The numeric form runs a day behind here: the
@@ -44,7 +45,7 @@ is harmless.
 ```
 infra/cron-worker/
 ├── wrangler.toml       — Worker name, cron schedules, observability config
-├── src/index.js        — scheduled handler: DST resolver, Fly Machines API, backend calls
+├── src/index.js        — scheduled handler: DST resolver, Fly Machines API, Vercel alias, backend calls
 ├── set-secrets.sh      — one-shot script to push all secrets from .env to Cloudflare
 └── .dev.vars           — local-only secrets for wrangler dev (gitignored, auto-generated)
 ```
@@ -64,16 +65,23 @@ and serves no traffic** — so every later `/reports/*` call would fail against 
 looks "started". As a backstop, the Worker refuses to create a machine whose template has
 no volume mount, and logs that a manual `fly deploy` is required instead.
 
-### Restoring the frontend
+### Taking the frontend offline and back
 
-**App Power → stop** takes the site offline by removing the `offgrid-trader.vercel.app`
-alias. The daily stop only touches Fly, so without help the next morning's start would wake
-the backend while the frontend stayed at `DEPLOYMENT_NOT_FOUND`.
+The site goes offline overnight together with the backend. Nothing is deleted: only the
+`offgrid-trader.vercel.app` alias is removed, so the built deployment stays in Vercel and
+can be re-pointed in the morning.
 
-After starting Fly, `restoreFrontend()` fetches the latest Ready production deployment
-(`GET /v6/deployments`) and assigns the alias to it (`POST /v2/deployments/{id}/aliases`).
-If the alias already points there, this does nothing. A Vercel failure is logged and never
-blocks the Fly start. If `VERCEL_TOKEN` is unset, the step is skipped with a warning.
+- **Stop** — after stopping Fly, `removeFrontend()` calls `DELETE /v2/aliases/{alias}`. From
+  then on the domain returns `DEPLOYMENT_NOT_FOUND`. A `404` means the alias was already
+  gone and is logged as "already offline".
+- **Start** — after starting Fly, `restoreFrontend()` fetches the latest Ready production
+  deployment (`GET /v6/deployments`) and assigns the alias to it
+  (`POST /v2/deployments/{id}/aliases`). If the alias already points there, this does nothing.
+
+In both directions a Vercel failure is logged and never blocks the Fly step, and if
+`VERCEL_TOKEN` is unset the Vercel step is skipped with a warning. Because the stop runs
+Monday to Friday and the start only on weekdays, the site stays offline from Friday's stop
+until Monday's start.
 
 The team ID, project ID and alias are plain `[vars]` in `wrangler.toml`. Only `VERCEL_TOKEN`
 is a secret.
@@ -268,6 +276,9 @@ Each invocation logs:
 - Cron string that fired + resolved ET offset + resolved action
 - Whether the start/stop/eod/weekly branch ran or was a noop
 - HTTP status of every Fly Machines API / backend call, with retry attempt numbers
+- On start/stop, the Vercel alias result — e.g.
+  `restoreFrontend: offgrid-trader.vercel.app → offgrid-trader-….vercel.app (200)` or
+  `removeFrontend: offgrid-trader.vercel.app removed (200)`
 
 ---
 
@@ -282,6 +293,7 @@ Or individually:
 ```bash
 npx wrangler secret put ADMIN_TOKEN      # after rotating the MarketSage token
 npx wrangler secret put FLY_API_TOKEN    # after rotating the Fly deploy token
+npx wrangler secret put VERCEL_TOKEN     # after rotating the Vercel access token
 ```
 
 Secrets take effect immediately — no redeploy needed.
@@ -292,7 +304,18 @@ Secrets take effect immediately — no redeploy needed.
 
 `app-power.yml` is now **manual-only** (`workflow_dispatch`). The Worker owns the automatic
 schedule. They are independent — a manual `app-power.yml` run (start or stop) is always safe
-alongside the Worker, since the Fly Machines API is idempotent for both actions.
+alongside the Worker, since the Fly Machines API and the Vercel alias calls are idempotent for
+both actions.
+
+Both stop paths now do the same thing to the frontend: remove the alias and keep the
+deployment. The start paths differ:
+
+| | Fly | Vercel |
+|---|---|---|
+| **Worker start** | Starts the existing machines | Re-points the alias at the latest existing deployment |
+| **App Power → start** | `flyctl deploy` (fresh release) | Builds, deploys a new production deployment, and points the alias at it |
+
+Use App Power → start when you need a fresh build; the Worker never builds anything.
 
 ---
 

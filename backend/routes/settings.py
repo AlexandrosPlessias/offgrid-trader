@@ -82,6 +82,12 @@ class LLMSettingRequest(BaseModel):
     llm_model_weekly_orders: str | None = Field(
         None, description="Model for weekly_orders reports (empty = use primary model)"
     )
+    llm_model_range: str | None = Field(
+        None, description="Model for on-demand range reports (empty = use primary model)"
+    )
+    llm_model_report_compare: str | None = Field(
+        None, description="Model for report comparison reviews (empty = use primary model)"
+    )
     provider_model_overrides: dict[str, str] | None = Field(
         None,
         description="Per-provider model prefs, kept apart from the active model",
@@ -366,6 +372,8 @@ def get_all_settings(provider: str | None = Query(None)) -> dict[str, Any]:
         "llm_model_eod_orders": get_setting("llm_model_eod_orders", ""),
         "llm_model_weekly_frac": get_setting("llm_model_weekly_frac", ""),
         "llm_model_weekly_orders": get_setting("llm_model_weekly_orders", ""),
+        "llm_model_range": get_setting("llm_model_range", ""),
+        "llm_model_report_compare": get_setting("llm_model_report_compare", ""),
         # Per-provider active/default model (used at call time when the provider is primary)
         "provider_model_prefs": {
             p: (get_setting(f"llm_model_pref_{p}", "") or cfg.llm.default_model_for(p))
@@ -467,6 +475,8 @@ def set_llm_settings(request: LLMSettingRequest) -> dict[str, Any]:
         "llm_model_eod_orders",
         "llm_model_weekly_frac",
         "llm_model_weekly_orders",
+        "llm_model_range",
+        "llm_model_report_compare",
     ):
         _val = getattr(request, _key, None)
         if _val is not None:

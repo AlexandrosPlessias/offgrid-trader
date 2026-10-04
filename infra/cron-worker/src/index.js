@@ -4,8 +4,13 @@
  * Handles three jobs:
  *   1. Start the Fly app at 8:30 AM ET Mon–Fri (via Fly Machines API) and
  *      re-point the Vercel production alias (via Vercel REST API)
- *   2. Send EoD report then stop the Fly app at 5:05 PM ET Mon–Fri
- *   3. Send weekly LLM summary at 5:25 PM ET Fridays
+ *   2. Send EoD report, stop the Fly app, and remove the Vercel alias at 21:05/21:30 UTC
+ *      Mon–Fri — 5:05/5:30 PM ET in summer (EDT), 4:05/4:30 PM ET in winter (EST)
+ *   3. Send weekly LLM summary at 21:25 UTC Fridays (5:25 PM EDT / 4:25 PM EST)
+ *
+ * Only the start is DST-exact (two twin crons). The evening jobs use one fixed UTC
+ * cron each — the free plan's 5 triggers are all used — so in winter they run an
+ * hour earlier in ET, still after the 4:00 PM close.
  *
  * Scans are managed entirely by the in-process MonitorScheduler — this Worker
  * does not trigger individual scans.
@@ -279,6 +284,41 @@ async function callVercel(env, method, path, body) {
 }
 
 /**
+ * Remove the production alias so the frontend goes offline.
+ * A no-op (with a warning) if VERCEL_TOKEN is not set or the alias doesn't exist.
+ */
+async function removeFrontend(env) {
+  if (!env.VERCEL_TOKEN) {
+    console.warn("[cron] removeFrontend: VERCEL_TOKEN not set — skipping.");
+    return;
+  }
+  const r = await callVercelChecked(env, "DELETE", `/v2/aliases/${env.VERCEL_ALIAS}`, undefined, [404]);
+  if (r.status === 404) {
+    console.log("[cron] removeFrontend: alias not set — already offline.");
+  } else {
+    console.log(`[cron] removeFrontend: ${env.VERCEL_ALIAS} removed (${r.status})`);
+  }
+}
+
+/**
+ * callVercel, but failures are errors: retries 429/5xx, then throws so the caller logs
+ * a missed shutdown or restore instead of reporting success. *alsoOk* lists statuses
+ * that are an acceptable outcome (e.g. 404 when the alias is already gone).
+ */
+async function callVercelChecked(env, method, path, body, alsoOk = []) {
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const r = await callVercel(env, method, path, body);
+    if (r.ok || alsoOk.includes(r.status)) return r;
+    const retryable = r.status === 429 || r.status >= 500;
+    if (!retryable || attempt === MAX_RETRIES) {
+      throw new Error(`Vercel ${method} ${path} failed with ${r.status} after ${attempt} attempt(s)`);
+    }
+    console.warn(`[cron] Vercel ${method} ${path} → ${r.status}; retrying in ${RETRY_DELAY_MS / 1000}s`);
+    await sleep(RETRY_DELAY_MS);
+  }
+}
+
+/**
  * Point the production alias at the latest Ready production deployment.
  *
  * App Power → stop removes the alias to take the site offline; without this the
@@ -290,12 +330,11 @@ async function restoreFrontend(env) {
     console.warn("[cron] restoreFrontend: VERCEL_TOKEN not set — skipping.");
     return;
   }
-  const list = await callVercel(
+  const list = await callVercelChecked(
     env,
     "GET",
     `/v6/deployments?projectId=${env.VERCEL_PROJECT_ID}&target=production&state=READY&limit=1`
   );
-  if (!list.ok) return;
   let deployment;
   try {
     deployment = JSON.parse(list.body).deployments?.[0];
@@ -307,7 +346,7 @@ async function restoreFrontend(env) {
     console.error("[cron] restoreFrontend: no Ready production deployment — run App Power → start.");
     return;
   }
-  const r = await callVercel(env, "POST", `/v2/deployments/${deployment.uid}/aliases`, {
+  const r = await callVercelChecked(env, "POST", `/v2/deployments/${deployment.uid}/aliases`, {
     alias: env.VERCEL_ALIAS,
   });
   console.log(
@@ -335,14 +374,21 @@ export default {
     }
 
     // ── Start app ─────────────────────────────────────────────────────────────
+    // The Fly and Vercel steps are independent: a Fly failure must never leave the
+    // frontend in the wrong state, so each Vercel step runs in a finally block.
     if (action === "start") {
-      console.log("[cron] Starting Fly app…");
-      await startApp(env);
-      console.log("[cron] Restoring Vercel frontend alias…");
       try {
-        await restoreFrontend(env);
+        console.log("[cron] Starting Fly app…");
+        await startApp(env);
       } catch (err) {
-        console.error(`[cron] restoreFrontend failed: ${err}`);
+        console.error(`[cron] startApp failed: ${err}`);
+      } finally {
+        console.log("[cron] Restoring Vercel frontend alias…");
+        try {
+          await restoreFrontend(env);
+        } catch (err) {
+          console.error(`[cron] restoreFrontend failed: ${err}`);
+        }
       }
       console.log(`[cron] action start completed in ${Date.now() - startedAt}ms`);
       return;
@@ -362,8 +408,19 @@ export default {
 
     // ── Stop app ──────────────────────────────────────────────────────────────
     if (action === "stop") {
-      console.log("[cron] Stopping Fly app…");
-      await stopApp(env);
+      try {
+        console.log("[cron] Stopping Fly app…");
+        await stopApp(env);
+      } catch (err) {
+        console.error(`[cron] stopApp failed: ${err}`);
+      } finally {
+        console.log("[cron] Removing Vercel frontend alias…");
+        try {
+          await removeFrontend(env);
+        } catch (err) {
+          console.error(`[cron] removeFrontend failed: ${err}`);
+        }
+      }
       console.log(`[cron] action stop completed in ${Date.now() - startedAt}ms`);
       return;
     }

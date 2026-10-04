@@ -1,5 +1,6 @@
 import { useState, Fragment } from 'react'
 import PriceSlider from '../components/shared/PriceSlider'
+import { ExplorerButton } from '../components/shared/TickerLink'
 import {
   ResponsiveContainer, AreaChart, Area, BarChart, Bar, Cell,
   XAxis, YAxis, Tooltip, CartesianGrid,
@@ -16,11 +17,11 @@ const detailGrid = { display: 'grid', gridTemplateColumns: 'max-content max-cont
 
 const money = (v) => (v == null ? '—' : `$${Number(v).toFixed(2)}`)
 const pnlColor = (v) => (v > 0 ? 'var(--green)' : v < 0 ? 'var(--red)' : 'var(--dim)')
-const fmtQty = (q, notional, entryPrice) => {
-  if (q != null) return String(+Number(q).toFixed(6))
+const fmtQty = (q, notional, entryPrice, digits = 6) => {
+  if (q != null) return String(+Number(q).toFixed(digits))
   // Derive from notional / entry_price when Alpaca fill was never synced
   if (notional != null && entryPrice != null && Number(entryPrice) > 0)
-    return `~${(Number(notional) / Number(entryPrice)).toFixed(6)}`
+    return `~${(Number(notional) / Number(entryPrice)).toFixed(digits)}`
   return '—'
 }
 
@@ -56,7 +57,7 @@ function Tile({ label, value, color }) {
   )
 }
 
-export default function FracTradingPage() {
+export default function FracTradingPage({ onOpenExplorer }) {
   const { data: acctData, reload: reloadAccount, error: acctError } = usePolling('/frac/account', 30_000)
   const { data: readiness, reload: reloadReadiness } = usePolling('/frac/readiness', 60_000)
   const { data: posData, reload: reloadPositions } = usePolling('/frac/positions?limit=200', 30_000)
@@ -312,14 +313,14 @@ export default function FracTradingPage() {
           ? <div style={{ fontSize: 13, color: 'var(--dim)', padding: '8px 0' }}>No open fractional positions.</div>
           : (
             <div className="table-wrap">
-              <table>
+              <table className="table-compact">
                 <thead>
                   <tr>
                     <th></th>
                     <th style={{ width: 32 }}>State</th>
-                    <th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th>
-                    <th style={{ whiteSpace: 'nowrap' }}>Mkt Val</th><th>Unreal. P&L</th><th>P&L %</th>
-                    <th>Stop</th><th>Target</th><th style={{ minWidth: 140 }}>Proximity</th><th>Notional</th><th>Conf %</th><th></th>
+                    <th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th title="Current price">Price</th>
+                    <th>Mkt Val</th><th title="Unrealised P&L">Unreal. P&L</th><th>P&L %</th>
+                    <th>Stop</th><th>Target</th><th>Proximity</th><th title="Notional — dollars committed">Size</th><th>Conf %</th><th></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -356,7 +357,7 @@ export default function FracTradingPage() {
                           </td>
                           <td><span className="badge-ticker">{p.ticker}</span></td>
                           <td><span className={`badge ${isLong ? 'long' : 'short'}`}>{isLong ? '▲ LONG' : '▼ SHORT'}</span></td>
-                          <td>{fmtQty(p.qty, p.notional, p.entry_price)}</td>
+                          <td title={fmtQty(p.qty, p.notional, p.entry_price)}>{fmtQty(p.qty, p.notional, p.entry_price, 4)}</td>
                           <td>{money(p.entry_price)}</td>
                           <td>{money(p.current_price)}</td>
                           <td>{money(p.market_value)}</td>
@@ -382,7 +383,7 @@ export default function FracTradingPage() {
                               </div>
                             ) : '—'}
                           </td>
-                          <td><PriceSlider stop={stop} target={target} current={p.current_price} /></td>
+                          <td><PriceSlider stop={stop} target={target} current={p.current_price} width={80} /></td>
                           <td>{money(p.notional)}</td>
                           <td>{p.signal_confidence != null ? `${Number(p.signal_confidence).toFixed(0)}%` : '—'}</td>
                           <td onClick={e => e.stopPropagation()}>
@@ -390,15 +391,19 @@ export default function FracTradingPage() {
                               className="btn-ghost"
                               onClick={() => cashout(p.ticker)}
                               disabled={isCashing}
-                              style={{ fontSize: 11, fontWeight: 600 }}
+                              title="Cash out — sell this fractional position at market"
+                              style={{ fontSize: 10, fontWeight: 600, padding: '2px 7px', whiteSpace: 'nowrap' }}
                             >
-                              {isCashing ? '⏳' : '💵 Cash out'}
+                              {isCashing ? '⏳' : '💵 Cashout'}
                             </button>
                           </td>
                         </tr>
                         {isExp && (
                           <tr style={{ background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
                             <td colSpan={15} style={{ padding: '10px 18px' }}>
+                              <div style={{ position: 'sticky', left: 0, width: 'fit-content', marginBottom: 6 }}>
+                                <ExplorerButton ticker={p.ticker} onOpenExplorer={onOpenExplorer} />
+                              </div>
                               <div style={{ display: 'flex', gap: 0, flexWrap: 'wrap', fontSize: 11 }}>
                                 {/* Position */}
                                 <div style={{ paddingRight: 24 }}>
@@ -463,7 +468,7 @@ export default function FracTradingPage() {
           ? <div style={{ fontSize: 13, color: 'var(--dim)', padding: '8px 0' }}>No closed fractional trades yet.</div>
           : (
             <div className="table-wrap">
-              <table>
+              <table className="table-compact">
                 <thead>
                   <tr>
                     <th></th>
@@ -511,6 +516,9 @@ export default function FracTradingPage() {
                         {isExp && (
                           <tr style={{ background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
                             <td colSpan={10} style={{ padding: '12px 18px' }}>
+                              <div style={{ position: 'sticky', left: 0, width: 'fit-content', marginBottom: 6 }}>
+                                <ExplorerButton ticker={p.ticker} onOpenExplorer={onOpenExplorer} />
+                              </div>
                               <div style={{ display: 'flex', gap: 0, flexWrap: 'wrap', fontSize: 11 }}>
 
                                 {/* Performance */}
@@ -598,7 +606,7 @@ export default function FracTradingPage() {
             </span>
           </div>
           <div className="table-wrap">
-            <table>
+            <table className="table-compact">
               <thead>
                 <tr>
                   <th>Ticker</th><th>Side</th><th>Notional</th><th>Qty (filled)</th>

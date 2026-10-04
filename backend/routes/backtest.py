@@ -326,7 +326,8 @@ async def backtest_compare(
     try:
         raw, model_used, pt, ct = await asyncio.to_thread(call_llm, user_prompt, system_prompt)
     except LLMError as exc:
-        raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
+        _log.warning("backtest LLM call failed: %s", _log_safe(str(exc)))
+        raise HTTPException(status_code=503, detail="LLM unavailable — see server logs.") from exc
     except Exception as exc:
         _log.exception("backtest_compare error: %s", _log_safe(str(exc)))
         raise HTTPException(
@@ -463,7 +464,8 @@ async def backtest_experiment_advisor(run_id: int) -> dict[str, Any]:
     try:
         raw, model_used, pt, ct = await asyncio.to_thread(call_llm, user_prompt, system_prompt)
     except LLMError as exc:
-        raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
+        _log.warning("backtest LLM call failed: %s", _log_safe(str(exc)))
+        raise HTTPException(status_code=503, detail="LLM unavailable — see server logs.") from exc
     except Exception as exc:
         _log.exception("backtest_experiment_advisor error for run %d", int(run_id))
         raise HTTPException(
@@ -487,9 +489,9 @@ async def backtest_experiment_advisor(run_id: int) -> dict[str, Any]:
     errs = _validate_llm_json(result, "experiment_selection.schema.json")
     if errs:
         _log.warning(
-            "experiment_advisor v2 schema errors run=%d: %s",
-            run_id,
-            str(errs).replace("\r", "").replace("\n", ""),
+            "experiment_advisor v2 schema errors run=%s: %s",
+            _log_safe(str(run_id)),
+            _log_safe(str(errs)),
         )
         try:
             repaired = _repair_llm_json(raw, errs, call_llm, system_prompt)
@@ -509,10 +511,10 @@ async def backtest_experiment_advisor(run_id: int) -> dict[str, Any]:
         selected_candidate = dict(low_risk[0] if low_risk else candidates[0])
         selected_candidate["_auto_selected"] = True
         _log.info(
-            "experiment_advisor run=%d: LLM returned unknown id %s; auto-selected %s",
-            run_id,
-            str(sel_id).replace("\r", "").replace("\n", ""),
-            str(selected_candidate["candidate_id"]).replace("\r", "").replace("\n", ""),
+            "experiment_advisor run=%s: LLM returned unknown id %s; auto-selected %s",
+            _log_safe(str(run_id)),
+            _log_safe(str(sel_id)),
+            _log_safe(str(selected_candidate["candidate_id"])),
         )
 
     result["selected_candidate"] = selected_candidate
@@ -674,7 +676,8 @@ async def backtest_review(run_id: int) -> dict[str, Any]:
     try:
         raw, model_used, pt, ct = await asyncio.to_thread(call_llm, user_prompt, system_prompt)
     except LLMError as exc:
-        raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
+        _log.warning("backtest LLM call failed: %s", _log_safe(str(exc)))
+        raise HTTPException(status_code=503, detail="LLM unavailable — see server logs.") from exc
     except Exception as exc:
         _log.exception("backtest_review error for run %d", int(run_id))
         raise HTTPException(
@@ -707,9 +710,9 @@ async def backtest_review(run_id: int) -> dict[str, Any]:
     errs = _validate_llm_json(result, "backtest_review.schema.json")
     if errs:
         _log.warning(
-            "backtest_review v2 schema errors run=%d: %s",
-            run_id,
-            str(errs).replace("\r", "").replace("\n", ""),
+            "backtest_review v2 schema errors run=%s: %s",
+            _log_safe(str(run_id)),
+            _log_safe(str(errs)),
         )
         try:
             repaired = _repair_llm_json(raw, errs, call_llm, system_prompt)

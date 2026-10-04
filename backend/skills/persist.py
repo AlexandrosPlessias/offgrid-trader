@@ -9,6 +9,45 @@ from backend.skills import AgentContext, Skill, SkillResult
 _log = logging.getLogger(__name__)
 
 
+def _save_analysis_log(ctx: AgentContext) -> str | None:
+    """Write the analysis (with every opportunity) to analysis_log; return an error or None."""
+    from backend.database import save_analysis
+
+    if not (ctx.analysis and ctx.market_data):
+        return None
+    try:
+        save_analysis(
+            ctx.ticker,
+            ctx.analysis,
+            ctx.market_data,
+            opportunities=ctx.opportunities or [],
+            actionable=ctx.actionable or [],
+            llm_provider=ctx.analysis.get("llm_provider"),
+            llm_model=ctx.analysis.get("llm_model"),
+            prompt_tokens=ctx.analysis.get("prompt_tokens") or None,
+            completion_tokens=ctx.analysis.get("completion_tokens") or None,
+        )
+        _log.debug("persist: saved analysis for %s", ctx.ticker)
+        return None
+    except Exception:
+        _log.exception("persist: save_analysis failed for %s", ctx.ticker)
+        return "save_analysis failed — check server logs"
+
+
+class SaveAnalysisSkill(Skill):
+    """Persist only the analysis log — no signals, so nothing downstream can trade on it."""
+
+    name = "save_analysis"
+    critical = False
+    can_retry = False
+
+    def run(self, ctx: AgentContext) -> SkillResult:
+        error = _save_analysis_log(ctx)
+        if error:
+            ctx.errors.append(error)
+        return SkillResult(success=error is None, error=error)
+
+
 class PersistSkill(Skill):
     """Persist the analysis and each actionable signal to SQLite.
 
@@ -24,7 +63,6 @@ class PersistSkill(Skill):
         from backend.database import (
             get_setting,
             get_todays_signal,
-            save_analysis,
             save_event,
             save_signal,
             update_signal_confidence,
@@ -41,23 +79,9 @@ class PersistSkill(Skill):
         errors: list[str] = []
 
         # Persist analysis log (include full opportunity list so history can replay scores).
-        if ctx.analysis and ctx.market_data:
-            try:
-                save_analysis(
-                    ctx.ticker,
-                    ctx.analysis,
-                    ctx.market_data,
-                    opportunities=ctx.opportunities or [],
-                    actionable=ctx.actionable or [],
-                    llm_provider=ctx.analysis.get("llm_provider"),
-                    llm_model=ctx.analysis.get("llm_model"),
-                    prompt_tokens=ctx.analysis.get("prompt_tokens") or None,
-                    completion_tokens=ctx.analysis.get("completion_tokens") or None,
-                )
-                _log.debug("persist: saved analysis for %s", ctx.ticker)
-            except Exception:
-                _log.exception("persist: save_analysis failed for %s", ctx.ticker)
-                errors.append("save_analysis failed — check server logs")
+        error = _save_analysis_log(ctx)
+        if error:
+            errors.append(error)
 
         # Persist each actionable signal.
         llm_provider = (ctx.analysis or {}).get("llm_provider")

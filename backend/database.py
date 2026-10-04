@@ -322,6 +322,19 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 CREATE INDEX IF NOT EXISTS idx_reports_created ON reports(created_at);
 CREATE INDEX IF NOT EXISTS idx_reports_type ON reports(type);
+
+-- LLM review history for two-report comparisons (one row per review call).
+CREATE TABLE IF NOT EXISTS report_compares (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_a_id        INTEGER NOT NULL,
+    report_b_id        INTEGER NOT NULL,
+    result_json        TEXT,
+    llm_provider       TEXT,
+    llm_model          TEXT,
+    prompt_tokens      INTEGER NOT NULL DEFAULT 0,
+    completion_tokens  INTEGER NOT NULL DEFAULT 0,
+    created_at         TEXT    NOT NULL
+);
 """
 
 
@@ -692,6 +705,17 @@ def get_usage_stats(days: int = 30, db_path: str | None = None) -> dict[str, Any
                'report' AS source
         FROM reports
         WHERE (prompt_tokens > 0 OR completion_tokens > 0)
+
+        UNION ALL
+
+        SELECT created_at,
+               prompt_tokens,
+               completion_tokens,
+               COALESCE(llm_provider, 'unknown') AS llm_provider,
+               COALESCE(llm_model,    'unknown') AS llm_model,
+               'report_compare' AS source
+        FROM report_compares
+        WHERE (prompt_tokens > 0 OR completion_tokens > 0)
     """
 
     # Build per-query SQL by concatenation — _UNION_SQL is a hardcoded constant (not user
@@ -763,6 +787,7 @@ def get_usage_stats(days: int = 30, db_path: str | None = None) -> dict[str, Any
         "backtest_review": "AI Review",
         "backtest_experiment_advisor": "Experiment Advisor",
         "backtest_compare": "Run Compare",
+        "report_compare": "Report Compare",
     }
 
     return {
@@ -850,7 +875,7 @@ def get_recent_signals(
             try:
                 record["reasons"] = json.loads(record["reasons"])
             except (json.JSONDecodeError, TypeError):
-                pass
+                pass  # leave raw string in place; caller gets what the DB stored
         results.append(record)
     return results, total
 
@@ -1005,6 +1030,47 @@ def get_analysis_history(
     return results
 
 
+def get_latest_analysis_confidence(
+    tickers: list[str], db_path: str | None = None
+) -> dict[str, dict[str, Any]]:
+    """Best setup from each ticker's most recent analysis, for tickers that have one.
+
+    Returns ``{ticker: {confidence, type, analyzed_at}}``. ``confidence``/``type``
+    are None when the analysis found no setup at all.
+    """
+    wanted = sorted({t.upper() for t in tickers if t})
+    if not wanted:
+        return {}
+    marks = ",".join("?" * len(wanted))
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT a.ticker, a.analysis_json, a.opportunities_json, a.created_at "  # noqa: S608
+            "FROM analysis_log a JOIN ("
+            f"  SELECT MAX(id) AS id FROM analysis_log WHERE ticker IN ({marks}) GROUP BY ticker"
+            ") latest ON latest.id = a.id",
+            wanted,
+        ).fetchall()
+
+    out: dict[str, dict[str, Any]] = {}
+    for ticker, analysis_raw, opps_raw, created_at in rows:
+        best: dict[str, Any] = {}
+        try:
+            opps = json.loads(opps_raw) if opps_raw else []
+            best = max(opps, key=lambda o: o.get("confidence") or 0, default={}) or {}
+            if not best:
+                ai_opp = (json.loads(analysis_raw) if analysis_raw else {}).get("opportunity")
+                if ai_opp and (ai_opp.get("confidence") or 0) > 0:
+                    best = ai_opp
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            best = {}
+        out[ticker] = {
+            "confidence": best.get("confidence"),
+            "type": best.get("type"),
+            "analyzed_at": created_at,
+        }
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Key-value app settings (runtime toggles persisted across restarts)
 # --------------------------------------------------------------------------- #
@@ -1145,6 +1211,7 @@ def clear_selected_data(
             result["frac_positions_deleted"] = conn.execute("DELETE FROM frac_positions").rowcount
         if "reports" in cats:
             result["reports_deleted"] = conn.execute("DELETE FROM reports").rowcount
+            conn.execute("DELETE FROM report_compares")
         if "events" in cats:
             result["events_deleted"] = conn.execute("DELETE FROM events").rowcount
         conn.commit()
@@ -1243,28 +1310,47 @@ def get_events(
     return out
 
 
-def get_blocked_event_counts(since_date: str, db_path: str | None = None) -> dict[str, int]:
-    """Return counts of blocked-trade events since *since_date* (ISO date prefix).
+def get_blocked_event_counts(
+    since_date: str, until_date: str | None = None, db_path: str | None = None
+) -> dict[str, int]:
+    """Return counts of blocked-trade events in ``[since_date, until_date)`` (ISO date prefixes).
+
+    *until_date* ``None`` means no upper bound.
 
     Keys: ``position_cap_hits``, ``budget_cap_hits``, ``insufficient_funds_hits``,
-    ``untradable_dropped``.  Used to give the LLM analyst visibility into missed
-    opportunities that never appear in P&L data.
+    ``untradable_dropped`` and ``untradable_tickers``.  Used to give the LLM analyst
+    visibility into missed opportunities that never appear in P&L data.
+
+    ``untradable_dropped`` counts every drop; the same ticker is re-detected on each
+    scan, so ``untradable_tickers`` (distinct tickers) is the size of the real problem.
     """
     with _connect(db_path) as conn:
+        upper = until_date or "9999-12-31"
         rows = conn.execute(
-            "SELECT meta FROM events WHERE category = 'order_blocked' AND ts >= ?",
-            (since_date,),
+            "SELECT meta FROM events WHERE category = 'order_blocked' AND ts >= ? AND ts < ?",
+            (since_date, upper),
         ).fetchall()
-        scan_dropped = conn.execute(
-            "SELECT COUNT(*) FROM events WHERE category = 'scan' AND level = 'warning' AND ts >= ?",
-            (since_date,),
-        ).fetchone()[0]
+        dropped = conn.execute(
+            "SELECT meta FROM events WHERE category = 'scan' AND level = 'warning' "
+            "AND message LIKE 'Dropped %' AND ts >= ? AND ts < ?",
+            (since_date, upper),
+        ).fetchall()
+
+    dropped_tickers: set[str] = set()
+    for (meta_str,) in dropped:
+        try:
+            ticker = (json.loads(meta_str) if meta_str else {}).get("ticker")
+        except (ValueError, TypeError):
+            ticker = None
+        if ticker:
+            dropped_tickers.add(ticker)
 
     counts: dict[str, int] = {
         "position_cap_hits": 0,
         "budget_cap_hits": 0,
         "insufficient_funds_hits": 0,
-        "untradable_dropped": int(scan_dropped),
+        "untradable_dropped": len(dropped),
+        "untradable_tickers": len(dropped_tickers),
     }
     for (meta_str,) in rows:
         try:
@@ -1364,6 +1450,167 @@ def delete_report_record(report_id: int, db_path: str | None = None) -> bool:
         cur = conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
         conn.commit()
         return cur.rowcount > 0
+
+
+def get_report_record(report_id: int, db_path: str | None = None) -> dict[str, Any] | None:
+    """Return a single persisted report (all columns) by id, or None."""
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    d["llm"] = bool(d.get("llm"))
+    return d
+
+
+def save_report_compare(
+    *,
+    report_a_id: int,
+    report_b_id: int,
+    result_json: str,
+    llm_provider: str | None,
+    llm_model: str | None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    db_path: str | None = None,
+) -> int:
+    """Persist one LLM report-comparison review; returns the new row id."""
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO report_compares (report_a_id, report_b_id, result_json, llm_provider, "
+            "llm_model, prompt_tokens, completion_tokens, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                report_a_id,
+                report_b_id,
+                result_json,
+                llm_provider,
+                llm_model,
+                int(prompt_tokens or 0),
+                int(completion_tokens or 0),
+                _now_iso(),
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid or 0)
+
+
+# --------------------------------------------------------------------------- #
+# Window-scoped readers for reports. ``since`` is inclusive and ``until``
+# exclusive, both ``YYYY-MM-DD`` — ISO timestamps compare correctly as strings.
+# --------------------------------------------------------------------------- #
+def get_signals_between(since: str, until: str, db_path: str | None = None) -> list[dict[str, Any]]:
+    """Return every signal created in ``[since, until)``, newest first."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM signals WHERE created_at >= ? AND created_at < ? ORDER BY id DESC",
+            (since, until),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        record = dict(row)
+        if record.get("reasons"):
+            try:
+                record["reasons"] = json.loads(record["reasons"])
+            except (json.JSONDecodeError, TypeError):
+                pass  # leave the raw string; callers only read ticker/type/confidence
+        out.append(record)
+    return out
+
+
+def get_paper_orders_between(since: str, until: str, db_path: str | None = None) -> list[dict]:
+    """Return paper orders created or closed in ``[since, until)``, newest first.
+
+    Callers drop rows closed after ``until`` — realized P&L belongs to the window
+    the trade closed in.
+    """
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT po.*,
+                   COALESCE(po.signal_confidence, s.confidence) AS signal_confidence,
+                   COALESCE(po.signal_source,     s.source)     AS signal_source,
+                   COALESCE(po.signal_timestamp,  s.timestamp)  AS signal_timestamp
+            FROM paper_orders po
+            LEFT JOIN signals s ON s.id = po.signal_id
+            WHERE (po.created_at >= ? AND po.created_at < ?)
+               OR (po.closed_at >= ? AND po.closed_at < ?)
+            ORDER BY po.created_at DESC
+            """,
+            (since, until, since, until),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_frac_positions_between(since: str, until: str, db_path: str | None = None) -> list[dict]:
+    """Return fractional positions opened or closed in ``[since, until)``, newest first."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM frac_positions "
+            "WHERE (opened_at >= ? AND opened_at < ?) OR (closed_at >= ? AND closed_at < ?) "
+            "ORDER BY opened_at DESC",
+            (since, until, since, until),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_order_economics_all_time(db_path: str | None = None) -> dict[str, Any]:
+    """All-time bracket-order economics as a SQL aggregate (no row limit)."""
+    with _connect(db_path) as conn:
+        r = conn.execute("""
+            SELECT
+              SUM(realized_pnl IS NOT NULL)                              AS closed_trades,
+              SUM(realized_pnl > 0)                                      AS wins,
+              SUM(realized_pnl < 0)                                      AS losses,
+              COALESCE(SUM(realized_pnl), 0)                             AS total_pnl,
+              COALESCE(SUM(CASE WHEN realized_pnl > 0 THEN realized_pnl END), 0) AS win_pnl,
+              COALESCE(SUM(CASE WHEN realized_pnl < 0 THEN realized_pnl END), 0) AS loss_pnl,
+              SUM(realized_pnl IS NULL
+                  AND status IN ('filled', 'partially_filled', 'accepted')) AS open_positions,
+              COALESCE(SUM(CASE WHEN realized_pnl IS NULL
+                  AND status IN ('filled', 'partially_filled', 'accepted')
+                  THEN notional END), 0)                                 AS notional_open
+            FROM paper_orders
+            """).fetchone()
+    closed = int(r["closed_trades"] or 0)
+    wins = int(r["wins"] or 0)
+    return {
+        "closed_trades": closed,
+        "wins": wins,
+        "losses": int(r["losses"] or 0),
+        "open_positions": int(r["open_positions"] or 0),
+        "total_pnl": float(r["total_pnl"] or 0),
+        "win_pnl": float(r["win_pnl"] or 0),
+        "loss_pnl": float(r["loss_pnl"] or 0),
+        "win_rate": wins / closed * 100 if closed else None,
+        "notional_open": float(r["notional_open"] or 0),
+    }
+
+
+def get_frac_economics_all_time(db_path: str | None = None) -> dict[str, Any]:
+    """All-time fractional economics as a SQL aggregate (no row limit)."""
+    with _connect(db_path) as conn:
+        r = conn.execute("""
+            SELECT
+              SUM(realized_pnl IS NOT NULL)                                  AS closed_trades,
+              SUM(realized_pnl > 0)                                          AS wins,
+              SUM(realized_pnl < 0)                                          AS losses,
+              COALESCE(SUM(realized_pnl), 0)                                 AS total_pnl,
+              SUM(status = 'open')                                           AS open_positions,
+              COALESCE(SUM(CASE WHEN status = 'open' THEN notional END), 0)  AS notional_open
+            FROM frac_positions
+            """).fetchone()
+    closed = int(r["closed_trades"] or 0)
+    wins = int(r["wins"] or 0)
+    return {
+        "closed_trades": closed,
+        "wins": wins,
+        "losses": int(r["losses"] or 0),
+        "open_positions": int(r["open_positions"] or 0),
+        "total_pnl": float(r["total_pnl"] or 0),
+        "win_rate": wins / closed * 100 if closed else None,
+        "notional_open": float(r["notional_open"] or 0),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -2067,6 +2314,9 @@ def save_backtest_compare(
 
 def save_paper_order(order: dict, db_path: str | None = None) -> int:
     """Insert a new paper order row and return its id."""
+    if order.get("realized_pnl") is not None and not order.get("closed_at"):
+        # Reports attribute realized P&L to the window the trade closed in.
+        order = {**order, "closed_at": _now_iso()}
     with _connect(db_path) as conn:
         cur = conn.execute(
             """
@@ -2143,6 +2393,8 @@ def update_paper_order_status(
     fields = {k: v for k, v in updates.items() if k in allowed and v is not None}
     if not fields:
         return
+    if "realized_pnl" in fields and "closed_at" not in fields:
+        fields["closed_at"] = _now_iso()
     # Keys are validated against the allowlist above — no injection risk.
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = [*fields.values(), alpaca_order_id]

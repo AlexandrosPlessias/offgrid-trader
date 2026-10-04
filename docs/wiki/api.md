@@ -533,6 +533,50 @@ curl -H "Authorization: Bearer <ADMIN_TOKEN>" http://localhost:8010/reports/week
 > `GET /reports/eod` and `GET /reports/llm-summary` were **removed** when reports were
 > split into the four types above.
 
+### `GET /reports/range?mode=&period=` · `GET /reports/range?mode=&start=&end=`
+
+Generate an on-demand report. Pass either `period` (`monthly` · `quarterly` · `yearly`) or
+an inclusive `start` / `end` date pair (`YYYY-MM-DD`, end not in the future, at most 3
+years). `mode` is `orders` or `frac`. The report is saved as `{period}_{mode}` (e.g.
+`quarterly_frac`, `custom_orders`). Add `notify=true` to also send it to ntfy / Telegram.
+Returns the same shape as the fixed-period endpoints plus `window`. `422` on invalid
+input.
+
+### `GET /reports/compare?a=&b=`
+
+Deterministic diff of two reports of the same type — no LLM call. The earlier report is
+always `a` in the response; deltas are `b − a`.
+
+```json
+{
+  "type": "weekly_orders", "mode": "orders",
+  "a": {"id": 12, "report_date": "2026-09-19", "window": {"start": "2026-09-13", "end": "2026-09-19", "days": 7}},
+  "b": {"id": 15, "report_date": "2026-09-26", "window": {"start": "2026-09-20", "end": "2026-09-26", "days": 7}},
+  "metrics_basis": "window",
+  "metrics": [{"key": "total_pnl", "label": "P&L", "a": -14.0, "b": 41.5, "delta": 55.5,
+               "pct_delta": 396.43, "higher_is_better": true}],
+  "config": [{"key": "PAPER_MAX_POSITIONS", "a": "5", "b": "8"}],
+  "config_available": true,
+  "comparability": "full",
+  "comparability_reasons": ["Consecutive windows of equal length with enough trades and config snapshots."],
+  "buckets": {"granularity": "day", "a": {"signals": {}, "pnl": {}}, "b": {"signals": {}, "pnl": {}}}
+}
+```
+
+`pct_delta` is `null` when `a` is zero; `higher_is_better` is `null` for metrics with no
+good/bad direction. Errors: `404` unknown id · `409` different report types · `422` same
+id twice or a report with no structured data.
+
+### `POST /reports/compare/review`
+
+Body `{"a": <id>, "b": <id>}`. Strict LLM review of the pair — same validation as above.
+Returns `verdict`, `verdict_confidence`, `summary`, `comparability_note`, `good[]`,
+`bad[]` (each with a `cause`), `improve[]` (`setting`, `current_value`, `proposed_value`,
+`rationale`, `expected_effect`, `confidence`), `watch_next[]`, plus `comparability`,
+`model_used` and token counts. Uses the `llm_model_report_compare` override when set; `503`
+if the LLM is unavailable. Each call is saved to `report_compares` and tracked as the
+`report_compare` AI-usage source.
+
 ### `GET /reports?limit=&type=`
 
 List persisted reports, newest first. `type` filters by `report_type`:
@@ -1022,5 +1066,30 @@ Returns all scored candidates for one run, ordered by score descending.
 
 ```json
 { "run_id": 3, "candidates": [{ "ticker": "NVDA", "score": 87.5, "source": "alpaca_actives", "price": 131.2, ... }] }
+```
+
+### `POST /discovery/runs/{run_id}/confidence-scan`
+
+Starts an **analysis-only** Explorer scan, in the background, for every candidate in the run
+that scored at or above `discovery_min_score` and has never been analysed. Each ticker is
+attempted at most once per run; repeat calls start nothing. Skipped entirely while the market
+is closed. The scan saves the analysis but never saves signals, places orders or sends alerts.
+
+```json
+{ "started": ["FLUX", "QTEX"], "skipped": null }
+{ "started": [], "skipped": "market_closed" }
+```
+
+### `GET /discovery/runs/{run_id}/confidence`
+
+The best setup from each candidate's latest analysis, plus its scan status
+(`done` · `scanning` · `failed` · `none`). `confidence`/`type` are null when the analysis found
+no setup.
+
+```json
+{ "run_id": 3, "confidence": {
+    "ACN":  { "status": "done", "confidence": 82, "type": "short", "analyzed_at": "2026-10-04T15:00:00Z" },
+    "FLUX": { "status": "scanning" },
+    "IOVA": { "status": "none" } } }
 ```
 
