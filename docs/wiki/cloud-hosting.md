@@ -134,7 +134,9 @@ curl https://offgrid-trader.fly.dev/health
 `fly.toml` sets both `auto_start_machines` and `auto_stop_machines` to **false** on every
 service, with `min_machines_running = 0`. That is deliberate: the
 [Cloudflare Workers cron](cloudflare-cron.md) starts the machine at 8:30 AM ET and stops
-it after the close, and nothing else should override that.
+it after the close, and nothing else should override that. The same jobs put the Vercel
+frontend online and take it offline by assigning and removing the production alias, so the
+site is unreachable overnight and at weekends.
 
 Leaving `auto_start_machines = true` would let any inbound HTTP request wake the
 machine — including the ntfy sidecar's own WebSocket reconnects from your phone, which

@@ -17,14 +17,14 @@ day's events in order:
 
 | Event | Source |
 |---|---|
-| **System wake (Fly start)** | Cloudflare cron starts the Fly machine |
+| **System wake (Fly + Vercel)** | Cloudflare cron starts the Fly machine and puts the site back online |
 | **Market opens** | US market open (09:30 ET) |
 | **Signal scan** | In-process scheduler, repeating every `scan_interval_minutes` |
 | **Discovery run** | Trending-ticker discovery, hourly when enabled |
 | **Market closes** | US market close (16:00 ET) |
 | **EOD report** | `GET /reports/eod/orders` + `GET /reports/eod/frac` |
 | **End-of-Week report** | Friday only — `GET /reports/weekly/orders` + `/weekly/frac` |
-| **System stop (Fly)** | Cloudflare cron stops the Fly machine |
+| **System stop (Fly + Vercel)** | Cloudflare cron stops the Fly machine and takes the site offline |
 
 Because the scan interval is read live from `/settings`, changing it in
 **Settings → Scheduler** immediately redraws the timeline.
@@ -55,6 +55,10 @@ owns what:
 
 A consequence worth remembering: if the machine never wakes, no scans happen *and* the
 report endpoints fail, because they are served by the very app that is still stopped.
+
+Between the stop and the next wake the site itself is offline too:
+`offgrid-trader.vercel.app` returns `DEPLOYMENT_NOT_FOUND` until the morning start
+re-points it. This page is therefore only reachable while the app is awake.
 
 ---
 

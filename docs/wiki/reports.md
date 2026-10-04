@@ -246,6 +246,19 @@ When a trade is wanted but blocked, the system saves an `order_blocked` event:
 These events are visible in the [Activity feed](observability.md#activity-feed-in-app-event-log)
 and counted into every report's `blocked_events` context.
 
+Untradable drops are logged as `Dropped … signal` scan warnings rather than `order_blocked`
+events, and they are counted two ways:
+
+- `untradable_dropped` — every drop. The same ticker is re-detected on each scan, so this
+  number grows quickly (one non-shortable ticker can be dropped 40+ times a week).
+- `untradable_tickers` — distinct tickers dropped. This is the size of the real problem.
+
+No setting turns an untradable signal into a trade, so the report prompts forbid tuning
+suggestions for these drops (in particular any `SIGNAL_DROP_MODE` change). The useful
+response is removing the tickers from the watchlist. Every prompt also shows each setting's
+allowed values next to its current value, and the comparator review rejects an impossible
+value such as `SIGNAL_DROP_MODE=none`.
+
 ---
 
 ## API

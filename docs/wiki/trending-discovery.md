@@ -71,8 +71,15 @@ Settings are available in two places:
 | `discovery_interval_minutes` | 60 | Minutes between scheduled runs |
 | `discovery_autoscan_enabled` | false | Run full agent pipeline on top-N candidates |
 | `discovery_autoscan_top_n` | 3 | Number of candidates to auto-scan |
+| `discovery_autoadd_enabled` | false | Add the strongest tradable candidates to the watchlist after each run |
+| `discovery_autoadd_top_n` | 5 | Max candidates auto-added per run (1–25) |
 
 All settings override env-var defaults and take effect without a restart.
+
+**Auto-add respects manual removals.** A ticker you removed from the watchlist is never
+re-added by auto-add, even if it keeps trending. Adding it back yourself (single or bulk add)
+clears the removal. This matters for momentum small caps that the scanner keeps wanting to
+short but Alpaca won't let you short: remove them once and they stay out.
 
 ---
 

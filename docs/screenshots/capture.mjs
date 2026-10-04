@@ -109,6 +109,28 @@ async function login(page) {
   }
 }
 
+/** Open Settings and expand one section by its stable id, scrolled to the top. */
+async function openSettingsSection(page, id) {
+  await goto(page, BASE);
+  await page.locator('button[title="Settings"]').click();
+  await page.waitForTimeout(600);
+  await page.locator(`#${id} .settings-section-title`).click();
+  await page.waitForTimeout(800);
+  // Offset for the sticky header so the section title stays visible.
+  await page.locator(`#${id}`).evaluate((el) => {
+    el.scrollIntoView({ block: 'start' });
+    window.scrollBy(0, -96);
+  });
+  await page.waitForTimeout(400);
+}
+
+/** Blank every text input inside a section — display only, nothing is saved. */
+async function maskInputs(page, id) {
+  await page.locator(`#${id} input[type="text"], #${id} input:not([type])`).evaluateAll((els) => {
+    for (const el of els) el.value = '••••••••••••';
+  });
+}
+
 /** Navigate to a page and handle login if needed. */
 async function goto(page, url) {
   // 'load' is faster and more reliable than 'networkidle' on pages with polling APIs
@@ -239,22 +261,8 @@ await shot(page, '16-discovery.png', async () => {
 });
 
 await shot(page, '17-discovery-settings.png', async () => {
-  // Still on Discovery page — click the inline Settings shortcut if visible,
-  // otherwise navigate to Settings → Discovery section
-  try {
-    const inlineSettings = page.locator('button:has-text("Discovery Settings"), button:has-text("⚙")').first();
-    const visible = await inlineSettings.isVisible().catch(() => false);
-    if (visible) {
-      await inlineSettings.click();
-      await page.waitForTimeout(800);
-    } else {
-      await goto(page, BASE);
-      await page.locator('button[title="Settings"]').click();
-      await page.waitForTimeout(600);
-      await page.locator('text=Discovery').first().click();
-      await page.waitForTimeout(600);
-    }
-  } catch { console.warn('⚠  Discovery settings not found — screenshotting current view'); }
+  try { await openSettingsSection(page, 'settings-discovery'); }
+  catch { console.warn('⚠  Discovery settings section not found'); }
 });
 
 // ── 2c. Mobile — hamburger nav drawer (375 × 812) ────────────────────────────
@@ -363,10 +371,8 @@ await shot(page, '11-dashboard-paper-orders.png', async () => {
 });
 
 await shot(page, '12-settings-paper-trading.png', async () => {
-  await goto(page, BASE);
-  await page.locator('button[title="Settings"]').click();
-  await page.waitForTimeout(600);
-  try { await page.locator('text=Order Trading').first().click(); await page.waitForTimeout(800); } catch { console.warn('⚠  Order Trading nav item not found'); }
+  try { await openSettingsSection(page, 'settings-paper'); }
+  catch { console.warn('⚠  Paper Trading settings section not found'); }
 });
 
 // ── 7. Fractional Trading tab + settings ─────────────────────────────────────
@@ -402,13 +408,18 @@ await shot(page, '25-reports-compare.png', async () => {
   try {
     await page.locator('.header-nav button:has-text("Reports")').click();
     await page.waitForTimeout(2000);
-    // Tick the first report, then the next one the UI still allows (same type only).
+    // Find the first report that has a same-type partner: tick it, tick the first box the
+    // UI still allows, otherwise untick and try the next report.
     const boxes = page.locator('label:has-text("Compare"):visible input[type="checkbox"]');
-    await boxes.first().check();
-    await page.waitForTimeout(300);
     const n = await boxes.count();
-    for (let i = 1; i < n; i++) {
-      if (!(await boxes.nth(i).isDisabled())) { await boxes.nth(i).check(); break; }
+    let paired = false;
+    for (let i = 0; i < n && !paired; i++) {
+      await boxes.nth(i).check();
+      await page.waitForTimeout(300);
+      for (let j = i + 1; j < n; j++) {
+        if (!(await boxes.nth(j).isDisabled())) { await boxes.nth(j).check(); paired = true; break; }
+      }
+      if (!paired) { await boxes.nth(i).uncheck(); await page.waitForTimeout(300); }
     }
     await page.locator('text=What moved').first().waitFor({ timeout: 8000 });
     await page.waitForTimeout(1200);
@@ -449,13 +460,9 @@ await shot(page, '22-settings-autonomous.png', async () => {
 });
 
 await shot(page, '23-settings-notifications.png', async () => {
-  await goto(page, BASE);
-  await page.locator('button[title="Settings"]').click();
-  await page.waitForTimeout(600);
-  try {
-    await page.locator('text=Notifications').first().click();
-    await page.waitForTimeout(800);
-  } catch { console.warn('⚠  Notifications settings section not found'); }
+  // The ntfy topic and Telegram chat ID act as credentials — never publish them.
+  try { await openSettingsSection(page, 'settings-notifications'); await maskInputs(page, 'settings-notifications'); }
+  catch { console.warn('⚠  Notifications settings section not found'); }
 });
 
 await browser.close();

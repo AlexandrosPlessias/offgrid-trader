@@ -1187,7 +1187,7 @@ function AutonomousTradingSection() {
         <select className="settings-select" value={dropMode}
                 onChange={e => setDropMode(e.target.value)} style={{ maxWidth: 260 }}>
           <option value="untradable">Drop only untradable (recommended)</option>
-          <option value="strict">Strict — also drop when out of funds/capacity</option>
+          <option value="strict">Strict — same as untradable for now (reserved)</option>
           <option value="never">Never drop (keep full audit trail)</option>
         </select>
       </div>

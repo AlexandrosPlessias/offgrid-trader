@@ -65,7 +65,7 @@ Captured with headless Chromium via [Playwright](https://playwright.dev).
 | `10-settings-ai-usage-quota.png` | Settings → AI Usage — provider quota box |
 | `19-settings-fractional.png` | Settings → Live / Fractional profile |
 | `22-settings-autonomous.png` | Settings → Autonomous — confidence floors, max positions, signal drop mode, allow-live rail |
-| `23-settings-notifications.png` | Settings → Notifications — ntfy + Telegram toggles, test button |
+| `23-settings-notifications.png` | Settings → Notifications — ntfy + Telegram toggles, test button (topic, server and chat ID masked) |
 
 ### Explorer — section walkthrough (AAPL)
 
@@ -141,6 +141,11 @@ Existing files are overwritten — safe to re-run any time.
 5. Scrolls to each section in turn and takes a viewport screenshot
 6. Captures paper trading screenshots (Dashboard Paper Orders sidebar, Settings Paper Trading section)
 7. Closes the browser and prints `✓ <filename>` for each
+
+Settings shots open each section by its stable id (`#settings-paper`, `#settings-notifications`, …)
+rather than by visible text. Before the Notifications shot, the script blanks that section's text
+inputs in the page (nothing is saved), because the ntfy topic and Telegram chat ID work like
+credentials and these images are public.
 
 ### Troubleshooting
 

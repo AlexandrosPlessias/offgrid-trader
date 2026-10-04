@@ -289,6 +289,40 @@ def _current_tuning(mode: str | None = None) -> dict[str, str]:
     return {**shared, **orders_only, **frac_only}
 
 
+# Allowed values per knob, shown next to each value in the prompt so the analyst can't
+# propose a value the Settings API would reject (e.g. SIGNAL_DROP_MODE=none).
+_TUNING_ALLOWED: dict[str, str] = {
+    "RSI_OVERSOLD": "0-100",
+    "RSI_OVERBOUGHT": "0-100",
+    "VOLUME_SPIKE_MULTIPLIER": "number >= 0 (x average volume)",
+    "SIGNIFICANT_MOVE_PCT": "percent > 0 (env-only)",
+    "CONFIDENCE_FLOOR": "0-100",
+    "SIGNAL_DROP_MODE": (
+        "exactly one of untradable | strict | never. untradable drops signals that can "
+        "neither bracket nor frac; strict is currently identical; never keeps them but they "
+        "still cannot be ordered — no mode turns an untradable signal into a trade"
+    ),
+    "DISCOVERY_MIN_SCORE": "0-100",
+    "DISCOVERY_AUTOADD_ENABLED": "true | false",
+    "DISCOVERY_AUTOADD_TOP_N": "integer 1-25",
+    "PAPER_MAX_POSITIONS": "integer 0-100",
+    "PAPER_TRADE_MIN_CONFIDENCE": "0-100 (0 = use CONFIDENCE_FLOOR)",
+    "FRAC_MIN_CONFIDENCE": "0-100",
+    "FRAC_BUDGET": "dollars >= 0",
+    "FRAC_POSITION_SIZE": "dollars >= 0",
+    "FRAC_POLL_SECONDS": "integer >= 10",
+}
+
+
+def _render_tuning(tuning: dict[str, Any]) -> str:
+    """One ``KEY=value  (allowed: …)`` line per knob for the analyst prompt."""
+    lines = []
+    for key, value in tuning.items():
+        allowed = _TUNING_ALLOWED.get(key)
+        lines.append(f"{key}={value}  (allowed: {allowed})" if allowed else f"{key}={value}")
+    return "\n".join(lines)
+
+
 def _report_context(
     period: str,
     eco: dict[str, Any],
@@ -386,7 +420,7 @@ def _llm_report(
     tuning = context.get("tuning") or _current_tuning(None)
     tokens = {k: v for k, v in metrics.items() if not k.startswith("_")}
     tokens["CONTEXT_JSON"] = json.dumps(context, default=str)
-    tokens["TUNING_CONFIG"] = "\n".join(f"{k}={v}" for k, v in tuning.items())
+    tokens["TUNING_CONFIG"] = _render_tuning(tuning)
     prompt = _render_prompt(prompt_file, tokens)
     try:
         raw, model, pt, ct = call_llm(
@@ -675,12 +709,14 @@ def _run_report(
             "budget_cap_hits": all_blocked.get("budget_cap_hits", 0),
             "insufficient_funds_hits": all_blocked.get("insufficient_funds_hits", 0),
             "untradable_dropped": all_blocked.get("untradable_dropped", 0),
+            "untradable_tickers": all_blocked.get("untradable_tickers", 0),
         }
     else:
         blocked = {
             "position_cap_hits": all_blocked.get("position_cap_hits", 0),
             "insufficient_funds_hits": all_blocked.get("insufficient_funds_hits", 0),
             "untradable_dropped": all_blocked.get("untradable_dropped", 0),
+            "untradable_tickers": all_blocked.get("untradable_tickers", 0),
         }
     context = _report_context(
         period,
@@ -1189,8 +1225,21 @@ class ReportCompareRequest(BaseModel):
     b: int = Field(..., ge=1)
 
 
+_ENUM_KNOBS: dict[str, set[str]] = {
+    "SIGNAL_DROP_MODE": {"untradable", "strict", "never"},
+    "DISCOVERY_AUTOADD_ENABLED": {"true", "false"},
+}
+
+
+def _invalid_enum_value(item: dict[str, Any]) -> bool:
+    choices = _ENUM_KNOBS.get(str(item.get("setting") or ""))
+    return (
+        choices is not None and str(item.get("proposed_value", "")).strip().lower() not in choices
+    )
+
+
 def _scope_violations(result: dict[str, Any], allowed: set[str]) -> list[str]:
-    """Suggestions naming settings outside this report's flow are schema errors."""
+    """Out-of-flow settings and impossible enum values are schema errors."""
     errs: list[str] = []
     for item in result.get("improve") or []:
         setting = item.get("setting") if isinstance(item, dict) else None
@@ -1198,6 +1247,11 @@ def _scope_violations(result: dict[str, Any], allowed: set[str]) -> list[str]:
             errs.append(
                 f"improve[].setting '{setting}' is not allowed for this report — use only: "
                 + ", ".join(sorted(allowed))
+            )
+        elif setting and _invalid_enum_value(item):
+            errs.append(
+                f"improve[].proposed_value for {setting} must be one of: "
+                + " | ".join(sorted(_ENUM_KNOBS[setting]))
             )
     return errs
 
@@ -1225,11 +1279,14 @@ async def review_report_comparison(request: ReportCompareRequest) -> dict[str, A
             **(_report_ctx(rec) or {}),
         }
 
+    snap_a, snap_b = _snapshot(ra), _snapshot(rb)
+    knobs = set(snap_a.get("tuning") or {}) | set(snap_b.get("tuning") or {})
     payload = {
         "comparability": {"grade": grade, "reasons": reasons},
         "diff": {k: v for k, v in diff.items() if k != "buckets"},
-        "report_a": _snapshot(ra),
-        "report_b": _snapshot(rb),
+        "report_a": snap_a,
+        "report_b": snap_b,
+        "tuning_allowed": {k: v for k, v in _TUNING_ALLOWED.items() if k in knobs},
     }
     user_prompt = _render_prompt(
         "report_compare_user.md",
@@ -1285,11 +1342,13 @@ async def review_report_comparison(request: ReportCompareRequest) -> dict[str, A
             "bad": [],
             "improve": [],
         }
-    # Never show out-of-scope suggestions, even if the repair didn't fix them.
+    # Never show out-of-scope or impossible suggestions, even if the repair didn't fix them.
     result["improve"] = [
         i
         for i in (result.get("improve") or [])
-        if isinstance(i, dict) and (not allowed or i.get("setting") in allowed)
+        if isinstance(i, dict)
+        and (not allowed or i.get("setting") in allowed)
+        and not _invalid_enum_value(i)
     ]
     if grade == "none":
         result["verdict"] = "inconclusive"

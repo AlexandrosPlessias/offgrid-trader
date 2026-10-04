@@ -17,6 +17,7 @@ directly::
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 from datetime import datetime
@@ -469,13 +470,15 @@ def _autoadd_tradable_candidates(candidates: list[dict[str, Any]]) -> None:
         from .routes._models import _clean_ticker
 
         top_n = int(get_setting("discovery_autoadd_top_n", "") or _cfg().discovery.autoadd_top_n)
+        # A manual removal is a decision; add_watchlist_tickers would un-remove it.
+        removed = set(json.loads(get_setting("watchlist_removed", "[]") or "[]"))
         client = get_client()
         tradable_tickers: list[str] = []
         for cand in candidates:
             if len(tradable_tickers) >= top_n:
                 break  # only add the strongest top-N per run
             ticker = (cand.get("ticker") or "").strip().upper()
-            if not ticker:
+            if not ticker or ticker in removed:
                 continue
             try:
                 asset = client._get(f"/v2/assets/{_clean_ticker(ticker)}")
@@ -749,7 +752,6 @@ scheduler = MonitorScheduler()
 
 
 if __name__ == "__main__":
-    import json
 
     async def _main() -> None:
         print(f"market_open={is_market_open()}")

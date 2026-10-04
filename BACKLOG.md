@@ -475,6 +475,10 @@ The review must cover the **whole project** — not just these three — but cha
 ## ✅ 8. Replace the in-process scheduler with a Cloudflare Workers cron trigger
 *Shipped on branch `feat/backlog-8-cloudflare-cron` (commit `1298891`)*
 
+*Follow-up (2026-10):* the Worker also manages the Vercel frontend — the start job re-points
+`offgrid-trader.vercel.app` at the latest production deployment and the stop job removes the
+alias, so the site follows the same wake/stop schedule as the backend.
+
 The in-process `MonitorScheduler` (`backend/scheduler.py`) is a hand-rolled `while` loop that silently misses ticks whenever the backend restarts or Fly idles the machine (`fly.toml` sets `auto_stop_machines = "stop"` and `min_machines_running = 0`). Scans, the EoD digest, and the new LLM reports must fire on schedule regardless of backend uptime — so the trigger has to live *outside* the app it wakes up.
 
 ### Chosen approach — Cloudflare Workers Cron Triggers
@@ -523,6 +527,10 @@ The in-process `MonitorScheduler` (`backend/scheduler.py`) is a hand-rolled `whi
   with adaptive bucketing and a shared `llm_model_range` override.
 - **Fixes along the way** — report data is queried by date in SQL (no 500-row truncation), all-time
   figures come from SQL aggregates, and Settings no longer wipes per-report model overrides on save.
+- **Shipped alongside** — the Cloudflare nightly stop now also removes the Vercel alias, so the
+  site is offline overnight and at weekends (see item 8). Two CodeQL findings were fixed: report
+  prompt files are looked up from an allowlist instead of a path built from the request, and the
+  Ollama log line no longer includes the raw prompt.
 
 The four report types (`eod_frac`, `eod_orders`, `weekly_frac`, `weekly_orders`) each
 summarise a **single** window: EoD = today, weekly = the last 7 days, plus some all-time

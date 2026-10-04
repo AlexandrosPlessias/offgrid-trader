@@ -39,8 +39,15 @@ Guidance on the fractional knobs:
 - CONFIDENCE_FLOOR — signal floor. Raise if too many low-quality signals entered the pipeline.
 
 Missed-opportunity analysis (mandatory if data present):
-For each type in `blocked_events` that is > 0, state the count, estimate the missed notional
-(count × FRAC_POSITION_SIZE), and give a specific recommended setting change with new value.
+For `budget_cap_hits` and `insufficient_funds_hits`, if > 0: state the count, estimate the missed
+notional (count × FRAC_POSITION_SIZE), and give a specific recommended setting change with new
+value.
+`untradable_dropped` is different: those signals could never become an order (not tradable, or
+a short — fractional buys are long-only and the stock cannot be shorted), so NO setting
+recovers them — never propose a SIGNAL_DROP_MODE change for them. Report `untradable_tickers`
+(distinct tickers; `untradable_dropped` re-counts the same ticker on every scan) and, if
+worthwhile, suggest removing those tickers from the watchlist under `suggestions`, not `tuning`.
+Every proposed value must lie within the `allowed` range shown next to that setting.
 
 Return a weekly analyst review as compact JSON with EXACTLY these keys:
 {

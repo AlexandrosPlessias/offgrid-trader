@@ -67,7 +67,7 @@ function buildEvents(dayDate, marketHours, scanIntervalMinutes, fracPollSeconds)
   const events = []
 
   const wakeTime = new Date(openTime.getTime() - 60 * 60000)
-  events.push({ time: wakeTime, label: 'System wake (Fly start)', color: '#6b7280', bg: '#1c1e26' })
+  events.push({ time: wakeTime, label: 'System wake (Fly + Vercel)', color: '#6b7280', bg: '#1c1e26' })
 
   events.push({ time: openTime, label: 'Market opens', color: '#22c55e', bg: '#0f2d1a' })
 
@@ -111,7 +111,7 @@ function buildEvents(dayDate, marketHours, scanIntervalMinutes, fracPollSeconds)
   }
 
   const stopTime = new Date(closeTime.getTime() + 90 * 60000)
-  events.push({ time: stopTime, label: 'System stop (Fly)', color: '#6b7280', bg: '#1c1e26' })
+  events.push({ time: stopTime, label: 'System stop (Fly + Vercel)', color: '#6b7280', bg: '#1c1e26' })
 
   events.sort((a, b) => {
     if (!a.time) return 0

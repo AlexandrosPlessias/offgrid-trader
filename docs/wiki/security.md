@@ -174,6 +174,30 @@ raises `AlpacaError` before the HTTP call is made.
 
 ---
 
+## Path traversal — report prompt files
+
+The report routes pick a prompt file from the request: `report_{report_type}.md` or
+`report_range_{mode}.md`. Joining that name onto `backend/prompts/` would let a crafted
+`report_type` read a file outside the directory.
+
+**Fix (2026-10-03):** `_render_prompt()` in `backend/routes/reports.py` no longer builds a
+path from the name. It lists the `*.md` files in `backend/prompts/` and looks the name up in
+that list; the file read always comes from the listing. Any name not in it, including
+anything containing `../`, raises `FileNotFoundError`.
+
+Adding a new report prompt still only requires dropping a `.md` file into `backend/prompts/`.
+
+## Log injection — Ollama prompt logging
+
+The `ollama ▶` log line used to append the full prompt, which contains ticker and context
+data from outside the app. Embedded newlines in that text could forge extra log lines.
+
+**Fix (2026-10-03):** the line now logs only `ticker`, `model` and `prompt_chars`. Prompt text
+reaches traces only when `OTEL_INCLUDE_LLM_CONTENT` is enabled — see
+[Observability](observability.md).
+
+---
+
 ## Related pages
 
 - [Architecture](architecture.md) — AdminTokenMiddleware in the request flow diagram

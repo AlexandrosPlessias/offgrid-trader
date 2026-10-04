@@ -1277,8 +1277,11 @@ def get_blocked_event_counts(
     *until_date* ``None`` means no upper bound.
 
     Keys: ``position_cap_hits``, ``budget_cap_hits``, ``insufficient_funds_hits``,
-    ``untradable_dropped``.  Used to give the LLM analyst visibility into missed
-    opportunities that never appear in P&L data.
+    ``untradable_dropped`` and ``untradable_tickers``.  Used to give the LLM analyst
+    visibility into missed opportunities that never appear in P&L data.
+
+    ``untradable_dropped`` counts every drop; the same ticker is re-detected on each
+    scan, so ``untradable_tickers`` (distinct tickers) is the size of the real problem.
     """
     with _connect(db_path) as conn:
         upper = until_date or "9999-12-31"
@@ -1286,17 +1289,27 @@ def get_blocked_event_counts(
             "SELECT meta FROM events WHERE category = 'order_blocked' AND ts >= ? AND ts < ?",
             (since_date, upper),
         ).fetchall()
-        scan_dropped = conn.execute(
-            "SELECT COUNT(*) FROM events "
-            "WHERE category = 'scan' AND level = 'warning' AND ts >= ? AND ts < ?",
+        dropped = conn.execute(
+            "SELECT meta FROM events WHERE category = 'scan' AND level = 'warning' "
+            "AND message LIKE 'Dropped %' AND ts >= ? AND ts < ?",
             (since_date, upper),
-        ).fetchone()[0]
+        ).fetchall()
+
+    dropped_tickers: set[str] = set()
+    for (meta_str,) in dropped:
+        try:
+            ticker = (json.loads(meta_str) if meta_str else {}).get("ticker")
+        except (ValueError, TypeError):
+            ticker = None
+        if ticker:
+            dropped_tickers.add(ticker)
 
     counts: dict[str, int] = {
         "position_cap_hits": 0,
         "budget_cap_hits": 0,
         "insufficient_funds_hits": 0,
-        "untradable_dropped": int(scan_dropped),
+        "untradable_dropped": len(dropped),
+        "untradable_tickers": len(dropped_tickers),
     }
     for (meta_str,) in rows:
         try:

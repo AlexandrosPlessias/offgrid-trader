@@ -41,7 +41,9 @@ nav drawer. Code split into focused modules: 9 backend route files, 31 frontend 
 
 - **Autonomous trading** — a hands-off loop turns signals into orders without a tap: a **tradability gate** drops permanently un-actionable signals, confidence floors and a position cap govern placement, and a paper-only safety rail guards live fractional buys. All knobs are env defaults with live Settings → Autonomous overrides. See [docs/wiki/paper-trading.md](docs/wiki/paper-trading.md#autonomous-trading)
 - **Discovery auto-add** — high-score tradable candidates from Trending Discovery can be auto-added to the watchlist (capped per run)
-- **Reports** — four persisted report types (**end-of-day** and **weekly**, each split across **bracket orders** and **fractional**) combine deterministic account figures with an LLM analyst narrative (commentary, patterns, and parameter-tuning suggestions), viewable on the Reports tab and delivered to your channels. See [docs/wiki/reports.md](docs/wiki/reports.md)
+- **Reports** — four persisted report types (**end-of-day** and **weekly**, each split across **bracket orders** and **fractional**) combine deterministic account figures with an LLM analyst narrative (commentary, patterns, and parameter-tuning suggestions), viewable on the Reports tab and delivered to your channels. Reports can also be run on demand over **monthly, quarterly, yearly or custom** ranges. See [docs/wiki/reports.md](docs/wiki/reports.md)
+- **Report comparator** — tick any two reports of the same type to see what moved: metric and tuning-setting deltas, a comparability grade, charts, and an optional LLM review with concrete tuning suggestions. See [docs/wiki/reports.md](docs/wiki/reports.md)
+- **Automatic schedule** — a Cloudflare Workers cron wakes the backend and puts the site online at 8:30 AM ET, sends the EoD and weekly reports, and takes both offline at 5:30 PM ET (and over the weekend). See [docs/wiki/cloudflare-cron.md](docs/wiki/cloudflare-cron.md)
 - **Activity feed** — an in-app event log (scan / order / discovery / notification / scheduler / report / system) with an Errors filter, for at-a-glance history without an external service. See [docs/wiki/observability.md](docs/wiki/observability.md#activity-feed-in-app-event-log)
 
 ### Mobile responsiveness
@@ -85,6 +87,16 @@ nav drawer. Code split into focused modules: 9 backend route files, 31 frontend 
 | Dashboard — Paper Orders sidebar + live prices | Settings — Paper Trading |
 |---|---|
 | ![Paper Orders sidebar](docs/screenshots/11-dashboard-paper-orders.png) | ![Paper Trading settings](docs/screenshots/12-settings-paper-trading.png) |
+
+### Reports & Schedule
+
+| Reports — history, range presets, Compare checkboxes | Report comparator — deltas and "what moved" |
+|---|---|
+| ![Reports tab](docs/screenshots/20-reports.png) | ![Report comparator](docs/screenshots/25-reports-compare.png) |
+
+| Schedule — the trading week as a timeline |
+|---|
+| ![Schedule tab](docs/screenshots/24-schedule.png) |
 
 ### Discovery & Mobile
 
@@ -368,6 +380,10 @@ See [docs/wiki/indicators.md](docs/wiki/indicators.md) for a full indicator refe
 | [Settings Reference](docs/wiki/settings.md) | Every `.env` variable, defaults, runtime-mutable column, AI Usage section |
 | [Glossary](docs/wiki/glossary.md) | Alphabetical trading and macro terminology |
 | [Observability](docs/wiki/observability.md) | OTEL span hierarchy, Aspire usage, log reference |
+| [Reports](docs/wiki/reports.md) | EoD / weekly / range reports, the report comparator and its LLM review |
+| [Schedule](docs/wiki/schedule.md) | The trading-week timeline and which scheduler owns each event |
+| [Cloudflare cron](docs/wiki/cloudflare-cron.md) | Wake/stop of Fly + Vercel, report triggers, local testing, logs |
+| [Security](docs/wiki/security.md) | Admin token, CORS, SSRF and path-traversal fixes, log hygiene |
 | [Development](docs/wiki/development.md) | VS Code setup, `make lint`, test layout, Docker naming, PR/CI notes |
 
 ---

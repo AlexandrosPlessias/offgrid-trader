@@ -132,7 +132,7 @@ behaviour and the tradability gate.
 | `FRAC_MIN_CONFIDENCE` | `85` | ✓ | Stricter confidence floor for fractional buys (they commit notional). |
 | `PAPER_TRADE_MIN_CONFIDENCE` | `0` | ✓ | Optional bracket-only floor; `0` falls back to `CONFIDENCE_FLOOR`. |
 | `PAPER_MAX_POSITIONS` | `5` | ✓ | Hold new bracket orders once this many positions are open. |
-| `SIGNAL_DROP_MODE` | `untradable` | ✓ | Tradability gate: `untradable` (drop only permanently unactionable) · `strict` (also drop transiently blocked) · `never` (annotate only). |
+| `SIGNAL_DROP_MODE` | `untradable` | ✓ | Tradability gate: `untradable` (drop only permanently unactionable) · `strict` (currently identical to `untradable`; reserved) · `never` (annotate only). See [Paper Trading § The tradability gate](paper-trading.md#the-tradability-gate). |
 | `FRAC_AUTOTRADE_ALLOW_LIVE` | `false` | ✓ | Safety rail — autonomous frac buys stay paper-only unless `true`. |
 | `DISCOVERY_AUTOADD_ENABLED` | `false` | ✓ | Auto-add high-score tradable discovery candidates to the watchlist. |
 | `DISCOVERY_AUTOADD_TOP_N` | `5` | ✓ | Per-run cap on auto-added candidates (strongest N by score). |
