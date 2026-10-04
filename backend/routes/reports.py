@@ -211,7 +211,11 @@ _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 def _render_prompt(filename: str, tokens: dict[str, str]) -> str:
     """Load a report prompt from backend/prompts/ and fill its {{TOKEN}} slots."""
-    text = (_PROMPTS_DIR / filename).read_text(encoding="utf-8")
+    # Allowlist lookup: the path comes from the directory listing, never from the caller.
+    path = {p.name: p for p in _PROMPTS_DIR.glob("*.md")}.get(filename)
+    if path is None:
+        raise FileNotFoundError(f"Unknown report prompt: {filename!r}")
+    text = path.read_text(encoding="utf-8")
     for key, value in tokens.items():
         text = text.replace("{{" + key + "}}", value)
     return text

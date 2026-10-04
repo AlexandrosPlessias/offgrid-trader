@@ -875,7 +875,7 @@ def get_recent_signals(
             try:
                 record["reasons"] = json.loads(record["reasons"])
             except (json.JSONDecodeError, TypeError):
-                pass
+                pass  # leave raw string in place; caller gets what the DB stored
         results.append(record)
     return results, total
 

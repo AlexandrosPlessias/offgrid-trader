@@ -6,6 +6,7 @@ fixtures defined here are available to every submodule without explicit import.
 
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 import tempfile
@@ -31,16 +32,10 @@ os.environ["ADMIN_TOKEN"] = ""  # noqa: S105
 # Section 1 — Import all backend modules; fail fast if any is missing.
 # --------------------------------------------------------------------------- #
 try:
-    from backend import (  # noqa: E402, F401
-        alerts,  # noqa: F401  — import-existence check; not referenced directly
-        analysis,  # noqa: F401
-        config,  # noqa: F401
-        data,  # noqa: F401
-        database,
-        opportunities,
-        scheduler,  # noqa: F401
-    )
-    from backend.main import app  # noqa: E402, F401  — import-existence check
+    # Load-only check: these modules are not referenced here, just required to import.
+    for _module in ("alerts", "analysis", "config", "data", "scheduler", "main"):
+        importlib.import_module(f"backend.{_module}")
+    from backend import database, opportunities  # noqa: E402
 except Exception as exc:  # pragma: no cover
     raise ImportError(f"Fatal import error — aborting smoke test suite: {exc}") from exc
 

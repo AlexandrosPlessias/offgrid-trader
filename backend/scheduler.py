@@ -677,7 +677,7 @@ class MonitorScheduler:
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=sleep_for)
                 except asyncio.TimeoutError:
-                    pass
+                    pass  # timeout is the normal path — no stop requested, run the next scan
         finally:
             self.running = False
             _log.info("stopped")
@@ -704,7 +704,7 @@ class MonitorScheduler:
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=poll_seconds)
             except asyncio.TimeoutError:
-                pass
+                pass  # timeout is the normal path — no stop requested, poll exits again
 
     def start(self) -> None:
         """Start the loop if it is not already running."""

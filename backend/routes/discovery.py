@@ -275,10 +275,10 @@ async def discovery_refresh() -> StreamingResponse:
                     await asyncio.to_thread(update_discovery_run, run_id, "error", 0, str(exc))
                 except Exception:  # noqa: S110
                     pass
-            # Truncate to 300 chars so internal paths/stack details are not
-            # forwarded verbatim to the client (CodeQL py/stack-trace-exposure).
-            _err_msg = str(exc)[:300].replace("\r", "").replace("\n", " ")
-            yield _sse_frame({"type": "error", "message": _err_msg})
+            # Details stay in the server log; the client gets a fixed message.
+            yield _sse_frame(
+                {"type": "error", "message": "Discovery run failed — see server logs."}
+            )
         finally:
             # Catch asyncio.CancelledError (client disconnect / ASGI teardown)
             # which bypasses the except block but still runs finally.  Only

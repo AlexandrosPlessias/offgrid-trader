@@ -487,9 +487,9 @@ async def backtest_experiment_advisor(run_id: int) -> dict[str, Any]:
     errs = _validate_llm_json(result, "experiment_selection.schema.json")
     if errs:
         _log.warning(
-            "experiment_advisor v2 schema errors run=%d: %s",
-            run_id,
-            str(errs).replace("\r", "").replace("\n", ""),
+            "experiment_advisor v2 schema errors run=%s: %s",
+            _log_safe(str(run_id)),
+            _log_safe(str(errs)),
         )
         try:
             repaired = _repair_llm_json(raw, errs, call_llm, system_prompt)
@@ -509,10 +509,10 @@ async def backtest_experiment_advisor(run_id: int) -> dict[str, Any]:
         selected_candidate = dict(low_risk[0] if low_risk else candidates[0])
         selected_candidate["_auto_selected"] = True
         _log.info(
-            "experiment_advisor run=%d: LLM returned unknown id %s; auto-selected %s",
-            run_id,
-            str(sel_id).replace("\r", "").replace("\n", ""),
-            str(selected_candidate["candidate_id"]).replace("\r", "").replace("\n", ""),
+            "experiment_advisor run=%s: LLM returned unknown id %s; auto-selected %s",
+            _log_safe(str(run_id)),
+            _log_safe(str(sel_id)),
+            _log_safe(str(selected_candidate["candidate_id"])),
         )
 
     result["selected_candidate"] = selected_candidate
@@ -707,9 +707,9 @@ async def backtest_review(run_id: int) -> dict[str, Any]:
     errs = _validate_llm_json(result, "backtest_review.schema.json")
     if errs:
         _log.warning(
-            "backtest_review v2 schema errors run=%d: %s",
-            run_id,
-            str(errs).replace("\r", "").replace("\n", ""),
+            "backtest_review v2 schema errors run=%s: %s",
+            _log_safe(str(run_id)),
+            _log_safe(str(errs)),
         )
         try:
             repaired = _repair_llm_json(raw, errs, call_llm, system_prompt)

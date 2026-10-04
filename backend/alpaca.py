@@ -253,21 +253,13 @@ class AlpacaClient:
             "stop_loss": {"stop_price": str(stop_2dp)},
             "take_profit": {"limit_price": str(tp_2dp)},
         }
-        # Sanitise user-supplied strings before logging to prevent log-injection
-        # (CodeQL py/log-injection: strip CR/LF that could forge log lines).
-        # entry_price/stop_2dp/tp_2dp are floats formatted with %.2f — CR/LF is impossible.
-        safe_side = side.replace("\r", "").replace("\n", "")
-        safe_ticker = ticker.replace("\r", "").replace("\n", "")
-        _log.info(  # lgtm [py/log-injection]
-            "alpaca: placing %s %s qty=%d (notional=$%.0f @ $%.2f) stop=%.2f tp=%.2f",
-            safe_side,
-            safe_ticker,
-            qty,
-            notional,
-            entry_price,
-            stop_2dp,
-            tp_2dp,
+        msg = (
+            f"alpaca: placing {side} {ticker} qty={qty} (notional=${notional:.0f} "
+            f"@ ${entry_price:.2f}) stop={stop_2dp:.2f} tp={tp_2dp:.2f}"
         )
+        # Every value here traces back to the request; flatten line breaks so none
+        # can forge a log entry.
+        _log.info("%s", msg.replace("\r", " ").replace("\n", " "))
         return self._post("/v2/orders", body)
 
     def place_notional_order(

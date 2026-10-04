@@ -66,8 +66,13 @@ def _alpaca_preview(client_fn) -> dict[str, Any]:  # type: ignore[type-arg]
                 for p in positions
             ],
         }
-    except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc), "open_orders": 0, "open_positions": 0}
+    except Exception:  # noqa: BLE001
+        _log.exception("Alpaca reset preview failed")
+        return {
+            "error": "Alpaca unavailable — see server logs.",
+            "open_orders": 0,
+            "open_positions": 0,
+        }
 
 
 @router.get("/admin/reset-preview")
@@ -117,9 +122,9 @@ def execute_reset(_: str = Depends(_require_admin)) -> dict[str, Any]:  # noqa: 
         if orders:
             client.cancel_all_orders()
         results["paper"]["orders_cancelled"] = len(orders)
-    except AlpacaError as exc:
-        _log.warning("Paper Alpaca reset failed: %s", exc)
-        results["paper"]["error"] = str(exc)
+    except AlpacaError:
+        _log.exception("Paper Alpaca reset failed")
+        results["paper"]["error"] = "Paper Alpaca reset failed — see server logs."
 
     # ── Frac Alpaca ───────────────────────────────────────────────────────────
     try:
@@ -132,16 +137,16 @@ def execute_reset(_: str = Depends(_require_admin)) -> dict[str, Any]:  # noqa: 
         if frac_orders:
             frac.cancel_all_orders()
         results["frac"]["orders_cancelled"] = len(frac_orders)
-    except AlpacaError as exc:
-        _log.warning("Frac Alpaca reset failed: %s", exc)
-        results["frac"]["error"] = str(exc)
+    except AlpacaError:
+        _log.exception("Frac Alpaca reset failed")
+        results["frac"]["error"] = "Frac Alpaca reset failed — see server logs."
 
     # ── Database ──────────────────────────────────────────────────────────────
     try:
         results["db"] = clear_selected_data(_RESET_CATEGORIES)
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         _log.exception("DB reset failed")
-        results["db"]["error"] = str(exc)
+        results["db"]["error"] = "Database reset failed — see server logs."
 
     _log.warning("Trading state reset executed: %s", results)
     return results
