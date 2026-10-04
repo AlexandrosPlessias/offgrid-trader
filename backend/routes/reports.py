@@ -1164,9 +1164,15 @@ def _report_comparability(ra: dict[str, Any], rb: dict[str, Any]) -> tuple[str, 
                 "partial",
                 f"The windows overlap by {overlap} {unit}, so activity is double-counted.",
             )
+        # Consecutive means B starts the day after A ends — any missing day is a gap.
         gap = (b_start - a_end).days
-        if overlap <= 0 and gap > max(1, round(0.1 * max(len_a, len_b))):
-            _cap("partial", f"The periods are not consecutive ({gap}-day gap between them).")
+        if overlap <= 0 and gap != 1:
+            missing = gap - 1
+            _cap(
+                "partial",
+                f"The periods are not consecutive ({missing} day{'s' if missing != 1 else ''} "
+                "missing between them).",
+            )
     else:
         _cap("partial", "Window dates are missing on at least one report.")
 
@@ -1408,7 +1414,18 @@ async def review_report_comparison(request: ReportCompareRequest) -> dict[str, A
         if isinstance(i, dict) and i.get("setting") in allowed and _tuning_value_error(i) is None
     ]
     if grade == "none":
-        result["verdict"] = "inconclusive"
+        # The deterministic gate wins: discard every claim the model made, not just the verdict.
+        result = {
+            "verdict": "inconclusive",
+            "verdict_confidence": "none",
+            "summary": "These two reports cannot be compared — "
+            + "; ".join(reasons or ["the comparability check failed"]),
+            "comparability_note": "Comparability is none, so no performance or tuning "
+            "conclusions are drawn.",
+            "good": [],
+            "bad": [],
+            "improve": [],
+        }
 
     result["comparability"] = grade
     result["comparability_reasons"] = reasons

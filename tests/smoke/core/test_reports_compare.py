@@ -302,6 +302,8 @@ def test_comparability_grades(check):
     check("non-consecutive periods → partial", grade == "partial")
     grade, reasons = rep._report_comparability(*_pair(window=("2004-01-07", "2004-01-13", 7)))
     check("a single shared day → partial", grade == "partial", str(reasons))
+    grade, reasons = rep._report_comparability(*_pair(window=("2004-01-10", "2004-01-16", 7)))
+    check("two missing days between windows → partial", grade == "partial", str(reasons))
     grade, _ = rep._report_comparability(*_pair(signals=3))
     check("sharp signal-volume gap → partial", grade == "partial")
 
@@ -418,6 +420,12 @@ def test_review_forces_inconclusive_when_not_comparable(check):
     with mock.patch.object(analysis, "call_llm", _fake_review_llm):
         body = _client.post("/reports/compare/review", json={"a": a, "b": b}).json()
     check("grade none forces inconclusive verdict", body.get("verdict") == "inconclusive")
+    check("the model's summary is discarded", body.get("summary") != "B is better.")
+    check(
+        "no findings or suggestions survive a none grade",
+        body.get("good") == [] and body.get("bad") == [] and body.get("improve") == [],
+        str({k: body.get(k) for k in ("good", "bad", "improve")}),
+    )
 
 
 def test_weekly_report_persists_frac_scoped_snapshot(check):

@@ -61,7 +61,7 @@ def test_scan_runs_once_per_run_for_qualifying_tickers(check):
     run_id = _seed_run()
     calls: list[list[str]] = []
 
-    async def _fake_scans(rid, tickers):
+    async def _fake_scans(_rid, tickers, _state):
         calls.append(list(tickers))
 
     with (
@@ -87,12 +87,30 @@ def test_confidence_scan_pipeline_cannot_trade(check):
         async def run(self):
             return mock.Mock(context=mock.Mock(analysis={"trend": "x"}))
 
-    disc._confscan.update(run_id=-1, pending={"ZCNEW"}, failed=set())
+    state = {"pending": {"ZCNEW"}, "failed": set(), "tasks": set()}
     with mock.patch("backend.agent.TickerAgent", _FakeAgent):
-        asyncio.run(disc._run_confidence_scans(-1, ["ZCNEW"]))
+        asyncio.run(disc._run_confidence_scans(-1, ["ZCNEW"], state))
     skills = seen[0] if seen else []
     forbidden = {"PersistSkill", "PaperTradeSkill", "FracTradeSkill", "AlertSkill"}
     check("pipeline ran", bool(skills), str(skills))
     check("no signal, trade or alert skills", not forbidden & set(skills), str(skills))
     check("analysis is still saved", "SaveAnalysisSkill" in skills)
-    check("pending cleared when done", "ZCNEW" not in disc._confscan["pending"])
+    check("pending cleared when done", "ZCNEW" not in state["pending"])
+
+
+def test_overlapping_runs_keep_separate_scan_state(check):
+    class _FailingAgent:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def run(self):
+            raise RuntimeError("boom")
+
+    older, newer = disc._scan_state(-101), disc._scan_state(-102)
+    older["pending"].add("ZSHARED")
+    newer["pending"].add("ZSHARED")
+    with mock.patch("backend.agent.TickerAgent", _FailingAgent):
+        asyncio.run(disc._run_confidence_scans(-101, ["ZSHARED"], older))
+    check("older run's task finished its own ticker", "ZSHARED" in older["failed"])
+    check("newer run's ticker is still scanning", "ZSHARED" in newer["pending"])
+    check("newer run is not marked failed", "ZSHARED" not in newer["failed"])

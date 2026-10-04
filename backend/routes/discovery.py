@@ -203,9 +203,20 @@ def discovery_run_candidates(run_id: int) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Explorer confidence for trending candidates
 # --------------------------------------------------------------------------- #
-# Tickers being scanned / that failed, for the run currently being scanned.
-_confscan: dict[str, Any] = {"run_id": None, "pending": set(), "failed": set(), "task": None}
+# Scan state per discovery run — {run_id: {"pending", "failed", "tasks"}} — so a task
+# from an older run can never change the status reported for a newer one.
+_confscan_runs: dict[int, dict[str, set]] = {}
+_CONFSCAN_KEEP_RUNS = 5
 _CONFSCAN_KEY = "discovery_confidence_scanned"  # {"run_id": int, "tickers": [...]}
+
+
+def _scan_state(run_id: int) -> dict[str, set]:
+    """This run's scan state, pruning finished older runs so the map stays small."""
+    state = _confscan_runs.setdefault(run_id, {"pending": set(), "failed": set(), "tasks": set()})
+    idle = sorted(r for r, s in _confscan_runs.items() if r != run_id and not s["pending"])
+    for old in idle[: max(0, len(_confscan_runs) - _CONFSCAN_KEEP_RUNS)]:
+        del _confscan_runs[old]
+    return state
 
 
 def _attempted(run_id: int) -> set[str]:
@@ -216,7 +227,7 @@ def _attempted(run_id: int) -> set[str]:
     return set(rec.get("tickers") or []) if rec.get("run_id") == run_id else set()
 
 
-async def _run_confidence_scans(run_id: int, tickers: list[str]) -> None:
+async def _run_confidence_scans(run_id: int, tickers: list[str], state: dict[str, set]) -> None:
     """Analysis-only Explorer scans: fetch, analyse, detect, save the analysis.
 
     Deliberately leaves out signal persistence, both trade skills and alerts, so a
@@ -236,12 +247,12 @@ async def _run_confidence_scans(run_id: int, tickers: list[str]) -> None:
                 ticker, memory=_memory, skill_classes=skills, send_alerts=False
             ).run()
             if not result.context.analysis:
-                _confscan["failed"].add(ticker)
+                state["failed"].add(ticker)
         except Exception:
             _log.exception("discovery: confidence scan failed for %s", _log_safe(str(ticker)))
-            _confscan["failed"].add(ticker)
+            state["failed"].add(ticker)
         finally:
-            _confscan["pending"].discard(ticker)
+            state["pending"].discard(ticker)
     _log.info("discovery: confidence scans for run %s finished", _log_safe(str(run_id)))
 
 
@@ -274,11 +285,12 @@ async def start_confidence_scan(run_id: int) -> dict[str, Any]:
     set_setting(
         _CONFSCAN_KEY, json.dumps({"run_id": run_id, "tickers": sorted(attempted | set(todo))})
     )
-    if _confscan["run_id"] != run_id:
-        _confscan.update(run_id=run_id, pending=set(), failed=set())
-    _confscan["pending"].update(todo)
-    # Keep a reference so the task isn't garbage-collected mid-run.
-    _confscan["task"] = asyncio.create_task(_run_confidence_scans(run_id, todo))
+    state = _scan_state(run_id)
+    state["pending"].update(todo)
+    # Hold a reference until the task finishes so it isn't garbage-collected mid-run.
+    task = asyncio.create_task(_run_confidence_scans(run_id, todo, state))
+    state["tasks"].add(task)
+    task.add_done_callback(state["tasks"].discard)
     return {"started": todo, "skipped": None}
 
 
@@ -287,14 +299,14 @@ def candidate_confidence(run_id: int) -> dict[str, Any]:
     """Latest Explorer confidence per candidate, plus each ticker's scan status."""
     tickers = [c["ticker"] for c in _run_candidates(run_id)]
     latest = get_latest_analysis_confidence(tickers)
-    same_run = _confscan["run_id"] == run_id
+    state = _confscan_runs.get(run_id) or {"pending": set(), "failed": set()}
     out: dict[str, dict[str, Any]] = {}
     for t in tickers:
-        if same_run and t in _confscan["pending"]:
+        if t in state["pending"]:
             out[t] = {"status": "scanning"}
         elif t in latest:
             out[t] = {"status": "done", **latest[t]}
-        elif same_run and t in _confscan["failed"]:
+        elif t in state["failed"]:
             out[t] = {"status": "failed"}
         else:
             out[t] = {"status": "none"}
