@@ -740,6 +740,26 @@ def _run_report(
     context["window"] = {"start": since, "end": date_str, "days": window_days}
     context["window_economics"] = window_eco
     context["tuning"] = _current_tuning(mode)
+
+    # Probe the frac Alpaca connection so the LLM and the notification body can
+    # flag a silent credential/connectivity failure (e.g. secret rotated, account
+    # blocked, or the frac profile disabled between runs).
+    frac_conn: dict[str, Any] = {"ok": False, "error": "not checked"}
+    try:
+        from backend.alpaca import AlpacaError, get_frac_client
+
+        _frac_acct = get_frac_client().get_account()
+        frac_conn = {
+            "ok": True,
+            "account_status": _frac_acct.get("status"),
+            "trading_blocked": _frac_acct.get("trading_blocked", False),
+            "buying_power": _frac_acct.get("buying_power"),
+            "equity": _frac_acct.get("equity"),
+        }
+    except Exception as _exc:
+        frac_conn = {"ok": False, "error": str(_exc)}
+    context["frac_connection"] = frac_conn
+
     metrics = _combined_metrics(
         window_label, report_eco, report_feco, signals, report_top_bracket, report_top_frac
     )
@@ -851,6 +871,23 @@ def _run_report(
         report_type=report_type,
         model_setting_key="llm_model_range" if is_range else None,
     )
+
+    # Append frac connection status line so it always appears regardless of LLM output.
+    if frac_conn.get("ok"):
+        _bp = frac_conn.get("buying_power")
+        _eq = frac_conn.get("equity")
+        _blocked = frac_conn.get("trading_blocked")
+        _acct_status = frac_conn.get("account_status", "")
+        _conn_line = (
+            f"🔗 Frac connection: OK · {_acct_status}"
+            + (f" · equity ${_eq}" if _eq is not None else "")
+            + (f" · buying power ${_bp}" if _bp is not None else "")
+            + (" · ⚠️ trading blocked" if _blocked else "")
+        )
+    else:
+        _conn_line = f"🔴 Frac connection FAILED: {frac_conn.get('error', 'unknown error')}"
+    notification_body = notification_body + "\n\n" + _conn_line
+    full_body = full_body + "\n\n" + _conn_line
 
     results: dict[str, Any] = {}
     if notify:

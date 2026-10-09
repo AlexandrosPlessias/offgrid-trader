@@ -1123,7 +1123,7 @@ def evict_cache_entries(older_than_hours: int = 168, db_path: str | None = None)
 
     Default: 7 days.  Returns the number of rows deleted.
     """
-    cutoff = (datetime.utcnow() - timedelta(hours=older_than_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=older_than_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     with _connect(db_path) as conn:
         n = conn.execute("DELETE FROM data_cache WHERE cached_at < ?", (cutoff,)).rowcount
         conn.commit()
@@ -1330,26 +1330,33 @@ def get_blocked_event_counts(
             "SELECT meta FROM events WHERE category = 'order_blocked' AND ts >= ? AND ts < ?",
             (since_date, upper),
         ).fetchall()
-        dropped = conn.execute(
+        # Use meta JSON 'reason' field (authoritative) rather than a brittle
+        # message LIKE match — robust against future message wording changes.
+        dropped_rows = conn.execute(
             "SELECT meta FROM events WHERE category = 'scan' AND level = 'warning' "
-            "AND message LIKE 'Dropped %' AND ts >= ? AND ts < ?",
+            "AND ts >= ? AND ts < ?",
             (since_date, upper),
         ).fetchall()
 
     dropped_tickers: set[str] = set()
-    for (meta_str,) in dropped:
+    drop_count = 0
+    for (meta_str,) in dropped_rows:
         try:
-            ticker = (json.loads(meta_str) if meta_str else {}).get("ticker")
+            meta = json.loads(meta_str) if meta_str else {}
         except (ValueError, TypeError):
-            ticker = None
-        if ticker:
-            dropped_tickers.add(ticker)
+            meta = {}
+        if meta.get("reason") in ("not tradable", "no shortable/fractionable path"):
+            drop_count += 1
+            ticker = meta.get("ticker")
+            if ticker:
+                dropped_tickers.add(ticker)
 
     counts: dict[str, int] = {
         "position_cap_hits": 0,
         "budget_cap_hits": 0,
         "insufficient_funds_hits": 0,
-        "untradable_dropped": len(dropped),
+        "failed_hits": 0,
+        "untradable_dropped": drop_count,
         "untradable_tickers": len(dropped_tickers),
     }
     for (meta_str,) in rows:
@@ -1364,6 +1371,8 @@ def get_blocked_event_counts(
             counts["budget_cap_hits"] += 1
         elif reason == "insufficient_funds":
             counts["insufficient_funds_hits"] += 1
+        elif reason == "failed":
+            counts["failed_hits"] += 1
     return counts
 
 

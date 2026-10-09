@@ -220,11 +220,14 @@ def _check_valuation(
     ticker: str,
     fundamentals: dict[str, Any],
     price: float | None,
+    thresholds: "Thresholds | None" = None,
 ) -> list[dict[str, Any]]:
     """Rule 5 — fire a low-confidence flag at extreme P/E valuations only.
 
     Intentionally low confidence (40-42) so this rule reinforces rather than
     drives a signal.  Negative P/E (loss-making companies) is skipped.
+    P/E thresholds are configurable via PE_OVERBOUGHT / PE_OVERSOLD env vars
+    or the matching DB settings.
     """
     try:
         raw = fundamentals.get("trailing_pe") or fundamentals.get("pe_ratio")
@@ -233,26 +236,31 @@ def _check_valuation(
         return []
     if pe is None or pe <= 0:
         return []
-    if pe > 60:
+    if thresholds is None:
+        from .config import get_settings as _gs
+        thresholds = _gs().thresholds
+    pe_over = thresholds.pe_overbought
+    pe_cheap = thresholds.pe_oversold
+    if pe > pe_over:
         return [
             _new_candidate(
                 ticker,
                 "short",
                 40.0,
                 "valuation_extreme",
-                f"TTM P/E {pe:.1f}x -- severely overvalued (>60x)",
+                f"TTM P/E {pe:.1f}x -- severely overvalued (>{pe_over:.0f}x)",
                 price,
                 entry=price,
             )
         ]
-    if pe < 8:
+    if pe < pe_cheap:
         return [
             _new_candidate(
                 ticker,
                 "long",
                 42.0,
                 "valuation_cheap",
-                f"TTM P/E {pe:.1f}x -- deeply discounted (<8x)",
+                f"TTM P/E {pe:.1f}x -- deeply discounted (<{pe_cheap:.0f}x)",
                 price,
                 entry=price,
             )
@@ -497,7 +505,7 @@ def detect_opportunities(
     rsi_cands = _check_rsi(ticker, technicals, price, thresholds)
     vol_cands = _check_volume_spike(ticker, price_data, price, thresholds)
     macd_cands = _check_macd_crossover(ticker, technicals, price, thresholds)
-    val_cands = _check_valuation(ticker, fundamentals, price)
+    val_cands = _check_valuation(ticker, fundamentals, price, thresholds)
     candidates.extend(rsi_cands)
     candidates.extend(vol_cands)
     candidates.extend(macd_cands)
@@ -602,7 +610,8 @@ def detect_opportunities(
                     opp["target"] = round(entry + _RR * risk, 4)
                 elif opp.get("type") == "short":
                     opp["stop"] = round(entry + risk, 4)
-                    opp["target"] = round(entry - _RR * risk, 4)
+                    raw_target = round(entry - _RR * risk, 4)
+                    opp["target"] = raw_target if raw_target > 0 else None
 
     # Attach 52-week range snapshot so callers (and the signals table) can store
     # the annual price context captured at signal-detection time.
@@ -622,14 +631,37 @@ def detect_opportunities(
 def filter_by_confidence(
     opportunities: list[dict[str, Any]],
     floor: float | None = None,
+    long_floor: float | None = None,
+    short_floor: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Return only opportunities at or above the confidence *floor*."""
+    """Return only opportunities at or above the confidence floor.
 
+    *long_floor* and *short_floor* override *floor* for the respective signal
+    direction when set and > 0.  Pass ``None`` (default) to use the general
+    *floor* for both directions — the original single-floor behaviour.
+    """
     if floor is None:
-        from .database import get_confidence_floor
+        from .database import get_confidence_floor, get_setting
 
         floor = get_confidence_floor()
-    return [o for o in opportunities if o.get("confidence", 0) >= floor]
+        # Read per-direction overrides from DB when not supplied by caller.
+        if long_floor is None:
+            _raw = get_setting("long_confidence_floor", "")
+            long_floor = float(_raw) if _raw else 0.0
+        if short_floor is None:
+            _raw = get_setting("short_confidence_floor", "")
+            short_floor = float(_raw) if _raw else 0.0
+
+    def _passes(opp: dict) -> bool:
+        conf = opp.get("confidence", 0)
+        side = opp.get("type", "")
+        if side == "long" and long_floor and long_floor > 0:
+            return conf >= long_floor
+        if side == "short" and short_floor and short_floor > 0:
+            return conf >= short_floor
+        return conf >= floor
+
+    return [o for o in opportunities if _passes(o)]
 
 
 if __name__ == "__main__":

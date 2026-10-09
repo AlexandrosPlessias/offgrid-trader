@@ -94,7 +94,12 @@ info "Deploying frontend → Vercel"
 # If the stored session token is expired the script fails with clear instructions
 # rather than a cryptic "token not valid" error from the Vercel CLI.
 if [[ -z "${VERCEL_TOKEN:-}" ]]; then
-  AUTH_FILE="${HOME}/.local/share/com.vercel.cli/auth.json"
+  # macOS stores auth under ~/Library/Application Support; Linux uses ~/.local/share
+  if [[ "$(uname)" == "Darwin" ]]; then
+    AUTH_FILE="${HOME}/Library/Application Support/com.vercel.cli/auth.json"
+  else
+    AUTH_FILE="${HOME}/.local/share/com.vercel.cli/auth.json"
+  fi
   if [[ -f "$AUTH_FILE" ]]; then
     VERCEL_TOKEN=$(python3 -c "import json,sys; print(json.load(open('${AUTH_FILE}'))['token'])")
     # Validate expiry stored in auth.json.

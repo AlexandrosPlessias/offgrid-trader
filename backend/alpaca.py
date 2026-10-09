@@ -427,19 +427,22 @@ class AlpacaClient:
 # Module-level singleton — recreated when credentials change
 # --------------------------------------------------------------------------- #
 # Stored in a dict so the factory never needs a `global` statement.
-_client_state: dict[str, Any] = {"client": None, "key_id": ""}
+_client_state: dict[str, Any] = {"client": None, "cache_key": ""}
 
 
 def get_client() -> AlpacaClient:
     """Return a (possibly cached) :class:`AlpacaClient`.
 
-    Re-instantiates when the DB key_id changes so runtime credential
-    updates from the Settings page take effect without a restart.
+    Re-instantiates when credentials or the base URL change so runtime updates
+    from the Settings page take effect without a restart.
     """
-    current_key_id = get_setting("alpaca_key_id", "") or get_settings().alpaca.key_id
-    if _client_state["client"] is None or current_key_id != _client_state["key_id"]:
+    cfg = get_settings().alpaca
+    current_key_id = get_setting("alpaca_key_id", "") or cfg.key_id
+    current_url = get_setting("alpaca_paper_url", "") or cfg.paper_url
+    cache_key = f"{current_key_id}@{current_url}"
+    if _client_state["client"] is None or cache_key != _client_state["cache_key"]:
         _client_state["client"] = AlpacaClient()
-        _client_state["key_id"] = current_key_id
+        _client_state["cache_key"] = cache_key
     return _client_state["client"]
 
 

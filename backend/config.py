@@ -220,8 +220,12 @@ class MarketHours:
     open_minute: int = field(default_factory=lambda: _env_int("MARKET_OPEN_MINUTE", 30))
     close_hour: int = field(default_factory=lambda: _env_int("MARKET_CLOSE_HOUR", 16))
     close_minute: int = field(default_factory=lambda: _env_int("MARKET_CLOSE_MINUTE", 0))
-    # 0 = Monday ... 6 = Sunday. Default: Monday-Friday.
-    trading_days: tuple = (0, 1, 2, 3, 4)
+    # 0 = Monday ... 6 = Sunday.  Override with e.g. TRADING_DAYS=0,1,2,3,4,5,6 for 7-day.
+    trading_days: tuple = field(
+        default_factory=lambda: tuple(
+            int(d.strip()) for d in _env_str("TRADING_DAYS", "0,1,2,3,4").split(",") if d.strip()
+        )
+    )
 
     @property
     def tzinfo(self) -> ZoneInfo:
@@ -242,6 +246,16 @@ class Thresholds:
     )
     # Minimum AI/opportunity confidence (0-100) required to store/alert.
     confidence_floor: float = field(default_factory=lambda: _env_float("CONFIDENCE_FLOOR", 75.0))
+    # Per-direction floors (0.0 = fall back to confidence_floor).
+    long_confidence_floor: float = field(
+        default_factory=lambda: _env_float("LONG_CONFIDENCE_FLOOR", 0.0)
+    )
+    short_confidence_floor: float = field(
+        default_factory=lambda: _env_float("SHORT_CONFIDENCE_FLOOR", 0.0)
+    )
+    # P/E ratio extremes for the valuation rule.
+    pe_overbought: float = field(default_factory=lambda: _env_float("PE_OVERBOUGHT", 60.0))
+    pe_oversold: float = field(default_factory=lambda: _env_float("PE_OVERSOLD", 8.0))
 
 
 @dataclass(frozen=True)

@@ -180,6 +180,28 @@ async def lifespan(app: FastAPI):
         scheduler.start()
 
     trigger = _detect_startup_trigger()
+
+    # Startup credential probe — log a warning if either Alpaca profile is
+    # unconfigured so the issue surfaces in the event feed immediately rather
+    # than silently at the first scan or trade attempt.
+    _cred_warnings: list[str] = []
+    try:
+        from backend.alpaca import AlpacaError, get_client, get_frac_client
+        from backend.database import get_setting as _gs
+
+        _primary_key = _gs("alpaca_key_id", "") or get_settings().alpaca.key_id
+        _primary_sec = _gs("alpaca_secret_key", "") or get_settings().alpaca.secret_key
+        if not _primary_key or not _primary_sec:
+            _cred_warnings.append("primary Alpaca credentials missing (Settings → Paper Trading)")
+        _frac_key = _gs("frac_alpaca_key_id", "") or get_settings().frac.key_id
+        _frac_sec = _gs("frac_alpaca_secret_key", "") or get_settings().frac.secret_key
+        if not _frac_key or not _frac_sec:
+            _cred_warnings.append("frac Alpaca credentials missing (Settings → Fractional)")
+        for _warn in _cred_warnings:
+            save_event("system", f"⚠️ Startup warning: {_warn}", level="warning")
+    except Exception:
+        pass  # credential probe must never block startup
+
     save_event(
         "system",
         f"App started — v{__version__}",
